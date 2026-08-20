@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-server/
+coverage/
+.env
+.env.*
+!.env.example
+.DS_Store
+.research/
+.analysis-repos/
+.audit-source/
+*.log

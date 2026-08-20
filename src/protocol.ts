@@ -1,0 +1,207 @@
+import { z } from "zod";
+
+export const PROTOCOL_VERSION = 1 as const;
+
+export type AgentLifecycle = "starting" | "live" | "inactive" | "stopped" | "failed";
+export type AgentActivityState = "working" | "idle" | "blocked";
+export type AttentionKind = "approval" | "question" | "error";
+
+export interface AgentCapabilities {
+  send: boolean;
+  abort: boolean;
+  resume: boolean;
+  rename: boolean;
+  stop: boolean;
+  deactivate: boolean;
+  delete: boolean;
+  respond: boolean;
+}
+
+export interface AgentSummary {
+  id: string;
+  rootId: string;
+  parentId: string | null;
+  depth: number;
+  name: string;
+  description?: string;
+  lifecycle: AgentLifecycle;
+  activity: AgentActivityState;
+  attention: AttentionKind | null;
+  unreadCount: number;
+  childCount: number;
+  createdAt: string;
+  updatedAt: string;
+  capabilities: AgentCapabilities;
+}
+
+export interface CatalogSnapshot {
+  revision: number;
+  agents: AgentSummary[];
+}
+
+export type MessageRole = "user" | "assistant" | "system";
+export type MessageState = "complete" | "streaming" | "failed";
+
+export interface TranscriptMessage {
+  id: string;
+  role: MessageRole;
+  text: string;
+  state: MessageState;
+  createdAt: string;
+}
+
+export type ActivityKind = "tool" | "thinking" | "child" | "status";
+export type ActivityStatus = "running" | "waiting" | "complete" | "failed";
+
+export interface ActivityItem {
+  id: string;
+  kind: ActivityKind;
+  title: string;
+  detail?: string;
+  status: ActivityStatus;
+  createdAt: string;
+  agentId?: string;
+}
+
+export interface AttentionRequest {
+  id: string;
+  agentId: string;
+  kind: AttentionKind;
+  title: string;
+  detail?: string;
+  revision: number;
+  options: Array<{
+    id: string;
+    label: string;
+    tone: "default" | "safe" | "danger";
+  }>;
+  createdAt: string;
+}
+
+export interface AgentSnapshot {
+  revision: number;
+  agentId: string;
+  messages: TranscriptMessage[];
+  activity: ActivityItem[];
+  attention: AttentionRequest[];
+}
+
+export interface BootstrapResponse {
+  protocolVersion: typeof PROTOCOL_VERSION;
+  csrfToken: string;
+  backend: "demo" | "prime";
+  catalog: CatalogSnapshot;
+}
+
+export interface StreamCursor {
+  epoch: string;
+  seq: number;
+}
+
+export type GatewayEvent =
+  | { kind: "catalog.replaced"; payload: CatalogSnapshot }
+  | { kind: "agent.replaced"; payload: AgentSnapshot }
+  | { kind: "agent.message_added"; payload: TranscriptMessage }
+  | { kind: "agent.message_updated"; payload: TranscriptMessage }
+  | { kind: "agent.activity_added"; payload: ActivityItem }
+  | { kind: "agent.activity_updated"; payload: ActivityItem }
+  | { kind: "agent.attention_added"; payload: AttentionRequest }
+  | { kind: "agent.attention_resolved"; payload: { id: string } };
+
+export interface EventEnvelope {
+  version: typeof PROTOCOL_VERSION;
+  streamId: string;
+  epoch: string;
+  seq: number;
+  emittedAt: string;
+  event: GatewayEvent;
+}
+
+export type ServerFrame =
+  | {
+      type: "snapshot";
+      version: typeof PROTOCOL_VERSION;
+      streamId: string;
+      cursor: StreamCursor;
+      snapshot: CatalogSnapshot | AgentSnapshot;
+    }
+  | {
+      type: "replay";
+      version: typeof PROTOCOL_VERSION;
+      streamId: string;
+      cursor: StreamCursor;
+      events: EventEnvelope[];
+    }
+  | {
+      type: "event";
+      version: typeof PROTOCOL_VERSION;
+      envelope: EventEnvelope;
+    }
+  | {
+      type: "detached";
+      version: typeof PROTOCOL_VERSION;
+      streamId: string;
+      reason: "stream_gone" | "lagged" | "server_shutdown" | "invalid_cursor";
+    }
+  | { type: "pong"; version: typeof PROTOCOL_VERSION };
+
+export const attachFrameSchema = z.object({
+  type: z.literal("attach"),
+  version: z.literal(PROTOCOL_VERSION),
+  streamId: z.string().min(1).max(160),
+  since: z
+    .object({
+      epoch: z.string().min(1).max(128),
+      seq: z.number().int().nonnegative(),
+    })
+    .nullable()
+    .optional(),
+});
+
+export const detachFrameSchema = z.object({
+  type: z.literal("detach"),
+  version: z.literal(PROTOCOL_VERSION),
+  streamId: z.string().min(1).max(160),
+});
+
+export const clientFrameSchema = z.discriminatedUnion("type", [
+  attachFrameSchema,
+  detachFrameSchema,
+  z.object({ type: z.literal("ping"), version: z.literal(PROTOCOL_VERSION) }),
+]);
+
+export type ClientFrame = z.infer<typeof clientFrameSchema>;
+
+export const pairRequestSchema = z.object({
+  token: z.string().min(1).max(512),
+});
+
+export const sendMessageRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+  text: z.string().trim().min(1).max(100_000),
+});
+
+export const attentionResponseSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+  optionId: z.string().min(1).max(160),
+});
+
+export const abortRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+});
+
+export interface MutationAccepted {
+  accepted: true;
+  requestId: string;
+  revision: number;
+}
+
+export interface ProblemDetails {
+  type: string;
+  title: string;
+  status: number;
+  detail?: string;
+}

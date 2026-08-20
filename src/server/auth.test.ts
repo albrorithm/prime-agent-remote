@@ -1,0 +1,69 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { describe, expect, it } from "vitest";
+import { AuthService } from "./auth.js";
+import type { GatewayConfig } from "./config.js";
+
+function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
+  return {
+    host: "127.0.0.1",
+    port: 8787,
+    allowedOrigins: new Set(["https://agent.example.test"]),
+    pairingToken: "correct-token",
+    generatedPairingToken: false,
+    secureCookie: true,
+    backend: "demo",
+    primeModule: "compatible-module",
+    sessionTtlMs: 60_000,
+    ...overrides,
+  };
+}
+
+function request(headers: IncomingMessage["headers"] = {}, remoteAddress = "100.64.0.1"): IncomingMessage {
+  return { headers, socket: { remoteAddress } } as unknown as IncomingMessage;
+}
+
+function response(): { value: ServerResponse; headers: Map<string, string> } {
+  const headers = new Map<string, string>();
+  return {
+    headers,
+    value: {
+      setHeader(name: string, value: string | number | readonly string[]) {
+        headers.set(name.toLowerCase(), String(value));
+        return this;
+      },
+    } as unknown as ServerResponse,
+  };
+}
+
+describe("AuthService", () => {
+  it("exchanges the pairing token for a hardened session and validates CSRF", () => {
+    const auth = new AuthService(config());
+    const res = response();
+    const session = auth.pair(request({ origin: "https://agent.example.test" }), res.value, "correct-token");
+    expect(session).not.toBeNull();
+    const cookie = res.headers.get("set-cookie")!;
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Strict");
+    expect(cookie).toContain("Secure");
+
+    const cookiePair = cookie.split(";", 1)[0];
+    const authenticated = auth.authenticate(request({ cookie: cookiePair }));
+    expect(authenticated?.id).toBe(session?.id);
+    expect(auth.validateMutation(request({ origin: "https://agent.example.test", "x-csrf-token": session!.csrfToken }), session!)).toBe(true);
+    expect(auth.validateMutation(request({ origin: "https://other.example.test", "x-csrf-token": session!.csrfToken }), session!)).toBe(false);
+  });
+
+  it("ignores malformed cookies", () => {
+    const auth = new AuthService(config());
+    expect(() => auth.authenticate(request({ cookie: "prime_web_session=%ZZ" }))).not.toThrow();
+    expect(auth.authenticate(request({ cookie: "prime_web_session=%ZZ" }))).toBeNull();
+  });
+
+  it("bounds pairing attempts per remote address", () => {
+    const auth = new AuthService(config());
+    for (let index = 0; index < 5; index += 1) {
+      expect(auth.pair(request({}, "100.64.0.2"), response().value, "wrong-token")).toBeNull();
+    }
+    expect(auth.pair(request({}, "100.64.0.2"), response().value, "correct-token")).toBeNull();
+  });
+});
