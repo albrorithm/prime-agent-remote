@@ -6,6 +6,7 @@ interface Props {
   agents: AgentSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  drawerOpen?: boolean;
 }
 
 function stateLabel(agent: AgentSummary): string {
@@ -34,21 +35,43 @@ export function buildVisibleAgents(agents: AgentSummary[], expanded: Set<string>
   for (const list of byParent.values()) list.sort((a, b) => priority(a) - priority(b) || b.updatedAt.localeCompare(a.updatedAt));
 
   const output: AgentSummary[] = [];
-  const seen = new Set<string>();
+  const decided = new Set<string>();
+  const displayed = new Set<string>();
+  const knownIds = new Set(agents.map((item) => item.id));
   const visit = (item: AgentSummary) => {
-    if (seen.has(item.id)) return;
-    seen.add(item.id);
+    if (decided.has(item.id)) return;
+    decided.add(item.id);
+    displayed.add(item.id);
     output.push(item);
     if (expanded.has(item.id)) for (const child of byParent.get(item.id) ?? []) visit(child);
   };
   for (const root of byParent.get(null) ?? []) visit(root);
-  for (const orphan of agents) if (!seen.has(orphan.id)) visit(orphan);
+
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const item of agents) {
+      if (decided.has(item.id)) continue;
+      const parentId = item.parentId;
+      const parentMissing = parentId !== null && !knownIds.has(parentId);
+      const parentDisplayed = parentId !== null && displayed.has(parentId);
+      if (parentMissing || (parentDisplayed && expanded.has(parentId))) {
+        visit(item);
+        progress = true;
+      } else if (parentDisplayed || (parentId !== null && decided.has(parentId))) {
+        decided.add(item.id);
+        progress = true;
+      }
+    }
+  }
+
+  for (const item of agents) if (!decided.has(item.id)) visit(item);
   return output;
 }
 
-export function AgentTree({ agents, selectedId, onSelect }: Props) {
+export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
   const roots = agents.filter((agent) => agent.parentId === null).map((agent) => agent.id);
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(roots));
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(agents.map((item) => item.id)));
   const [focusId, setFocusId] = useState<string | null>(selectedId ?? roots[0] ?? null);
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
   const visible = useMemo(() => buildVisibleAgents(agents, expanded), [agents, expanded]);
@@ -66,6 +89,52 @@ export function AgentTree({ agents, selectedId, onSelect }: Props) {
   useEffect(() => {
     if (selectedId) setFocusId(selectedId);
   }, [selectedId]);
+
+  useEffect(() => {
+    setExpanded((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const item of agents) {
+        if (item.parentId === null && !current.has(item.id)) {
+          next.add(item.id);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [agents]);
+
+  const lastSelected = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedId || lastSelected.current === selectedId) return;
+    lastSelected.current = selectedId;
+    const byId = new Map(agents.map((item) => [item.id, item]));
+    setExpanded((current) => {
+      let changed = false;
+      const next = new Set(current);
+      let cursor = byId.get(selectedId)?.parentId ?? null;
+      const guard = new Set<string>();
+      while (cursor && !guard.has(cursor)) {
+        guard.add(cursor);
+        if (!next.has(cursor)) {
+          next.add(cursor);
+          changed = true;
+        }
+        cursor = byId.get(cursor)?.parentId ?? null;
+      }
+      return changed ? next : current;
+    });
+  }, [agents, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId || !drawerOpen) return;
+    const node = itemRefs.current.get(selectedId);
+    try {
+      node?.scrollIntoView({ block: "center" });
+    } catch {
+      // scrollIntoView is unavailable in some environments (jsdom); centering is best-effort.
+    }
+  }, [selectedId, drawerOpen]);
 
   function move(nextId: string | undefined) {
     if (!nextId) return;
@@ -147,6 +216,11 @@ export function AgentTree({ agents, selectedId, onSelect }: Props) {
               <strong>{agent.name}</strong>
               <span>{agent.description || stateLabel(agent)}</span>
             </span>
+            {agent.unreadCount > 0 && selectedId !== agent.id && (
+              <span className="tree-unread" aria-label={`${agent.unreadCount} unread`}>
+                {agent.unreadCount > 99 ? "99+" : agent.unreadCount}
+              </span>
+            )}
             <span className={`state-pill ${agent.attention ? "attention" : ""}`}>{stateLabel(agent)}</span>
           </div>
         );

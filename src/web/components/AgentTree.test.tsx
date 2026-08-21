@@ -30,12 +30,27 @@ const agents = [
 ];
 
 describe("AgentTree", () => {
-  it("renders arbitrary nesting with ARIA levels", () => {
-    render(<AgentTree agents={agents} selectedId="root" onSelect={vi.fn()} />);
+  it("renders the selected agent's full ancestry with ARIA levels", async () => {
+    render(<AgentTree agents={agents} selectedId="great-grandchild" onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(4));
     const items = screen.getAllByRole("treeitem");
-    expect(items).toHaveLength(4);
     expect(items.map((item) => item.getAttribute("aria-level"))).toEqual(["1", "2", "3", "4"]);
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
+  });
+
+  it("hides descendants of collapsed nodes instead of flattening them", async () => {
+    const onSelect = vi.fn();
+    render(<AgentTree agents={agents} selectedId="root" onSelect={onSelect} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(4));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse root" }));
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(1));
+    expect(screen.getByRole("treeitem", { name: /root/i })).toBeDefined();
+  });
+
+  it("expands root sessions that appear after mount", () => {
+    const { rerender } = render(<AgentTree agents={[makeAgent("root", null, 0)]} selectedId="root" onSelect={vi.fn()} />);
+    rerender(<AgentTree agents={[makeAgent("root", null, 0), makeAgent("new-root", null, 0), makeAgent("new-child", "new-root", 1)]} selectedId="root" onSelect={vi.fn()} />);
+    expect(screen.getByRole("treeitem", { name: /new-child/i })).toBeDefined();
   });
 
   it("supports tree arrow navigation and selection", async () => {
@@ -53,5 +68,15 @@ describe("AgentTree", () => {
   it("guards cycles rather than recursing forever", () => {
     const cyclic = [makeAgent("a", "b", 1), makeAgent("b", "a", 1)];
     expect(buildVisibleAgents(cyclic, new Set(["a", "b"])).map((item) => item.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("keeps collapsed subtrees hidden across catalog updates", () => {
+    expect(buildVisibleAgents(agents, new Set(agents.map((item) => item.id))).map((item) => item.id)).toEqual([
+      "root",
+      "child",
+      "grandchild",
+      "great-grandchild",
+    ]);
+    expect(buildVisibleAgents(agents, new Set(["root", "grandchild"])).map((item) => item.id)).toEqual(["root", "child"]);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSnapshot, GatewayEvent } from "../protocol";
-import { applyGatewayEvent } from "./gateway-store";
+import { applyGatewayEvent, reconcilePending } from "./gateway-store";
 
 const snapshot: AgentSnapshot = {
   revision: 1,
@@ -36,5 +36,26 @@ describe("applyGatewayEvent", () => {
     };
     const result = applyGatewayEvent(withAttention, { kind: "agent.attention_resolved", payload: { id: "a" } });
     expect(result.attention.map((item) => item.id)).toEqual(["b"]);
+  });
+});
+
+describe("reconcilePending", () => {
+  const pending = [
+    { id: "p1", text: "hello", createdAt: "2026-01-01T00:00:00.000Z" },
+    { id: "p2", text: "again", createdAt: "2026-01-01T00:00:01.000Z" },
+  ];
+
+  it("drops pending messages once the server echoes them", () => {
+    const messages = [{ id: "m1", role: "user" as const, text: "hello", state: "complete" as const, createdAt: "2026-01-01T00:00:02.000Z" }];
+    expect(reconcilePending(pending, messages).map((item) => item.id)).toEqual(["p2"]);
+  });
+
+  it("keeps everything while the server has not echoed", () => {
+    expect(reconcilePending(pending, [])).toHaveLength(2);
+  });
+
+  it("ignores assistant messages with matching text", () => {
+    const messages = [{ id: "m1", role: "assistant" as const, text: "hello", state: "complete" as const, createdAt: "2026-01-01T00:00:02.000Z" }];
+    expect(reconcilePending(pending, messages)).toHaveLength(2);
   });
 });

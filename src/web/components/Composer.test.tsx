@@ -58,6 +58,26 @@ describe("Composer", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled());
   });
 
+  it("sends on Enter and keeps Shift+Enter for a newline", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "first line");
+    await user.keyboard("{Shift>}{Enter}{/Shift}second line");
+    expect(input).toHaveValue("first line\nsecond line");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("first line\nsecond line"));
+  });
+
+  it("starts a slash command from the extensible composer menu", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    await user.click(screen.getByRole("button", { name: "Composer options" }));
+    await user.click(screen.getByRole("menuitem", { name: /Slash command/ }));
+    expect(screen.getByRole("textbox", { name: "Message Agent" })).toHaveValue("/");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("prevents duplicate stop requests while one is pending", async () => {
     let finish!: () => void;
     gatewayMock.current.selectedSnapshot = {
@@ -74,5 +94,12 @@ describe("Composer", () => {
     expect(stop).toBeDisabled();
     finish();
     await waitFor(() => expect(stop).toBeEnabled());
+  });
+
+  it("persists drafts to session storage for reload recovery", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    await user.type(screen.getByRole("textbox", { name: "Message Agent" }), "survives reload");
+    expect(sessionStorage.getItem("prime-web-drafts")).toContain("survives reload");
   });
 });

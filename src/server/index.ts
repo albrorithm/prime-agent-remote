@@ -6,6 +6,7 @@ import {
   abortRequestSchema,
   attentionResponseSchema,
   clientFrameSchema,
+  createSessionRequestSchema,
   pairRequestSchema,
   PROTOCOL_VERSION,
   sendMessageRequestSchema,
@@ -34,7 +35,7 @@ const hub = new EventHub();
 await backend.initialize(hub);
 const auth = new AuthService(config);
 const staticRoot = path.resolve(process.cwd(), "dist");
-const mutationCache = new MutationCache<MutationAccepted>(10 * 60_000);
+const mutationCache = new MutationCache<unknown>(10 * 60_000);
 const mutationTimes = new Map<string, number[]>();
 
 function securityHeaders(res: ServerResponse): void {
@@ -96,12 +97,12 @@ function allowMutation(req: IncomingMessage, res: ServerResponse, session: Authe
   return true;
 }
 
-async function deduplicated(
+async function deduplicated<T>(
   session: AuthenticatedSession,
   requestId: string,
-  operation: () => Promise<MutationAccepted>,
-): Promise<MutationAccepted> {
-  return mutationCache.run(session.id, requestId, operation);
+  operation: () => Promise<T>,
+): Promise<T> {
+  return mutationCache.run(session.id, requestId, operation) as Promise<T>;
 }
 
 function decodeSegment(value: string): string | null {
@@ -148,7 +149,27 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     return true;
   }
 
+  if (req.method === "GET" && pathname === "/api/v1/directories") {
+    const url = new URL(req.url ?? "/", "http://gateway.invalid");
+    const requested = url.searchParams.get("path") ?? undefined;
+    try {
+      json(res, 200, await backend.listDirectories(requested));
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      problem(res, 400, "Directory path must be absolute");
+    }
+    return true;
+  }
+
   if (!allowMutation(req, res, session)) return true;
+
+  if (req.method === "POST" && pathname === "/api/v1/sessions") {
+    const parsed = createSessionRequestSchema.safeParse(await readJson(req));
+    if (!parsed.success) { problem(res, 400, "Invalid session request"); return true; }
+    const result = await deduplicated(session, parsed.data.requestId, () => backend.createSession(parsed.data));
+    json(res, 202, result);
+    return true;
+  }
 
   const messageMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/messages$/);
   if (req.method === "POST" && messageMatch) {

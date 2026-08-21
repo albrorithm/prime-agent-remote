@@ -17,13 +17,37 @@ import type {
   GatewayEvent,
   ServerFrame,
   StreamCursor,
+  TranscriptMessage,
+  MutationAccepted,
 } from "../protocol";
 import { PROTOCOL_VERSION } from "../protocol";
 import * as api from "./api";
 import { ApiError } from "./api";
 
-export type MobileView = "agents" | "current" | "activity";
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
+
+export interface PendingMessage {
+  id: string;
+  text: string;
+  createdAt: string;
+}
+
+const SNAPSHOT_CAP = 24;
+const ERROR_TTL_MS = 6000;
+
+export function reconcilePending(pending: PendingMessage[], messages: TranscriptMessage[]): PendingMessage[] {
+  return pending.filter((item) => !messages.some((message) => message.role === "user" && message.text === item.text));
+}
+
+function pruneSnapshots(snapshots: Record<string, AgentSnapshot>, keep: string | null): Record<string, AgentSnapshot> {
+  const ids = Object.keys(snapshots);
+  if (ids.length <= SNAPSHOT_CAP) return snapshots;
+  const evictable = ids.filter((id) => id !== keep).slice(0, ids.length - SNAPSHOT_CAP);
+  if (!evictable.length) return snapshots;
+  const next = { ...snapshots };
+  for (const id of evictable) delete next[id];
+  return next;
+}
 
 interface State {
   authRequired: boolean;
@@ -32,8 +56,8 @@ interface State {
   backend: "demo" | "prime" | null;
   catalog: CatalogSnapshot;
   snapshots: Record<string, AgentSnapshot>;
+  pending: Record<string, PendingMessage[]>;
   selectedAgentId: string | null;
-  mobileView: MobileView;
   error: string | null;
 }
 
@@ -45,8 +69,10 @@ type Action =
   | { type: "snapshot"; value: AgentSnapshot }
   | { type: "event"; value: EventEnvelope }
   | { type: "agent_revision"; agentId: string; revision: number }
+  | { type: "pending_add"; agentId: string; value: PendingMessage }
+  | { type: "pending_remove"; agentId: string; id: string }
+  | { type: "evict_snapshot"; agentId: string }
   | { type: "select"; value: string }
-  | { type: "view"; value: MobileView }
   | { type: "error"; value: string | null };
 
 const emptyCatalog: CatalogSnapshot = { revision: 0, agents: [] };
@@ -57,8 +83,8 @@ const initialState: State = {
   backend: null,
   catalog: emptyCatalog,
   snapshots: {},
+  pending: {},
   selectedAgentId: null,
-  mobileView: "agents",
   error: null,
 };
 
@@ -111,7 +137,17 @@ function reducer(state: State, action: Action): State {
     case "catalog":
       return { ...state, catalog: action.value };
     case "snapshot":
-      return { ...state, snapshots: { ...state.snapshots, [action.value.agentId]: action.value } };
+      return {
+        ...state,
+        snapshots: pruneSnapshots(
+          { ...state.snapshots, [action.value.agentId]: action.value },
+          state.selectedAgentId,
+        ),
+        pending: {
+          ...state.pending,
+          [action.value.agentId]: reconcilePending(state.pending[action.value.agentId] ?? [], action.value.messages),
+        },
+      };
     case "event": {
       if (action.value.event.kind === "catalog.replaced") {
         return { ...state, catalog: action.value.event.payload };
@@ -124,6 +160,10 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         snapshots: { ...state.snapshots, [agentId]: updated },
+        pending: {
+          ...state.pending,
+          [agentId]: reconcilePending(state.pending[agentId] ?? [], updated.messages),
+        },
       };
     }
     case "agent_revision": {
@@ -137,10 +177,26 @@ function reducer(state: State, action: Action): State {
         },
       };
     }
+    case "pending_add": {
+      const current = state.pending[action.agentId] ?? [];
+      return { ...state, pending: { ...state.pending, [action.agentId]: [...current, action.value] } };
+    }
+    case "pending_remove": {
+      const current = state.pending[action.agentId];
+      if (!current) return state;
+      return {
+        ...state,
+        pending: { ...state.pending, [action.agentId]: current.filter((item) => item.id !== action.id) },
+      };
+    }
+    case "evict_snapshot": {
+      if (!(action.agentId in state.snapshots)) return state;
+      const snapshots = { ...state.snapshots };
+      delete snapshots[action.agentId];
+      return { ...state, snapshots };
+    }
     case "select":
       return { ...state, selectedAgentId: action.value };
-    case "view":
-      return { ...state, mobileView: action.value };
     case "error":
       return { ...state, error: action.value };
   }
@@ -149,9 +205,10 @@ function reducer(state: State, action: Action): State {
 interface GatewayContextValue extends State {
   selectedAgent: AgentSummary | null;
   selectedSnapshot: AgentSnapshot | null;
+  pendingMessages: PendingMessage[];
   pair: (token: string) => Promise<void>;
-  selectAgent: (id: string, openCurrent?: boolean) => Promise<void>;
-  setMobileView: (view: MobileView) => void;
+  selectAgent: (id: string) => Promise<void>;
+  createSession: (cwd: string, name?: string) => Promise<string>;
   send: (text: string) => Promise<void>;
   abort: () => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
@@ -173,7 +230,29 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const cursors = useRef(new Map<string, StreamCursor>());
   const subscriptions = useRef(new Set<string>(["catalog"]));
   const manuallyClosed = useRef(false);
+  const errorTimer = useRef<number | null>(null);
   stateRef.current = state;
+
+  const showError = useCallback((message: string | null) => {
+    if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
+    errorTimer.current = null;
+    dispatch({ type: "error", value: message });
+    if (message != null) {
+      errorTimer.current = window.setTimeout(() => {
+        errorTimer.current = null;
+        dispatch({ type: "error", value: null });
+      }, ERROR_TTL_MS);
+    }
+  }, []);
+
+  const detach = useCallback((streamId: string) => {
+    subscriptions.current.delete(streamId);
+    cursors.current.delete(streamId);
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "detach", version: PROTOCOL_VERSION, streamId }));
+    }
+  }, []);
 
   const attach = useCallback((streamId: string) => {
     const socket = socketRef.current;
@@ -209,7 +288,13 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       }
       if (frame.version !== PROTOCOL_VERSION || frame.type === "pong") return;
       if (frame.type === "detached") {
-        if (frame.reason !== "stream_gone") attach(frame.streamId);
+        if (frame.reason === "stream_gone") {
+          detach(frame.streamId);
+          const agentId = frame.streamId.startsWith("agent:") ? frame.streamId.slice(6) : null;
+          if (agentId) dispatch({ type: "evict_snapshot", agentId });
+          return;
+        }
+        attach(frame.streamId);
         return;
       }
       if (frame.type === "snapshot") {
@@ -244,7 +329,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       const delay = Math.min(30_000, 1_000 * 2 ** retryCount.current++);
       reconnectTimer.current = window.setTimeout(connect, delay);
     });
-  }, [attach]);
+  }, [attach, detach]);
 
   const initialize = useCallback(async () => {
     try {
@@ -259,9 +344,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       connect();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) dispatch({ type: "auth_required" });
-      else dispatch({ type: "error", value: error instanceof Error ? error.message : "Could not start the app" });
+      else showError(error instanceof Error ? error.message : "Could not start the app");
     }
-  }, [connect]);
+  }, [connect, showError]);
 
   useEffect(() => {
     manuallyClosed.current = false;
@@ -269,6 +354,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     return () => {
       manuallyClosed.current = true;
       if (reconnectTimer.current != null) window.clearTimeout(reconnectTimer.current);
+      if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
       socketRef.current?.close();
     };
   }, [initialize]);
@@ -281,39 +367,93 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [initialize],
   );
 
-  const selectAgent = useCallback(
-    async (id: string, openCurrent = true) => {
-      dispatch({ type: "select", value: id });
-      if (openCurrent) dispatch({ type: "view", value: "current" });
-      try {
-        if (!stateRef.current.snapshots[id]) {
-          const snapshot = await api.loadAgent(id);
-          dispatch({ type: "snapshot", value: snapshot });
-        }
-        const streamId = `agent:${id}`;
-        subscriptions.current.add(streamId);
-        attach(streamId);
-      } catch (error) {
-        dispatch({ type: "error", value: error instanceof Error ? error.message : "Could not open agent" });
+  const openAgent = useCallback(
+    async (id: string) => {
+      if (!stateRef.current.snapshots[id]) {
+        const snapshot = await api.loadAgent(id);
+        dispatch({ type: "snapshot", value: snapshot });
       }
+      const streamId = `agent:${id}`;
+      subscriptions.current.add(streamId);
+      for (const existing of subscriptions.current) {
+        if (existing !== "catalog" && existing !== streamId && !stateRef.current.snapshots[existing.slice(6)]) {
+          detach(existing);
+        }
+      }
+      attach(streamId);
     },
-    [attach],
+    [attach, detach],
   );
 
-  const send = useCallback(async (text: string) => {
-    const current = stateRef.current;
-    const id = current.selectedAgentId;
-    const snapshot = id ? current.snapshots[id] : null;
-    if (!id || !snapshot) throw new Error("No agent selected");
-    try {
-      const result = await api.sendMessage(id, current.csrfToken, snapshot.revision, text);
-      dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
-      dispatch({ type: "error", value: null });
-    } catch (error) {
-      dispatch({ type: "error", value: error instanceof Error ? error.message : "Message failed" });
-      throw error;
-    }
-  }, []);
+  const selectAgent = useCallback(
+    async (id: string) => {
+      dispatch({ type: "select", value: id });
+      try {
+        await openAgent(id);
+      } catch (error) {
+        showError(error instanceof Error ? error.message : "Could not open agent");
+      }
+    },
+    [openAgent, showError],
+  );
+
+  const runMutation = useCallback(
+    async (agentId: string, run: (revision: number) => Promise<MutationAccepted>) => {
+      const snapshot = stateRef.current.snapshots[agentId];
+      if (!snapshot) throw new Error("No agent selected");
+      try {
+        return await run(snapshot.revision);
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 409) throw error;
+        const fresh = await api.loadAgent(agentId);
+        dispatch({ type: "snapshot", value: fresh });
+        return run(fresh.revision);
+      }
+    },
+    [],
+  );
+
+  const createSession = useCallback(
+    async (cwd: string, name?: string) => {
+      const current = stateRef.current;
+      try {
+        const result = await api.createSession(current.csrfToken, cwd, name);
+        dispatch({ type: "select", value: result.agentId });
+        await openAgent(result.agentId);
+        showError(null);
+        return result.agentId;
+      } catch (error) {
+        showError(error instanceof Error ? error.message : "Could not create the session");
+        throw error;
+      }
+    },
+    [openAgent, showError],
+  );
+
+  const send = useCallback(
+    async (text: string) => {
+      const current = stateRef.current;
+      const id = current.selectedAgentId;
+      const snapshot = id ? current.snapshots[id] : null;
+      if (!id || !snapshot) throw new Error("No agent selected");
+      const pendingMessage: PendingMessage = {
+        id: crypto.randomUUID(),
+        text,
+        createdAt: new Date().toISOString(),
+      };
+      dispatch({ type: "pending_add", agentId: id, value: pendingMessage });
+      try {
+        const result = await runMutation(id, (revision) => api.sendMessage(id, current.csrfToken, revision, text));
+        dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
+        showError(null);
+      } catch (error) {
+        dispatch({ type: "pending_remove", agentId: id, id: pendingMessage.id });
+        showError(error instanceof Error ? error.message : "Message failed");
+        throw error;
+      }
+    },
+    [runMutation, showError],
+  );
 
   const abort = useCallback(async () => {
     const current = stateRef.current;
@@ -321,29 +461,31 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     const snapshot = id ? current.snapshots[id] : null;
     if (!id || !snapshot) return;
     try {
-      const result = await api.abortAgent(id, current.csrfToken, snapshot.revision);
+      const result = await runMutation(id, (revision) => api.abortAgent(id, current.csrfToken, revision));
       dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
-      dispatch({ type: "error", value: null });
+      showError(null);
     } catch (error) {
-      dispatch({ type: "error", value: error instanceof Error ? error.message : "Stop failed" });
+      showError(error instanceof Error ? error.message : "Stop failed");
       throw error;
     }
-  }, []);
+  }, [runMutation, showError]);
 
-  const respond = useCallback(async (attentionId: string, revision: number, optionId: string) => {
-    const current = stateRef.current;
-    try {
-      const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId);
-      const agentId = current.selectedAgentId;
-      if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
-      dispatch({ type: "error", value: null });
-    } catch (error) {
-      dispatch({ type: "error", value: error instanceof Error ? error.message : "Response failed" });
-      throw error;
-    }
-  }, []);
+  const respond = useCallback(
+    async (attentionId: string, revision: number, optionId: string) => {
+      const current = stateRef.current;
+      try {
+        const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId);
+        const agentId = current.selectedAgentId;
+        if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
+        showError(null);
+      } catch (error) {
+        showError(error instanceof Error ? error.message : "Response failed");
+        throw error;
+      }
+    },
+    [showError],
+  );
 
-  const setMobileView = useCallback((value: MobileView) => dispatch({ type: "view", value }), []);
   const reconnect = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
@@ -353,20 +495,22 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
 
   const selectedAgent = state.catalog.agents.find((item) => item.id === state.selectedAgentId) ?? null;
   const selectedSnapshot = state.selectedAgentId ? state.snapshots[state.selectedAgentId] ?? null : null;
+  const pendingMessages = state.selectedAgentId ? state.pending[state.selectedAgentId] ?? [] : [];
   const value = useMemo<GatewayContextValue>(
     () => ({
       ...state,
       selectedAgent,
       selectedSnapshot,
+      pendingMessages,
       pair,
       selectAgent,
-      setMobileView,
+      createSession,
       send,
       abort,
       respond,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pair, selectAgent, setMobileView, send, abort, respond, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, abort, respond, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

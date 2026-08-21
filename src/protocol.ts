@@ -24,6 +24,7 @@ export interface AgentSummary {
   depth: number;
   name: string;
   description?: string;
+  cwd?: string;
   lifecycle: AgentLifecycle;
   activity: AgentActivityState;
   attention: AttentionKind | null;
@@ -78,12 +79,27 @@ export interface AttentionRequest {
   createdAt: string;
 }
 
+export type AgentGoalStatus = "active" | "paused" | "budget_limited" | "complete" | "error";
+
+export interface AgentGoal {
+  status: AgentGoalStatus;
+  objective: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  continuationsUsed: number;
+  updatedAt?: string;
+  lastReason?: string;
+  lastError?: string;
+}
+
 export interface AgentSnapshot {
   revision: number;
   agentId: string;
   messages: TranscriptMessage[];
   activity: ActivityItem[];
   attention: AttentionRequest[];
+  goal?: AgentGoal;
 }
 
 export interface BootstrapResponse {
@@ -198,6 +214,31 @@ export interface MutationAccepted {
   requestId: string;
   revision: number;
 }
+
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  hidden: boolean;
+}
+
+export interface DirectoryListing {
+  path: string;
+  home: string;
+  crumbs: DirectoryEntry[];
+  entries: DirectoryEntry[];
+  truncated: boolean;
+}
+
+export interface SessionCreated {
+  requestId: string;
+  agentId: string;
+}
+
+export const createSessionRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  cwd: z.string().min(1).max(1024),
+  name: z.string().trim().min(1).max(200).optional(),
+});
 
 export interface ProblemDetails {
   type: string;

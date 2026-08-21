@@ -1,8 +1,10 @@
 import type {
   AgentSnapshot,
   BootstrapResponse,
+  DirectoryListing,
   MutationAccepted,
   ProblemDetails,
+  SessionCreated,
 } from "../protocol";
 
 export class ApiError extends Error {
@@ -46,7 +48,7 @@ export async function loadAgent(agentId: string): Promise<AgentSnapshot> {
   );
 }
 
-async function mutate(path: string, csrfToken: string, body: unknown): Promise<MutationAccepted> {
+async function mutate<T = MutationAccepted>(path: string, csrfToken: string, body: unknown): Promise<T> {
   return decode(
     await fetch(path, {
       method: "POST",
@@ -85,5 +87,18 @@ export function respondToAttention(
     requestId: crypto.randomUUID(),
     expectedRevision,
     optionId,
+  });
+}
+
+export async function listDirectories(path?: string): Promise<DirectoryListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  return decode(await fetch(`/api/v1/directories${query}`, { credentials: "same-origin", cache: "no-store" }));
+}
+
+export function createSession(csrfToken: string, cwd: string, name?: string): Promise<SessionCreated> {
+  return mutate<SessionCreated>("/api/v1/sessions", csrfToken, {
+    requestId: crypto.randomUUID(),
+    cwd,
+    ...(name ? { name } : {}),
   });
 }

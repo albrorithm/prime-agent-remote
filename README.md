@@ -5,17 +5,22 @@ A mobile-first, first-party web interface for Prime Agent. It keeps the daemon o
 ## What works
 
 - Recursive root-agent and subagent tree.
-- Mobile `Agents`, `Current`, and `Activity` views.
-- Wide three-panel layout.
-- Transcript streaming with stop and send controls.
+- Chat-centered mobile shell with a swipe-open session drawer and compact ancestry navigation.
+- On-demand activity drawer and a wide three-panel layout.
+- Transcript streaming, live goal progress, and mature stop/send composer controls.
+- Markdown-lite transcript rendering with copyable code blocks, including while streaming.
+- In-transcript search with match highlighting.
+- Optimistic send bubbles that reconcile against the server echo.
+- Quick replies and per-agent drafts that survive reloads.
 - Approval and question cards.
 - Authenticated HTTP mutations and WebSocket events.
+- Starting new sessions: pick a working directory with the in-app browser and name the session.
 - Per-stream sequence cursors, replay, and snapshot fallback.
 - Safe demo backend for UI review.
 - Live Prime Agent adapter through `DaemonClient` and `DaemonAgentConnection`.
 - Installable manifest and shell-only service worker.
 
-The browser never connects to the daemon socket directly. Terminal and arbitrary file access are intentionally not exposed.
+The browser never connects to the daemon socket directly. Terminal access and file contents are intentionally not exposed. The only filesystem surface is a read-only directory-name browser used to choose a working directory for new sessions; it lists directory names, never file contents.
 
 ## Requirements
 

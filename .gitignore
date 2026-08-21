@@ -10,3 +10,4 @@ coverage/
 .analysis-repos/
 .audit-source/
 *.log
+/start-live.local.sh

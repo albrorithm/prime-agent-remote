@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type {
   ActivityItem,
   AgentCapabilities,
@@ -6,18 +7,23 @@ import type {
   AgentSummary,
   AttentionRequest,
   CatalogSnapshot,
+  DirectoryListing,
   MutationAccepted,
+  SessionCreated,
   TranscriptMessage,
 } from "../protocol.js";
 import {
   BackendCapabilityError,
   BackendConflictError,
   BackendNotFoundError,
+  uniqueSessionName,
   type AbortInput,
   type AgentBackend,
+  type CreateSessionInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
+import { absoluteDirectoryPath, directoryCrumbs, selectDirectoryEntries, type ListedChild } from "./directories.js";
 import type { EventHub } from "./event-hub.js";
 
 const now = new Date().toISOString();
@@ -56,6 +62,7 @@ const initialAgents: AgentSummary[] = [
     depth: 0,
     name: "Mobile WebUI",
     description: "Building the first-party mobile experience",
+    cwd: "/projects/mobile-ui",
     activity: "working",
     childCount: 2,
   }),
@@ -86,6 +93,7 @@ const initialAgents: AgentSummary[] = [
     depth: 0,
     name: "Research archive",
     description: "Completed UI source audit",
+    cwd: "/projects/prime-agent",
     activity: "idle",
   }),
   agent({
@@ -147,12 +155,31 @@ function initialSnapshot(summary: AgentSummary): AgentSnapshot {
   return { revision: 1, agentId: summary.id, messages, activity, attention };
 }
 
+const demoTree = new Map<string, ListedChild[]>([
+  ["/", [
+    { name: "projects", path: "/projects", hidden: false, directory: true },
+    { name: "Documents", path: "/Documents", hidden: false, directory: true },
+  ]],
+  ["/projects", [
+    { name: "prime-agent", path: "/projects/prime-agent", hidden: false, directory: true },
+    { name: "mobile-ui", path: "/projects/mobile-ui", hidden: false, directory: true },
+    { name: ".secrets", path: "/projects/.secrets", hidden: true, directory: true },
+  ]],
+  ["/projects/prime-agent", []],
+  ["/projects/mobile-ui", [
+    { name: "src", path: "/projects/mobile-ui/src", hidden: false, directory: true },
+  ]],
+  ["/projects/mobile-ui/src", []],
+  ["/Documents", []],
+]);
+
 export class DemoBackend implements AgentBackend {
   readonly kind = "demo" as const;
   private hub!: EventHub;
   private readonly catalogState: CatalogSnapshot = { revision: 1, agents: structuredClone(initialAgents) };
   private readonly snapshots = new Map(initialAgents.map((item) => [item.id, initialSnapshot(item)]));
   private readonly timers = new Map<string, NodeJS.Timeout[]>();
+  private createdCount = 0;
 
   async initialize(hub: EventHub): Promise<void> {
     this.hub = hub;
@@ -254,6 +281,37 @@ export class DemoBackend implements AgentBackend {
     this.markAgent(snapshot.agentId, "idle", null);
     this.hub.publish(`agent:${snapshot.agentId}`, { kind: "agent.attention_resolved", payload: { id: input.attentionId } }, snapshot);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async listDirectories(requestedPath?: string): Promise<DirectoryListing> {
+    const target = absoluteDirectoryPath(requestedPath, "/");
+    const children = demoTree.get(target);
+    if (!children) throw new BackendNotFoundError("Directory not found");
+    const { entries, truncated } = selectDirectoryEntries(children);
+    return { path: target, home: "/", crumbs: directoryCrumbs(target), entries, truncated };
+  }
+
+  async createSession(input: CreateSessionInput): Promise<SessionCreated> {
+    if (!demoTree.has(input.cwd)) throw new BackendNotFoundError("Directory not found");
+    this.createdCount += 1;
+    const id = `root-created-${this.createdCount}`;
+    const baseName = input.name?.trim() || path.basename(input.cwd) || `New session ${this.createdCount}`;
+    const summary = agent({
+      id,
+      rootId: id,
+      parentId: null,
+      depth: 0,
+      name: uniqueSessionName(baseName, this.catalogState.agents.map((item) => item.name)),
+      description: `Created in ${input.cwd}`,
+      activity: "idle",
+      cwd: input.cwd,
+    });
+    this.catalogState.agents.push(summary);
+    this.catalogState.revision += 1;
+    this.snapshots.set(id, { revision: 1, agentId: id, messages: [], activity: [], attention: [] });
+    this.hub.register(`agent:${id}`, this.snapshots.get(id)!);
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    return { requestId: input.requestId, agentId: id };
   }
 
   async close(): Promise<void> {

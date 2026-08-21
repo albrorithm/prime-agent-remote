@@ -1,11 +1,19 @@
-import { Bot, CircleAlert, Search } from "lucide-react";
+import { Bot, CircleAlert, FolderPlus, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { AgentTree } from "./AgentTree";
+import { NewSessionPanel } from "./NewSessionPanel";
 
-export function AgentsPanel() {
+interface AgentsPanelProps {
+  visible?: boolean;
+  onClose?: () => void;
+  onNavigate?: () => void;
+}
+
+export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) {
   const { catalog, selectedAgentId, selectAgent } = useGateway();
   const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return catalog.agents;
@@ -28,31 +36,51 @@ export function AgentsPanel() {
   const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
   const workingCount = catalog.agents.filter((agent) => agent.activity === "working").length;
 
+  const navigate = (id: string) => {
+    void selectAgent(id);
+    onNavigate?.();
+  };
+
   return (
     <section className="panel agents-panel" aria-labelledby="agents-heading">
-      <header className="panel-header">
-        <div>
-          <p className="eyebrow">Prime Agent</p>
-          <h1 id="agents-heading">Agents</h1>
+      <header className="drawer-header">
+        <div className="drawer-title">
+          <img src="/prime-mark.svg" alt="" />
+          <div><p className="eyebrow">Prime Agent</p><h1 id="agents-heading">Sessions</h1></div>
         </div>
-        <div className="agent-count" aria-label={`${catalog.agents.length} agents`}><Bot />{catalog.agents.length}</div>
-      </header>
-      <div className="summary-strip" aria-label="Agent summary">
-        <span className={attentionCount ? "has-attention" : ""}><CircleAlert /> {attentionCount} need attention</span>
-        <span>{workingCount} working</span>
-      </div>
-      <label className="search-field">
-        <Search aria-hidden="true" />
-        <span className="sr-only">Search agents</span>
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agents" />
-      </label>
-      <div className="panel-scroll">
-        {filtered.length ? (
-          <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={(id) => void selectAgent(id)} />
-        ) : (
-          <p className="empty-state">No agents match that search.</p>
+        {!creating && (
+          <button className="icon-button new-session-trigger" onClick={() => setCreating(true)} aria-label="Start a new session"><FolderPlus /></button>
         )}
-      </div>
+        {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
+      </header>
+      {creating ? (
+        <NewSessionPanel
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            onNavigate?.();
+          }}
+        />
+      ) : (
+        <>
+          <div className="summary-strip" aria-label="Agent summary">
+            <span className={attentionCount ? "has-attention" : ""}><CircleAlert /> {attentionCount} attention</span>
+            <span><Bot /> {workingCount} working</span>
+          </div>
+          <label className="search-field">
+            <Search aria-hidden="true" />
+            <span className="sr-only">Search sessions and agents</span>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search sessions" />
+          </label>
+          <div className="panel-scroll">
+            {filtered.length ? (
+              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} drawerOpen={visible} />
+            ) : (
+              <p className="empty-state">No sessions match that search.</p>
+            )}
+          </div>
+        </>
+      )}
     </section>
   );
 }

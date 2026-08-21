@@ -1,25 +1,40 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { opendir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
 import type {
   ActivityItem,
   AgentCapabilities,
+  AgentGoal,
   AgentSnapshot,
   AgentSummary,
   AttentionRequest,
   CatalogSnapshot,
+  DirectoryListing,
   MutationAccepted,
+  SessionCreated,
   TranscriptMessage,
 } from "../protocol.js";
 import {
   BackendCapabilityError,
   BackendConflictError,
   BackendNotFoundError,
+  uniqueSessionName,
   type AbortInput,
   type AgentBackend,
+  type CreateSessionInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
+import {
+  absoluteDirectoryPath,
+  directoryCrumbs,
+  selectDirectoryEntries,
+  type ListedChild,
+} from "./directories.js";
 import type { EventHub } from "./event-hub.js";
 
 interface PrimeResponse {
@@ -32,6 +47,7 @@ interface PrimeSessionSummary {
   id: string;
   activeSessionId?: string;
   sessionId: string;
+  sessionFile?: string;
   sessionName?: string;
   lifecycle?: string;
   activity?: string;
@@ -52,6 +68,7 @@ interface PrimeSessionSummary {
   modified?: string;
   summary?: string;
   firstMessage?: string;
+  cwd?: string;
 }
 
 interface PrimeSnapshot {
@@ -63,6 +80,18 @@ interface PrimeSnapshot {
     isCompacting: boolean;
     isBashRunning: boolean;
     recap?: string;
+    goal?: {
+      active?: boolean;
+      status?: string;
+      objective?: string;
+      tokenBudget?: number;
+      tokensUsed?: number;
+      timeUsedSeconds?: number;
+      continuationsUsed?: number;
+      updatedAt?: number;
+      lastReason?: string;
+      lastError?: string;
+    };
   };
   messages: unknown[];
   streamingMessage?: unknown;
@@ -124,9 +153,10 @@ interface ConnectionRecord {
 interface PendingExtension {
   publicAgentId: string;
   connection: PrimeConnection;
-  method: string;
+  method: "confirm" | "select";
   payload: Record<string, unknown>;
   revision: number;
+  timer?: NodeJS.Timeout;
 }
 
 const defaultCapabilities: AgentCapabilities = {
@@ -148,6 +178,16 @@ function toIso(value: unknown, fallback = new Date().toISOString()): string {
   if (typeof value === "string" && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
   if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
   return fallback;
+}
+
+function isEmptyStub(summary: PrimeSessionSummary): boolean {
+  const firstMessage = typeof summary.firstMessage === "string" ? summary.firstMessage.trim() : "";
+  return (
+    !summary.sessionName &&
+    !summary.summary &&
+    !summary.activeSessionId &&
+    (!firstMessage || firstMessage === "(no messages)")
+  );
 }
 
 function messageText(message: unknown): string {
@@ -180,6 +220,116 @@ function projectMessage(message: unknown, index: number, streaming: boolean): Tr
     text: messageText(message),
     state: streaming ? "streaming" : "complete",
     createdAt: toIso(record.timestamp),
+  };
+}
+
+const SAVED_TRANSCRIPT_SCAN_BYTES = 64 * 1024 * 1024;
+const SAVED_TRANSCRIPT_MAX_LINE_CHARS = 1024 * 1024;
+const SAVED_TRANSCRIPT_MAX_MESSAGES = 1_000;
+const SAVED_TRANSCRIPT_MAX_TEXT_CHARS = 2 * 1024 * 1024;
+const SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS = 120_000;
+
+function conciseTitle(value: unknown, maxChars = 80): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const title = value.replace(/\s+/g, " ").trim();
+  if (!title || title === "(no messages)") return undefined;
+  return title.length > maxChars ? `${title.slice(0, maxChars - 1).trimEnd()}…` : title;
+}
+
+/** Project only conversational text from a daemon-designated session file. */
+export async function projectSavedSessionTranscript(sessionFile: string): Promise<TranscriptMessage[]> {
+  try {
+    const file = await stat(sessionFile);
+    if (!file.isFile() || file.size <= 0) return [];
+    const start = Math.max(0, file.size - SAVED_TRANSCRIPT_SCAN_BYTES);
+    const stream = createReadStream(sessionFile, { start, end: file.size - 1, highWaterMark: 64 * 1024 });
+    const decoder = new StringDecoder("utf8");
+    const messages: TranscriptMessage[] = [];
+    let totalTextChars = 0;
+    let currentLine = "";
+    let droppingLine = false;
+    let index = 0;
+
+    const consumeLine = (line: string) => {
+      let entry: Record<string, unknown>;
+      try {
+        entry = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") return;
+      const source = entry.message as Record<string, unknown>;
+      if (source.role !== "user" && source.role !== "assistant") return;
+      const text = messageText(source).slice(0, SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS);
+      if (!text) return;
+      const rawId = typeof entry.id === "string" ? entry.id : `${source.role}:${String(entry.timestamp ?? index)}:${index}`;
+      const projected: TranscriptMessage = {
+        id: opaqueId(rawId),
+        role: source.role,
+        text,
+        state: "complete",
+        createdAt: toIso(entry.timestamp ?? source.timestamp),
+      };
+      index += 1;
+      messages.push(projected);
+      totalTextChars += projected.text.length;
+      while (messages.length > SAVED_TRANSCRIPT_MAX_MESSAGES || totalTextChars > SAVED_TRANSCRIPT_MAX_TEXT_CHARS) {
+        totalTextChars -= messages.shift()?.text.length ?? 0;
+      }
+    };
+
+    const consumeChunk = (chunk: string, final = false) => {
+      const parts = chunk.split("\n");
+      for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+        const terminated = partIndex < parts.length - 1;
+        const part = parts[partIndex];
+        if (!droppingLine) {
+          if (currentLine.length + part.length <= SAVED_TRANSCRIPT_MAX_LINE_CHARS) currentLine += part;
+          else {
+            currentLine = "";
+            droppingLine = true;
+          }
+        }
+        if (terminated) {
+          if (!droppingLine && currentLine.trim()) consumeLine(currentLine);
+          currentLine = "";
+          droppingLine = false;
+        }
+      }
+      if (final && !droppingLine && currentLine.trim()) consumeLine(currentLine);
+    };
+
+    for await (const chunk of stream) consumeChunk(decoder.write(chunk as Buffer));
+    consumeChunk(decoder.end(), true);
+    return messages;
+  } catch {
+    return [];
+  }
+}
+
+function projectGoal(source: PrimeSnapshot["state"]["goal"]): AgentGoal | undefined {
+  if (!source || typeof source.objective !== "string") return undefined;
+  const objective = source.objective.trim().slice(0, 4000);
+  if (!objective) return undefined;
+  const allowed = new Set<AgentGoal["status"]>(["active", "paused", "budget_limited", "complete", "error"]);
+  const status = allowed.has(source.status as AgentGoal["status"])
+    ? source.status as AgentGoal["status"]
+    : source.active
+      ? "active"
+      : "paused";
+  const nonnegative = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+  return {
+    status,
+    objective,
+    tokenBudget: typeof source.tokenBudget === "number" && Number.isFinite(source.tokenBudget)
+      ? Math.max(0, Math.trunc(source.tokenBudget))
+      : undefined,
+    tokensUsed: nonnegative(source.tokensUsed),
+    timeUsedSeconds: nonnegative(source.timeUsedSeconds),
+    continuationsUsed: nonnegative(source.continuationsUsed),
+    updatedAt: typeof source.updatedAt === "number" && Number.isFinite(source.updatedAt) ? toIso(source.updatedAt) : undefined,
+    lastReason: typeof source.lastReason === "string" ? source.lastReason.slice(0, 1000) : undefined,
+    lastError: typeof source.lastError === "string" ? source.lastError.slice(0, 1000) : undefined,
   };
 }
 
@@ -236,7 +386,7 @@ export class PrimeBackend implements AgentBackend {
     if (summary.activeSessionId) await this.ensureConnection(agentId, summary.activeSessionId);
     const existing = this.snapshots.get(agentId);
     if (existing) return structuredClone(existing);
-    const inactive = this.projectInactiveSnapshot(agentId, summary);
+    const inactive = await this.projectInactiveSnapshot(agentId, summary);
     this.snapshots.set(agentId, inactive);
     this.hub.register(`agent:${agentId}`, inactive);
     return structuredClone(inactive);
@@ -267,19 +417,83 @@ export class PrimeBackend implements AgentBackend {
       throw new BackendCapabilityError("Unknown response option");
     }
     let response: { value: string } | { confirmed: boolean } | { cancelled: true };
-    if (input.optionId === "__prime_cancel__") response = { cancelled: true };
-    else if (pending.method === "confirm") response = { confirmed: input.optionId === "confirm" };
-    else if (pending.method === "select") response = { value: input.optionId };
-    else response = { cancelled: true };
+    if (pending.method === "confirm") response = { confirmed: input.optionId === "confirm" };
+    else if (input.optionId === "__prime_cancel__") response = { cancelled: true };
+    else response = { value: input.optionId };
     await pending.connection.respondToExtensionUiRequest(input.attentionId, response);
+    if (pending.timer) clearTimeout(pending.timer);
     this.pendingExtensions.delete(input.attentionId);
     await this.refreshConnection(pending.publicAgentId);
     const revision = this.requiredSnapshot(pending.publicAgentId).revision;
     return { accepted: true, requestId: input.requestId, revision };
   }
 
+  async listDirectories(requestedPath?: string): Promise<DirectoryListing> {
+    const home = homedir();
+    const target = absoluteDirectoryPath(requestedPath, home);
+    const children: ListedChild[] = [];
+    let handle;
+    try {
+      handle = await opendir(target);
+      for (;;) {
+        let entry;
+        try {
+          entry = await handle.read();
+        } catch {
+          break;
+        }
+        if (!entry) break;
+        if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+        const childPath = path.join(target, entry.name);
+        let directory = entry.isDirectory();
+        if (entry.isSymbolicLink()) {
+          try {
+            directory = (await stat(childPath)).isDirectory();
+          } catch {
+            continue;
+          }
+        }
+        if (!directory) continue;
+        children.push({ name: entry.name, path: childPath, hidden: entry.name.startsWith("."), directory: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+        throw new BackendNotFoundError("Directory not found");
+      }
+      throw new BackendCapabilityError("Directory cannot be listed");
+    } finally {
+      await handle?.close().catch(() => {});
+    }
+    const { entries, truncated } = selectDirectoryEntries(children);
+    return { path: target, home, crumbs: directoryCrumbs(target), entries, truncated };
+  }
+
+  async createSession(input: CreateSessionInput): Promise<SessionCreated> {
+    if (!path.isAbsolute(input.cwd)) throw new BackendCapabilityError("Working directory must be an absolute path");
+    const baseName = input.name?.trim() || path.basename(input.cwd) || "New session";
+    const name = uniqueSessionName(baseName, this.catalogState.agents.map((agent) => agent.name));
+    const response = await this.client.request({
+      type: "create",
+      name,
+      config: { cwd: input.cwd },
+    });
+    if (!response.success) throw new BackendNotFoundError(response.error || "The daemon could not create the session");
+    const data = (response.data ?? {}) as { activeSessionId?: string; sessionId?: string };
+    const activeSessionId = typeof data.activeSessionId === "string" ? data.activeSessionId : null;
+    const sessionId = typeof data.sessionId === "string" ? data.sessionId : null;
+    await this.refreshCatalog(true);
+    const publicId = (activeSessionId && this.publicByActive.get(activeSessionId))
+      ?? (sessionId && this.publicBySession.get(sessionId))
+      ?? null;
+    if (!publicId) throw new BackendNotFoundError("The created session did not appear in the catalog");
+    await this.agentSnapshot(publicId);
+    return { requestId: input.requestId, agentId: publicId };
+  }
+
   async close(): Promise<void> {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    for (const pending of this.pendingExtensions.values()) if (pending.timer) clearTimeout(pending.timer);
+    this.pendingExtensions.clear();
     for (const record of this.connections.values()) {
       if (record.refreshTimer) clearTimeout(record.refreshTimer);
       record.unsubscribe();
@@ -307,7 +521,9 @@ export class PrimeBackend implements AgentBackend {
       this.publicBySession.set(summary.sessionId, publicId);
       if (summary.activeSessionId) this.publicByActive.set(summary.activeSessionId, publicId);
     }
-    const projected = summaries.map((summary) => this.projectSummary(summary));
+    const projected = summaries
+      .filter((summary) => !isEmptyStub(summary))
+      .map((summary) => this.projectSummary(summary));
     const roots = new Map(projected.map((summary) => [summary.id, summary]));
     for (const item of projected) {
       let current = item;
@@ -337,10 +553,14 @@ export class PrimeBackend implements AgentBackend {
       : summary.parentActiveSessionId
         ? this.publicByActive.get(summary.parentActiveSessionId) ?? null
         : null;
-    const working = Boolean(
-      summary.isSessionActive || summary.isStreaming || summary.isCompacting || summary.isBashRunning || summary.hasRunningRlmChildren,
+    const working = Boolean(summary.activeSessionId) && (
+      summary.activity === "working" || Boolean(
+        summary.isStreaming || summary.isCompacting || summary.isBashRunning ||
+        summary.hasRunningRlmChildren || (summary.unfinishedActionCount ?? 0) > 0,
+      )
     );
-    const blocked = summary.taskState === "needs_input" || (summary.unfinishedActionCount ?? 0) > 0;
+    const pending = [...this.pendingExtensions.values()].find((request) => request.publicAgentId === id);
+    const attention = pending?.method === "confirm" ? "approval" : pending ? "question" : null;
     const lifecycle = !summary.activeSessionId
       ? "inactive"
       : summary.workerState === "failed"
@@ -348,17 +568,22 @@ export class PrimeBackend implements AgentBackend {
         : summary.workerState === "starting" || summary.workerState === "recovering"
           ? "starting"
           : "live";
+    const name = conciseTitle(summary.sessionName)
+      ?? conciseTitle(summary.firstMessage)
+      ?? conciseTitle(summary.summary)
+      ?? (parentId ? "Subagent" : "Untitled session");
     return {
       id,
       rootId: id,
       parentId,
       depth: Math.max(0, summary.rlmDepth ?? (parentId ? 1 : 0)),
-      name: summary.sessionName || (parentId ? "Subagent" : "Agent"),
+      name,
       description: summary.summary || (parentId ? "Delegated agent" : "Prime Agent session"),
+      cwd: typeof summary.cwd === "string" && summary.cwd ? summary.cwd : undefined,
       lifecycle,
-      activity: blocked ? "blocked" : working ? "working" : "idle",
-      attention: blocked ? "question" : null,
-      unreadCount: blocked ? 1 : 0,
+      activity: attention ? "blocked" : working ? "working" : "idle",
+      attention,
+      unreadCount: attention ? 1 : 0,
       childCount: 0,
       createdAt: toIso(summary.created || summary.lastActivityAt || summary.modified),
       updatedAt: toIso(summary.lastActivityAt || summary.modified || summary.created),
@@ -402,17 +627,33 @@ export class PrimeBackend implements AgentBackend {
   private handleConnectionEvent(record: ConnectionRecord, event: PrimeConnectionEvent): void {
     if (event.type === "extension_ui_request" && event.request) {
       const request = event.request;
-      const revision = (this.snapshots.get(record.publicId)?.revision ?? 0) + 1;
-      this.pendingExtensions.set(request.id, {
-        publicAgentId: record.publicId,
-        connection: record.connection,
-        method: request.method,
-        payload: request.payload,
-        revision,
-      });
+      if (request.method === "input" || request.method === "editor") {
+        void record.connection.respondToExtensionUiRequest(request.id, { cancelled: true }).catch((error) =>
+          console.error("Could not cancel unsupported Prime text dialog", error),
+        );
+      } else if (request.method === "confirm" || request.method === "select") {
+        const revision = (this.snapshots.get(record.publicId)?.revision ?? 0) + 1;
+        const pending: PendingExtension = {
+          publicAgentId: record.publicId,
+          connection: record.connection,
+          method: request.method,
+          payload: request.payload,
+          revision,
+        };
+        const timeout = Number(request.payload.timeout);
+        if (Number.isFinite(timeout) && timeout > 0) {
+          pending.timer = setTimeout(() => {
+            if (this.pendingExtensions.get(request.id) !== pending) return;
+            this.pendingExtensions.delete(request.id);
+            void this.refreshConnection(record.publicId);
+          }, timeout);
+        }
+        this.pendingExtensions.set(request.id, pending);
+      }
     }
     if (event.type === "closed") {
       record.unsubscribe();
+      this.clearPendingExtensions(record.publicId);
       this.connections.delete(record.publicId);
       void this.refreshCatalog(true);
       return;
@@ -437,7 +678,6 @@ export class PrimeBackend implements AgentBackend {
     record.revision += 1;
     const messages = source.messages.map((message, index) => projectMessage(message, index, false));
     if (source.streamingMessage) messages.push(projectMessage(source.streamingMessage, source.messages.length, true));
-    const rawSummary = this.rawSummaries.get(record.publicId);
     const status: ActivityItem = {
       id: `${record.publicId}:status`,
       kind: "status",
@@ -470,12 +710,20 @@ export class PrimeBackend implements AgentBackend {
       messages,
       activity: [status, ...childActivity],
       attention,
+      goal: projectGoal(source.state.goal),
     };
     this.snapshots.set(record.publicId, snapshot);
     const streamId = `agent:${record.publicId}`;
     if (!this.hub.has(streamId)) this.hub.register(streamId, snapshot);
     else if (publish) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
-    if (rawSummary && attention.length) rawSummary.taskState = "needs_input";
+  }
+
+  private clearPendingExtensions(publicId: string): void {
+    for (const [id, pending] of this.pendingExtensions) {
+      if (pending.publicAgentId !== publicId) continue;
+      if (pending.timer) clearTimeout(pending.timer);
+      this.pendingExtensions.delete(id);
+    }
   }
 
   private extensionOptions(pending: PendingExtension): AttentionRequest["options"] {
@@ -514,10 +762,12 @@ export class PrimeBackend implements AgentBackend {
     };
   }
 
-  private projectInactiveSnapshot(publicId: string, summary: PrimeSessionSummary): AgentSnapshot {
-    const messages: TranscriptMessage[] = summary.firstMessage
-      ? [{ id: `${publicId}:first`, role: "user", text: summary.firstMessage, state: "complete", createdAt: toIso(summary.created) }]
-      : [];
+  private async projectInactiveSnapshot(publicId: string, summary: PrimeSessionSummary): Promise<AgentSnapshot> {
+    const messages = summary.sessionFile ? await projectSavedSessionTranscript(summary.sessionFile) : [];
+    const fallback = conciseTitle(summary.firstMessage, 4_000);
+    if (!messages.length && fallback) {
+      messages.push({ id: `${publicId}:first`, role: "user", text: fallback, state: "complete", createdAt: toIso(summary.created) });
+    }
     return {
       revision: 1,
       agentId: publicId,

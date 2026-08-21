@@ -40,6 +40,8 @@ Mutations use HTTP instead of WebSocket. Every request includes:
 
 Accepted request IDs are cached briefly so network retries do not duplicate prompts or approvals.
 
+Session creation is a mutation too: `POST /api/v1/sessions` with `{ requestId, cwd, name? }` creates a daemon session with `cwd` as its working directory and returns the new agent id. `GET /api/v1/directories?path=…` is the read-only companion used by the picker: it returns one directory level as `{ path, home, crumbs, entries, truncated }` where every entry carries an absolute path and clients never join path segments themselves.
+
 ## Projection states
 
 Agent state is split into independent fields:

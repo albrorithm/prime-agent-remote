@@ -1,16 +1,74 @@
-import { ArrowDown, Bot, GitBranch, LoaderCircle, User } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowDown, Bot, ChevronRight, GitBranch, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import type { AgentSummary, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { AttentionCard } from "./AttentionCard";
 import { Composer } from "./Composer";
+import { GoalStrip } from "./GoalStrip";
+import { MessageContent } from "./MessageContent";
 
-export function TranscriptPanel() {
-  const { selectedAgent, selectedSnapshot, selectAgent } = useGateway();
+interface TranscriptPanelProps {
+  onOpenSessions: () => void;
+  onOpenActivity: () => void;
+}
+
+export function deriveAgentLineage(agents: AgentSummary[], selectedId: string | null): AgentSummary[] {
+  if (!selectedId) return [];
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  const lineage: AgentSummary[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = selectedId;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const agent = byId.get(cursor);
+    if (!agent) break;
+    lineage.unshift(agent);
+    cursor = agent.parentId;
+  }
+  return lineage;
+}
+
+export function countUnseen(previousCount: number, currentCount: number): number {
+  return currentCount > previousCount ? currentCount - previousCount : 0;
+}
+
+function HighlightedText({ text, term }: { text: string; term: string }) {
+  const normalized = term.trim().toLowerCase();
+  if (!normalized) return <>{text}</>;
+  const parts: Array<string | ReactElement> = [];
+  let rest = text;
+  let key = 0;
+  while (rest.length) {
+    const index = rest.toLowerCase().indexOf(normalized);
+    if (index < 0) {
+      parts.push(rest);
+      break;
+    }
+    if (index > 0) parts.push(rest.slice(0, index));
+    parts.push(<mark key={key++}>{rest.slice(index, index + normalized.length)}</mark>);
+    rest = rest.slice(index + normalized.length);
+  }
+  return <>{parts}</>;
+}
+
+export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
+  const { selectedAgent, selectedSnapshot, pendingMessages, catalog, selectAgent } = useGateway();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const [unseen, setUnseen] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const messageCount = selectedSnapshot?.messages.length ?? 0;
   const lastText = selectedSnapshot?.messages.at(-1)?.text ?? "";
+  const previousCount = useRef(0);
+  const previousAttention = useRef(0);
+  const lineage = useMemo(
+    () => deriveAgentLineage(catalog.agents, selectedAgent?.id ?? null),
+    [catalog.agents, selectedAgent?.id],
+  );
+  const childCount = selectedAgent ? catalog.agents.filter((agent) => agent.parentId === selectedAgent.id).length : 0;
+  const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
+  const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -19,9 +77,23 @@ export function TranscriptPanel() {
       element.scrollTop = element.scrollHeight;
       setUnseen(0);
     } else {
-      setUnseen((count) => count + 1);
+      setUnseen((count) => count + countUnseen(previousCount.current, messageCount));
     }
-  }, [messageCount, lastText, following]);
+    previousCount.current = messageCount;
+  }, [messageCount, following]);
+
+  useEffect(() => {
+    if (!following) return;
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [lastText, following]);
+
+  useEffect(() => {
+    if (snapshotAttention > previousAttention.current && typeof navigator.vibrate === "function") {
+      navigator.vibrate(30);
+    }
+    previousAttention.current = snapshotAttention;
+  }, [snapshotAttention]);
 
   function updateFollowing() {
     const element = scrollRef.current;
@@ -29,67 +101,153 @@ export function TranscriptPanel() {
     setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 96);
   }
 
-  if (!selectedAgent) {
-    return <section className="panel transcript-panel empty-state">Select an agent to open its transcript.</section>;
+  function closeSearch() {
+    setSearchOpen(false);
+    setQuery("");
   }
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const searching = searchOpen && Boolean(normalizedQuery);
+  const visibleMessages: TranscriptMessage[] | null = searching && selectedSnapshot
+    ? selectedSnapshot.messages.filter((message) => message.text.toLowerCase().includes(normalizedQuery))
+    : null;
 
   return (
     <section className="panel transcript-panel" aria-labelledby="transcript-heading">
-      <header className="panel-header transcript-header">
-        <div className="agent-avatar"><Bot aria-hidden="true" /></div>
-        <div className="transcript-title">
-          <p className="eyebrow">{selectedAgent.parentId ? "Subagent" : "Root agent"}</p>
-          <h2 id="transcript-heading">{selectedAgent.name}</h2>
-        </div>
-        <span className={`state-pill ${selectedAgent.attention ? "attention" : ""}`}>
-          {selectedAgent.attention ? `Needs ${selectedAgent.attention}` : selectedAgent.activity}
-        </span>
+      <header className="conversation-header">
+        <button className="icon-button sessions-trigger" onClick={onOpenSessions} aria-label={`Open sessions${attentionCount ? `, ${attentionCount} need attention` : ""}`}>
+          <Menu />
+          {attentionCount > 0 && <span className="icon-badge" aria-hidden="true">{attentionCount > 9 ? "9+" : attentionCount}</span>}
+        </button>
+        <nav className="agent-lineage" aria-label="Agent ancestry" data-gesture-exclusion>
+          {lineage.map((agent, index) => (
+            <span className="lineage-item" key={agent.id}>
+              {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
+              {index === lineage.length - 1 ? (
+                <h1 id="transcript-heading" title={agent.name}>{agent.name}</h1>
+              ) : (
+                <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
+              )}
+            </span>
+          ))}
+          {!lineage.length && <h1 id="transcript-heading">Prime Agent</h1>}
+        </nav>
+        <span
+          className={`agent-presence ${selectedAgent?.attention ? "attention" : selectedAgent?.activity ?? "idle"}`}
+          aria-label={selectedAgent?.attention ? `Needs ${selectedAgent.attention}` : selectedAgent?.activity ?? "No agent selected"}
+        />
+        <button
+          className={`icon-button search-trigger ${searchOpen ? "active" : ""}`}
+          onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+          aria-label={searchOpen ? "Close search" : "Search transcript"}
+          aria-expanded={searchOpen}
+        >
+          {searchOpen ? <X /> : <Search />}
+        </button>
+        <button className="icon-button activity-trigger" onClick={onOpenActivity} aria-label={`Open activity${childCount ? `, ${childCount} subagents` : ""}`}>
+          <ListTree />
+          {childCount > 0 && <span>{childCount}</span>}
+        </button>
       </header>
 
-      <div
-        className="transcript-scroll"
-        ref={scrollRef}
-        onScroll={updateFollowing}
-        aria-label={`${selectedAgent.name} transcript`}
-      >
-        {selectedSnapshot?.attention.map((request) => <AttentionCard key={request.id} request={request} />)}
-        {!selectedSnapshot ? (
-          <div className="loading-state"><LoaderCircle className="spin" /> Loading transcript…</div>
-        ) : (
-          <div className="message-list" role="log" aria-live="off">
-            {selectedSnapshot.messages.map((message) => (
-              <article key={message.id} className={`message ${message.role} ${message.state}`}>
-                <div className="message-author">
-                  {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
-                  <span>{message.role === "user" ? "You" : selectedAgent.name}</span>
-                  <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                </div>
-                <p>{message.text || (message.state === "streaming" ? "Thinking…" : "")}</p>
-                {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
-              </article>
-            ))}
-            {selectedSnapshot.activity.some((item) => item.kind === "child" && item.agentId) && (
-              <div className="inline-children">
-                {selectedSnapshot.activity.filter((item) => item.kind === "child" && item.agentId).map((item) => (
-                  <button key={item.id} onClick={() => void selectAgent(item.agentId!)}>
-                    <GitBranch /> <span><strong>{item.title}</strong><small>{item.status}</small></span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-      {!following && unseen > 0 && (
-        <button
-          className="jump-latest"
-          onClick={() => {
-            setFollowing(true);
-            scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-          }}
-        ><ArrowDown /> Jump to latest ({unseen})</button>
+      {searchOpen && (
+        <div className="transcript-search" data-gesture-exclusion>
+          <Search aria-hidden="true" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search this transcript"
+            aria-label="Search this transcript"
+            autoFocus
+          />
+          {searching && <span className="search-count">{visibleMessages?.length ?? 0} match{visibleMessages?.length === 1 ? "" : "es"}</span>}
+        </div>
       )}
-      <Composer />
+
+      {!selectedAgent ? (
+        <div className="conversation-empty">
+          <Bot aria-hidden="true" />
+          <h2>Choose a session</h2>
+          <p>Open the session drawer to continue a conversation.</p>
+          <button onClick={onOpenSessions}>Open sessions</button>
+        </div>
+      ) : (
+        <>
+          <div
+            className="transcript-scroll"
+            ref={scrollRef}
+            onScroll={updateFollowing}
+            aria-label={`${selectedAgent.name} transcript`}
+          >
+            <div className="transcript-content">
+              {selectedSnapshot?.attention.map((request) => <AttentionCard key={request.id} request={request} />)}
+              {!selectedSnapshot ? (
+                <div className="loading-state"><LoaderCircle className="spin" /> Loading transcript…</div>
+              ) : searching ? (
+                <div className="message-list">
+                  {visibleMessages!.map((message) => (
+                    <article key={message.id} className={`message ${message.role} ${message.state}`}>
+                      <div className="message-author">
+                        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
+                        <span>{message.role === "user" ? "You" : selectedAgent.name}</span>
+                        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                      </div>
+                      <div className="message-body"><p><HighlightedText text={message.text} term={normalizedQuery} /></p></div>
+                    </article>
+                  ))}
+                  {!visibleMessages!.length && <div className="empty-transcript"><p>No messages match that search.</p></div>}
+                </div>
+              ) : (
+                <div className="message-list" role="log" aria-live="off">
+                  {selectedSnapshot.messages.map((message) => (
+                    <article key={message.id} className={`message ${message.role} ${message.state}`}>
+                      <div className="message-author">
+                        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
+                        <span>{message.role === "user" ? "You" : selectedAgent.name}</span>
+                        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                      </div>
+                      <div className="message-body">
+                        <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />
+                      </div>
+                      {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
+                    </article>
+                  ))}
+                  {pendingMessages.map((message) => (
+                    <article key={message.id} className="message user pending" aria-label="Sending">
+                      <div className="message-author">
+                        <User aria-hidden="true" />
+                        <span>You</span>
+                      </div>
+                      <div className="message-body"><p>{message.text}</p></div>
+                    </article>
+                  ))}
+                  {!selectedSnapshot.messages.length && !pendingMessages.length && <div className="empty-transcript"><p>Start a conversation with {selectedAgent.name}.</p></div>}
+                  {selectedSnapshot.activity.some((item) => item.kind === "child" && item.agentId) && (
+                    <div className="inline-children">
+                      {selectedSnapshot.activity.filter((item) => item.kind === "child" && item.agentId).map((item) => (
+                        <button key={item.id} onClick={() => void selectAgent(item.agentId!)}>
+                          <GitBranch /> <span><strong>{item.title}</strong><small>{item.status}</small></span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          {!following && unseen > 0 && (
+            <button
+              className="jump-latest"
+              onClick={() => {
+                setFollowing(true);
+                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+              }}
+            ><ArrowDown /> Latest ({unseen})</button>
+          )}
+          <GoalStrip goal={selectedSnapshot?.goal} />
+          <Composer />
+        </>
+      )}
     </section>
   );
 }

@@ -1,7 +1,10 @@
 import type {
   AgentSnapshot,
+  AgentSummary,
   CatalogSnapshot,
+  DirectoryListing,
   MutationAccepted,
+  SessionCreated,
 } from "../protocol.js";
 import type { EventHub } from "./event-hub.js";
 
@@ -25,9 +28,25 @@ export interface AbortInput {
   expectedRevision: number;
 }
 
+export interface CreateSessionInput {
+  requestId: string;
+  cwd: string;
+  name?: string;
+}
+
 export class BackendConflictError extends Error {}
 export class BackendNotFoundError extends Error {}
 export class BackendCapabilityError extends Error {}
+
+export function uniqueSessionName(base: string, existingNames: string[]): string {
+  const taken = new Set(existingNames.map((name) => name.trim().toLowerCase()));
+  const trimmed = base.trim();
+  if (!taken.has(trimmed.toLowerCase())) return trimmed;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${trimmed} ${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
 
 export interface AgentBackend {
   readonly kind: "demo" | "prime";
@@ -37,5 +56,7 @@ export interface AgentBackend {
   sendMessage(input: SendMessageInput): Promise<MutationAccepted>;
   abort(input: AbortInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
+  listDirectories(path?: string): Promise<DirectoryListing>;
+  createSession(input: CreateSessionInput): Promise<SessionCreated>;
   close(): Promise<void>;
 }

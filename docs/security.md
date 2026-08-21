@@ -10,9 +10,13 @@ The gateway currently permits these live operations:
 - read projected transcripts and activity;
 - send a prompt with queue-if-busy semantics;
 - request abort;
-- answer supported extension confirmation and selection requests.
+- answer supported extension confirmation and selection requests;
+- create a new daemon session in a chosen working directory;
+- list directory names for the new-session picker.
 
-It does not expose terminal creation, arbitrary bash, unrestricted files, daemon shutdown, or raw daemon commands.
+It does not expose terminal creation, arbitrary bash, file contents, daemon shutdown, or raw daemon commands.
+
+The directory listing is deliberately narrow: absolute paths only (a relative path is rejected rather than resolved against any base), directory entries only — never files — with a bounded result size, and no path joining on the client. It answers "what child directories exist here" and nothing more.
 
 ## Authentication
 
