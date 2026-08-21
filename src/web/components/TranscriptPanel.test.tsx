@@ -1,6 +1,7 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { AgentSummary } from "../../protocol";
-import { countUnseen, deriveAgentLineage } from "./TranscriptPanel";
+import type { AgentSummary, TranscriptMessage } from "../../protocol";
+import { countUnseen, deriveAgentLineage, TranscriptEntry } from "./TranscriptPanel";
 
 function agent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -51,5 +52,37 @@ describe("unseen counting", () => {
       previous = current;
     }
     expect(total).toBe(7);
+  });
+});
+
+
+describe("compact transcript entries", () => {
+  const base: Omit<TranscriptMessage, "id" | "text" | "presentation"> = {
+    role: "assistant",
+    state: "complete",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("renders thinking and tool summaries as accessible one-line rows", () => {
+    render(
+      <>
+        <TranscriptEntry
+          agentName="Agent"
+          message={{ ...base, id: "thinking", text: "Planning focused checks", presentation: { kind: "thinking" } }}
+        />
+        <TranscriptEntry
+          agentName="Agent"
+          message={{
+            ...base,
+            id: "tool",
+            text: "npm test",
+            presentation: { kind: "tool", label: "bash", status: "complete", meta: "↑ 2 ↓ 12 lines · 1.2s" },
+          }}
+        />
+      </>,
+    );
+
+    expect(screen.getByLabelText("Thinking: Planning focused checks")).toBeInTheDocument();
+    expect(screen.getByLabelText("bash tool complete: npm test, ↑ 2 ↓ 12 lines · 1.2s")).toBeInTheDocument();
   });
 });

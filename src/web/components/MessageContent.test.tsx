@@ -45,9 +45,78 @@ describe("renderInline", () => {
     expect(parts).toHaveLength(3);
     expect(parts[1]).toMatchObject({ props: { children: "npm test" } });
   });
+
+  it("does not format Markdown inside inline code", () => {
+    render(<p>{renderInline("`**literal** [link](javascript:alert(1))`")}</p>);
+    const code = screen.getByText("**literal** [link](javascript:alert(1))");
+    expect(code.tagName).toBe("CODE");
+    expect(code.querySelector("strong, a")).toBeNull();
+  });
 });
 
 describe("MessageContent", () => {
+  it("renders headings, lists, quotes, and inline formatting", () => {
+    const { container } = render(
+      <MessageContent
+        text={[
+          "## Update",
+          "",
+          "- **ready**",
+          "- *waiting* with ~~old~~ and `value`",
+          "",
+          "3. third",
+          "4. fourth",
+          "",
+          "> quoted **text**",
+        ].join("\n")}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { level: 2, name: "Update" })).toBeDefined();
+    expect(container.querySelectorAll("ul > li")).toHaveLength(2);
+    expect(container.querySelectorAll("ol > li")).toHaveLength(2);
+    expect(container.querySelector("ol")?.getAttribute("start")).toBe("3");
+    expect(container.querySelector("strong")?.textContent).toBe("ready");
+    expect(container.querySelector("em")?.textContent).toBe("waiting");
+    expect(container.querySelector("del")?.textContent).toBe("old");
+    expect(container.querySelector("blockquote")?.textContent).toContain("quoted text");
+  });
+
+  it("renders safe links and rejects unsafe schemes", () => {
+    const { container } = render(
+      <MessageContent
+        text={"[docs](https://example.com/docs) [help](/help) [bad](JaVaScRiPt:alert(1)) [data](data:text/html,bad)"}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "docs" }).getAttribute("href")).toBe("https://example.com/docs");
+    expect(screen.getByRole("link", { name: "docs" }).getAttribute("rel")).toBe("noopener noreferrer");
+    expect(screen.getByRole("link", { name: "help" }).getAttribute("href")).toBe("/help");
+    expect(screen.queryByRole("link", { name: "bad" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "data" })).toBeNull();
+    expect(container.textContent).toContain("bad");
+    expect(container.textContent).toContain("data");
+  });
+
+  it("renders raw HTML as escaped text", () => {
+    const { container } = render(<MessageContent text={'<img src=x onerror="alert(1)"> <script>alert(2)</script>'} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.textContent).toContain('<img src=x onerror="alert(1)">');
+    expect(container.textContent).toContain("<script>alert(2)</script>");
+  });
+
+  it("bounds deeply nested and marker-heavy Markdown", () => {
+    const nested = render(<MessageContent text={`${">".repeat(100)} deep quote`} />);
+    expect(nested.container.textContent).toContain("deep quote");
+    expect(nested.container.querySelectorAll("blockquote").length).toBeLessThanOrEqual(12);
+    nested.unmount();
+
+    const markers = render(<MessageContent text={"*".repeat(2_000)} />);
+    expect(markers.container.textContent).toHaveLength(2_000);
+    expect(markers.container.querySelector("strong, em")).toBeNull();
+  });
+
   it("renders a copy button for complete code blocks", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);

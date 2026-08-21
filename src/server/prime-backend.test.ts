@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BackendCapabilityError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
-import { PrimeBackend, projectSavedSessionTranscript } from "./prime-backend.js";
+import { PrimeBackend, projectPrimeTranscript, projectSavedSessionTranscript } from "./prime-backend.js";
 
 interface FixtureState {
   sessions: Array<Record<string, unknown>>;
@@ -111,6 +111,83 @@ function moduleSpecifier(): string {
 
 afterEach(() => {
   delete (globalThis as typeof globalThis & { __primeWebFixture?: FixtureState }).__primeWebFixture;
+});
+
+describe("projectPrimeTranscript", () => {
+  it("projects compact thinking and tool rows without forwarding tool output", () => {
+    const messages = projectPrimeTranscript([
+      { role: "user", content: "Run the checks", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Initial notes\n\n**Inspecting the repository**" },
+          { type: "toolCall", id: "tool-1", name: "ipython", arguments: { code: "print('details')" } },
+        ],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "tool-1",
+        content: [{ type: "text", text: "private tool output" }],
+        timestamp: 3,
+      },
+      { role: "bashExecution", command: "npm run verify", output: "hidden command output", exitCode: 0, timestamp: 4 },
+      { role: "custom", customType: "internal", display: false, content: "hidden notice", timestamp: 5 },
+      { role: "custom", customType: "notice", display: true, content: "Visible notice", timestamp: 6 },
+      { role: "assistant", content: [{ type: "text", text: "Checks passed" }], timestamp: 7 },
+    ]);
+
+    expect(messages).toHaveLength(6);
+    expect(messages[0]).toMatchObject({ role: "user", text: "Run the checks", state: "complete" });
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      text: "Inspecting the repository",
+      presentation: { kind: "thinking" },
+    });
+    expect(messages[2]).toMatchObject({
+      role: "assistant",
+      text: "print(…)",
+      presentation: { kind: "tool", label: "python", status: "complete", meta: "↑ 1 ↓ 1 lines" },
+    });
+    expect(messages[3]).toMatchObject({
+      role: "system",
+      text: "npm verify",
+      presentation: { kind: "tool", label: "bash", status: "complete", meta: "↑ 1 ↓ 1 lines" },
+    });
+    expect(messages[4]).toMatchObject({ role: "system", text: "Visible notice", state: "complete" });
+    expect(messages[5]).toMatchObject({ role: "assistant", text: "Checks passed", state: "complete" });
+    expect(JSON.stringify(messages)).not.toContain("private tool output");
+    expect(JSON.stringify(messages)).not.toContain("hidden command output");
+    expect(JSON.stringify(messages)).not.toContain("hidden notice");
+  });
+
+  it("keeps branch and compaction summaries", () => {
+    const messages = projectPrimeTranscript([
+      { role: "compactionSummary", summary: "Earlier work was compacted", timestamp: 1 },
+      { role: "branchSummary", summary: "Returned from an alternate branch", timestamp: 2 },
+    ]);
+
+    expect(messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: "system", text: "Earlier work was compacted" },
+      { role: "system", text: "Returned from an alternate branch" },
+    ]);
+  });
+
+  it("shows a running one-line tool preview while its result is pending", () => {
+    const messages = projectPrimeTranscript([], {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "tool-1", name: "ipython", arguments: {} }],
+      timestamp: 1,
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: "assistant",
+      text: "waiting for code",
+      state: "streaming",
+      presentation: { kind: "tool", label: "python", status: "running" },
+    });
+  });
 });
 
 describe("PrimeBackend", () => {
@@ -288,7 +365,7 @@ describe("PrimeBackend", () => {
     }
   });
 
-  it("projects user and assistant messages from an inactive saved session", async () => {
+  it("projects compact thinking and tool rows from an inactive saved session", async () => {
     const directory = await mkdtemp(join(tmpdir(), "prime-mobile-session-"));
     const sessionFile = join(directory, "session.jsonl");
     try {
@@ -302,15 +379,41 @@ describe("PrimeBackend", () => {
         },
         {
           type: "message",
-          id: "private-assistant-entry",
+          id: "private-work-entry",
           timestamp: "2026-01-01T00:02:00.000Z",
-          message: { role: "assistant", content: [{ type: "text", text: "The drawer needs an overflow lock." }] },
+          message: { role: "assistant", content: [
+            { type: "thinking", thinking: "**Checking overflow behavior**" },
+            { type: "toolCall", id: "private-tool-call", name: "ipython", arguments: { code: "print('drawer')" } },
+          ] },
         },
         {
           type: "message",
           id: "private-tool-entry",
           timestamp: "2026-01-01T00:03:00.000Z",
-          message: { role: "toolResult", content: [{ type: "text", text: "private tool output" }] },
+          message: {
+            role: "toolResult",
+            toolCallId: "private-tool-call",
+            content: [{ type: "text", text: "private tool output" }],
+            details: { status: "ok", durationMs: 12, stdout: "private tool output" },
+          },
+        },
+        {
+          type: "branch_summary",
+          id: "private-branch-entry",
+          timestamp: "2026-01-01T00:03:30.000Z",
+          summary: "Exploration branch was summarized.",
+        },
+        {
+          type: "compaction",
+          id: "private-compaction-entry",
+          timestamp: "2026-01-01T00:03:40.000Z",
+          summary: "Earlier context was compacted.",
+        },
+        {
+          type: "message",
+          id: "private-assistant-entry",
+          timestamp: "2026-01-01T00:04:00.000Z",
+          message: { role: "assistant", content: [{ type: "text", text: "The drawer needs an overflow lock." }] },
         },
       ];
       await writeFile(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
@@ -318,11 +421,67 @@ describe("PrimeBackend", () => {
       const messages = await projectSavedSessionTranscript(sessionFile);
       expect(messages.map(({ role, text }) => ({ role, text }))).toEqual([
         { role: "user", text: "Inspect the drawer" },
+        { role: "assistant", text: "Checking overflow behavior" },
+        { role: "assistant", text: "print(…)" },
+        { role: "system", text: "Exploration branch was summarized." },
+        { role: "system", text: "Earlier context was compacted." },
         { role: "assistant", text: "The drawer needs an overflow lock." },
       ]);
+      expect(messages[2].presentation).toEqual({
+        kind: "tool",
+        label: "python",
+        status: "complete",
+        meta: "↑ 1 ↓ 1 lines · 12ms",
+      });
+      expect(JSON.stringify(messages)).not.toContain("private tool output");
       expect(messages.every((message) => !message.id.includes("private"))).toBe(true);
+      const liveSource: unknown[] = [];
+      for (const entry of entries) {
+        if (entry.type === "message") liveSource.push(entry.message);
+        else if (entry.type === "branch_summary") liveSource.push({ role: "branchSummary", summary: entry.summary, timestamp: Date.parse(entry.timestamp) });
+        else if (entry.type === "compaction") liveSource.push({ role: "compactionSummary", summary: entry.summary, timestamp: Date.parse(entry.timestamp) });
+      }
+      const liveMessages = projectPrimeTranscript(liveSource);
+      expect(messages.map((message) => message.id)).toEqual(liveMessages.map((message) => message.id));
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("marks saved tools unknown when an oversized result envelope is unavailable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prime-mobile-session-"));
+    const sessionFile = join(directory, "session.jsonl");
+    try {
+      const call = {
+        type: "message",
+        timestamp: "2026-01-01T00:01:00.000Z",
+        message: {
+          role: "assistant",
+          timestamp: 1,
+          content: [{ type: "toolCall", id: "oversized-tool", name: "ipython", arguments: { code: "run_check()" } }],
+        },
+      };
+      const result = {
+        type: "message",
+        timestamp: "2026-01-01T00:02:00.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "oversized-tool",
+          content: [{ type: "text", text: "x".repeat(1024 * 1024 + 100) }],
+        },
+      };
+      await writeFile(sessionFile, `${JSON.stringify(call)}\n${JSON.stringify(result)}\n`);
+
+      const messages = await projectSavedSessionTranscript(sessionFile);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        text: "run_check()",
+        state: "complete",
+        presentation: { kind: "tool", label: "python", status: "unknown" },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
 });

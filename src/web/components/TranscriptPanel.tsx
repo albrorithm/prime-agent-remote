@@ -1,4 +1,4 @@
-import { ArrowDown, Bot, ChevronRight, GitBranch, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
+import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, GitBranch, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -49,6 +49,67 @@ function HighlightedText({ text, term }: { text: string; term: string }) {
     rest = rest.slice(index + normalized.length);
   }
   return <>{parts}</>;
+}
+
+function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete" | "failed" | "unknown" }) {
+  if (status === "running") return <LoaderCircle className="spin" aria-hidden="true" />;
+  if (status === "complete") return <Check aria-hidden="true" />;
+  if (status === "failed") return <CircleAlert aria-hidden="true" />;
+  return <Circle aria-hidden="true" />;
+}
+
+export function TranscriptEntry({
+  message,
+  agentName,
+  searchTerm,
+}: {
+  message: TranscriptMessage;
+  agentName: string;
+  searchTerm?: string;
+}) {
+  const presentation = message.presentation;
+  if (presentation?.kind === "thinking") {
+    return (
+      <div className={`timeline-row thinking ${message.state}`} role="note" aria-label={`Thinking: ${message.text}`}>
+        <Brain aria-hidden="true" />
+        <strong>Thinking…</strong>
+        <span className="timeline-separator" aria-hidden="true">·</span>
+        <span className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></span>
+      </div>
+    );
+  }
+  if (presentation?.kind === "tool") {
+    const meta = presentation.meta ? `, ${presentation.meta}` : "";
+    return (
+      <div className={`timeline-row tool ${presentation.status}`} role="group" aria-label={`${presentation.label} tool ${presentation.status}: ${message.text}${meta}`}>
+        <ToolStatusIcon status={presentation.status} />
+        <strong className="timeline-label">{presentation.label}</strong>
+        <span className="timeline-separator" aria-hidden="true">·</span>
+        <code className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></code>
+        {presentation.meta && (
+          <>
+            <span className="timeline-separator" aria-hidden="true">·</span>
+            <span className="timeline-meta">{presentation.meta}</span>
+          </>
+        )}
+      </div>
+    );
+  }
+  return (
+    <article className={`message ${message.role} ${message.state}`}>
+      <div className="message-author">
+        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
+        <span>{message.role === "user" ? "You" : agentName}</span>
+        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+      </div>
+      <div className="message-body">
+        {searchTerm !== undefined
+          ? <p><HighlightedText text={message.text} term={searchTerm} /></p>
+          : <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />}
+      </div>
+      {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
+    </article>
+  );
 }
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
@@ -186,31 +247,14 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
               ) : searching ? (
                 <div className="message-list">
                   {visibleMessages!.map((message) => (
-                    <article key={message.id} className={`message ${message.role} ${message.state}`}>
-                      <div className="message-author">
-                        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
-                        <span>{message.role === "user" ? "You" : selectedAgent.name}</span>
-                        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                      </div>
-                      <div className="message-body"><p><HighlightedText text={message.text} term={normalizedQuery} /></p></div>
-                    </article>
+                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} searchTerm={normalizedQuery} />
                   ))}
                   {!visibleMessages!.length && <div className="empty-transcript"><p>No messages match that search.</p></div>}
                 </div>
               ) : (
                 <div className="message-list" role="log" aria-live="off">
                   {selectedSnapshot.messages.map((message) => (
-                    <article key={message.id} className={`message ${message.role} ${message.state}`}>
-                      <div className="message-author">
-                        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
-                        <span>{message.role === "user" ? "You" : selectedAgent.name}</span>
-                        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
-                      </div>
-                      <div className="message-body">
-                        <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />
-                      </div>
-                      {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
-                    </article>
+                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} />
                   ))}
                   {pendingMessages.map((message) => (
                     <article key={message.id} className="message user pending" aria-label="Sending">

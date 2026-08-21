@@ -42,6 +42,13 @@ export interface CatalogSnapshot {
 
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageState = "complete" | "streaming" | "failed";
+export type ActivityStatus = "running" | "waiting" | "complete" | "failed";
+
+export type TranscriptToolStatus = ActivityStatus | "unknown";
+
+export type TranscriptPresentation =
+  | { kind: "thinking" }
+  | { kind: "tool"; label: string; status: TranscriptToolStatus; meta?: string };
 
 export interface TranscriptMessage {
   id: string;
@@ -49,10 +56,10 @@ export interface TranscriptMessage {
   text: string;
   state: MessageState;
   createdAt: string;
+  presentation?: TranscriptPresentation;
 }
 
 export type ActivityKind = "tool" | "thinking" | "child" | "status";
-export type ActivityStatus = "running" | "waiting" | "complete" | "failed";
 
 export interface ActivityItem {
   id: string;

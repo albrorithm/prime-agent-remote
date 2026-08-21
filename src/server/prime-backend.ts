@@ -36,6 +36,7 @@ import {
   type ListedChild,
 } from "./directories.js";
 import type { EventHub } from "./event-hub.js";
+import { summarizeBashExecution, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
 
 interface PrimeResponse {
   success: boolean;
@@ -202,22 +203,137 @@ function messageText(message: unknown): string {
       .join("");
   }
   if (typeof record.text === "string") return record.text;
+  if (typeof record.summary === "string") return record.summary;
   return "";
 }
 
-function projectMessage(message: unknown, index: number, streaming: boolean): TranscriptMessage {
-  const record = message && typeof message === "object" ? (message as Record<string, unknown>) : {};
-  const rawRole = record.role;
-  const role = rawRole === "user" || rawRole === "assistant" || rawRole === "system" ? rawRole : "system";
-  const stamp = typeof record.timestamp === "string" || typeof record.timestamp === "number" ? record.timestamp : index;
-  const rawId = typeof record.id === "string" ? record.id : `${role}:${stamp}:${index}`;
+type PrimeRecord = Record<string, unknown>;
+
+function primeRecord(value: unknown): PrimeRecord | undefined {
+  return value && typeof value === "object" ? value as PrimeRecord : undefined;
+}
+
+function messageIdentity(record: PrimeRecord, index: number, suffix?: string): string {
+  const stamp = typeof record.timestamp === "string" || (typeof record.timestamp === "number" && Number.isFinite(record.timestamp)) ? record.timestamp : index;
+  const base = typeof record.id === "string" ? record.id : `${String(record.role)}:${stamp}:${index}`;
+  return opaqueId(suffix ? `${base}:${suffix}` : base);
+}
+
+function messageCreatedAt(record: PrimeRecord): string {
+  return toIso(record.timestamp ?? record.__savedCreatedAt);
+}
+
+function plainMessage(
+  record: PrimeRecord,
+  index: number,
+  role: TranscriptMessage["role"],
+  text: string,
+  streaming: boolean,
+  suffix?: string,
+): TranscriptMessage | null {
+  if (!streaming && !text.trim()) return null;
   return {
-    id: opaqueId(rawId),
+    id: messageIdentity(record, index, suffix),
     role,
-    text: messageText(message),
+    text,
     state: streaming ? "streaming" : "complete",
-    createdAt: toIso(record.timestamp),
+    createdAt: messageCreatedAt(record),
   };
+}
+
+function projectMessage(
+  message: unknown,
+  index: number,
+  streaming: boolean,
+  toolResults: ReadonlyMap<string, PrimeRecord>,
+): TranscriptMessage[] {
+  const record = primeRecord(message);
+  if (!record) return [];
+  const rawRole = record.role;
+
+  if (rawRole === "toolResult") return [];
+  if (rawRole === "bashExecution") {
+    const summary = summarizeBashExecution(record);
+    return [{
+      id: messageIdentity(record, index, "bash"),
+      role: "system",
+      text: summary.text,
+      state: summary.status === "failed" ? "failed" : "complete",
+      createdAt: messageCreatedAt(record),
+      presentation: { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta },
+    }];
+  }
+  if (rawRole === "custom" && record.display !== true) return [];
+
+  if (rawRole === "assistant" && Array.isArray(record.content)) {
+    const entries: TranscriptMessage[] = [];
+    record.content.forEach((rawPart, partIndex) => {
+      if (typeof rawPart === "string") {
+        const item = plainMessage(record, index, "assistant", rawPart, streaming, `text:${partIndex}`);
+        if (item) entries.push(item);
+        return;
+      }
+      const part = primeRecord(rawPart);
+      if (!part) return;
+      if (part.type === "text" && typeof part.text === "string") {
+        const item = plainMessage(record, index, "assistant", part.text, streaming, `text:${partIndex}`);
+        if (item) entries.push(item);
+      } else if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+        entries.push({
+          id: messageIdentity(record, index, `thinking:${partIndex}`),
+          role: "assistant",
+          text: thinkingRecap(part.thinking),
+          state: streaming ? "streaming" : "complete",
+          createdAt: messageCreatedAt(record),
+          presentation: { kind: "thinking" },
+        });
+      } else if (part.type === "toolCall") {
+        const callId = typeof part.id === "string" ? part.id : undefined;
+        const result = callId ? toolResults.get(callId) : undefined;
+        const summary = summarizeToolCall(part, result, streaming && !result);
+        entries.push({
+          id: callId ? opaqueId(callId) : messageIdentity(record, index, `tool:${partIndex}`),
+          role: "assistant",
+          text: summary.text,
+          state: summary.status === "failed" ? "failed" : summary.status === "running" ? "streaming" : "complete",
+          createdAt: messageCreatedAt(record),
+          presentation: { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta },
+        });
+      }
+    });
+    return entries;
+  }
+
+  let role: TranscriptMessage["role"];
+  if (rawRole === "user" || rawRole === "assistant" || rawRole === "system") role = rawRole;
+  else if (rawRole === "custom" || rawRole === "compactionSummary" || rawRole === "branchSummary") role = "system";
+  else return [];
+  const item = plainMessage(record, index, role, messageText(record), streaming);
+  return item ? [item] : [];
+}
+
+function collectToolResults(messages: readonly unknown[]): Map<string, PrimeRecord> {
+  const results = new Map<string, PrimeRecord>();
+  for (const message of messages) {
+    const record = primeRecord(message);
+    if (record?.role === "toolResult" && typeof record.toolCallId === "string") results.set(record.toolCallId, record);
+  }
+  return results;
+}
+
+export function projectPrimeTranscript(messages: unknown[], streamingMessage?: unknown): TranscriptMessage[] {
+  const toolResults = collectToolResults(messages);
+  const projected = messages.flatMap((message, index) => projectMessage(message, index, false, toolResults));
+  if (streamingMessage) {
+    const streaming = projectMessage(streamingMessage, messages.length, true, toolResults);
+    if (streaming.length) projected.push(...streaming);
+    else {
+      const record = primeRecord(streamingMessage) ?? { role: "assistant" };
+      const placeholder = plainMessage(record, messages.length, "assistant", "", true, "placeholder");
+      if (placeholder) projected.push(placeholder);
+    }
+  }
+  return projected;
 }
 
 const SAVED_TRANSCRIPT_SCAN_BYTES = 64 * 1024 * 1024;
@@ -233,7 +349,7 @@ function conciseTitle(value: unknown, maxChars = 80): string | undefined {
   return title.length > maxChars ? `${title.slice(0, maxChars - 1).trimEnd()}…` : title;
 }
 
-/** Project only conversational text from a daemon-designated session file. */
+/** Project a bounded, compact transcript from a daemon-designated session file. */
 export async function projectSavedSessionTranscript(sessionFile: string): Promise<TranscriptMessage[]> {
   try {
     const file = await stat(sessionFile);
@@ -242,37 +358,78 @@ export async function projectSavedSessionTranscript(sessionFile: string): Promis
     const stream = createReadStream(sessionFile, { start, end: file.size - 1, highWaterMark: 64 * 1024 });
     const decoder = new StringDecoder("utf8");
     const messages: TranscriptMessage[] = [];
+    const savedTools = new Map<string, { call: PrimeRecord; message: TranscriptMessage }>();
     let totalTextChars = 0;
     let currentLine = "";
     let droppingLine = false;
     let index = 0;
 
-    const consumeLine = (line: string) => {
-      let entry: Record<string, unknown>;
-      try {
-        entry = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-      if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") return;
-      const source = entry.message as Record<string, unknown>;
-      if (source.role !== "user" && source.role !== "assistant") return;
-      const text = messageText(source).slice(0, SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS);
-      if (!text) return;
-      const rawId = typeof entry.id === "string" ? entry.id : `${source.role}:${String(entry.timestamp ?? index)}:${index}`;
-      const projected: TranscriptMessage = {
-        id: opaqueId(rawId),
-        role: source.role,
-        text,
-        state: "complete",
-        createdAt: toIso(entry.timestamp ?? source.timestamp),
-      };
-      index += 1;
+    const appendProjected = (projected: TranscriptMessage) => {
+      projected.text = projected.text.slice(0, SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS);
       messages.push(projected);
       totalTextChars += projected.text.length;
       while (messages.length > SAVED_TRANSCRIPT_MAX_MESSAGES || totalTextChars > SAVED_TRANSCRIPT_MAX_TEXT_CHARS) {
         totalTextChars -= messages.shift()?.text.length ?? 0;
       }
+    };
+
+    const consumeLine = (line: string) => {
+      let entry: PrimeRecord;
+      try {
+        entry = JSON.parse(line) as PrimeRecord;
+      } catch {
+        return;
+      }
+      const parsedTimestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : entry.timestamp;
+      const source = entry.type === "message"
+        ? primeRecord(entry.message)
+        : entry.type === "compaction" && typeof entry.summary === "string"
+          ? { role: "compactionSummary", summary: entry.summary, timestamp: parsedTimestamp }
+          : entry.type === "branch_summary" && typeof entry.summary === "string"
+            ? { role: "branchSummary", summary: entry.summary, timestamp: parsedTimestamp }
+            : entry.type === "custom_message"
+              ? {
+                  role: "custom",
+                  customType: entry.customType,
+                  content: entry.content,
+                  display: entry.display,
+                  details: entry.details,
+                  timestamp: parsedTimestamp,
+                }
+              : undefined;
+      if (!source) return;
+      const hydrated: PrimeRecord = {
+        ...source,
+        __savedCreatedAt: entry.timestamp,
+      };
+
+      if (hydrated.role === "toolResult" && typeof hydrated.toolCallId === "string") {
+        const pending = savedTools.get(hydrated.toolCallId);
+        if (pending) {
+          const previousLength = pending.message.text.length;
+          const summary = summarizeToolCall(pending.call, hydrated, false);
+          pending.message.text = summary.text;
+          pending.message.state = summary.status === "failed" ? "failed" : "complete";
+          pending.message.presentation = { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta };
+          if (messages.includes(pending.message)) totalTextChars += pending.message.text.length - previousLength;
+          savedTools.delete(hydrated.toolCallId);
+        }
+        index += 1;
+        return;
+      }
+
+      const projected = projectMessage(hydrated, index, false, new Map());
+      for (const item of projected) appendProjected(item);
+      if (hydrated.role === "assistant" && Array.isArray(hydrated.content)) {
+        for (const rawPart of hydrated.content) {
+          const part = primeRecord(rawPart);
+          if (part?.type !== "toolCall" || typeof part.id !== "string") continue;
+          const callId = part.id;
+          const toolMessage = projected.find((item) => item.id === opaqueId(callId));
+          if (toolMessage) savedTools.set(callId, { call: part, message: toolMessage });
+        }
+      }
+      index += 1;
     };
 
     const consumeChunk = (chunk: string, final = false) => {
@@ -298,6 +455,11 @@ export async function projectSavedSessionTranscript(sessionFile: string): Promis
 
     for await (const chunk of stream) consumeChunk(decoder.write(chunk as Buffer));
     consumeChunk(decoder.end(), true);
+    for (const pending of savedTools.values()) {
+      if (pending.message.presentation?.kind === "tool" && pending.message.presentation.status === "waiting") {
+        pending.message.presentation = { ...pending.message.presentation, status: "unknown" };
+      }
+    }
     return messages;
   } catch {
     return [];
@@ -674,8 +836,7 @@ export class PrimeBackend implements AgentBackend {
 
   private applyPrimeSnapshot(record: ConnectionRecord, source: PrimeSnapshot, publish: boolean): void {
     record.revision += 1;
-    const messages = source.messages.map((message, index) => projectMessage(message, index, false));
-    if (source.streamingMessage) messages.push(projectMessage(source.streamingMessage, source.messages.length, true));
+    const messages = projectPrimeTranscript(source.messages, source.streamingMessage);
     const status: ActivityItem = {
       id: `${record.publicId}:status`,
       kind: "status",
