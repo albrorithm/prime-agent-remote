@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronRight, CircleAlert, GitBranch, LoaderCircle, Moon } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 
 interface Props {
   agents: AgentSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onAbort?: (id: string) => Promise<void>;
   drawerOpen?: boolean;
 }
 
@@ -15,6 +16,16 @@ function stateLabel(agent: AgentSummary): string {
   if (agent.activity === "working") return "Working";
   if (agent.activity === "blocked") return "Blocked";
   return "Idle";
+}
+
+export function directoryLeaf(cwd: string | undefined): string | null {
+  if (!cwd) return null;
+  const parts = cwd.split("/").filter(Boolean);
+  return parts.at(-1) ?? null;
+}
+
+function subtitle(agent: AgentSummary): string {
+  return directoryLeaf(agent.cwd) || agent.description || stateLabel(agent);
 }
 
 function StateIcon({ agent }: { agent: AgentSummary }) {
@@ -69,10 +80,11 @@ export function buildVisibleAgents(agents: AgentSummary[], expanded: Set<string>
   return output;
 }
 
-export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
+export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }: Props) {
   const roots = agents.filter((agent) => agent.parentId === null).map((agent) => agent.id);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(agents.map((item) => item.id)));
   const [focusId, setFocusId] = useState<string | null>(selectedId ?? roots[0] ?? null);
+  const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
   const visible = useMemo(() => buildVisibleAgents(agents, expanded), [agents, expanded]);
   const childrenByParent = useMemo(() => {
@@ -90,17 +102,15 @@ export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
     if (selectedId) setFocusId(selectedId);
   }, [selectedId]);
 
+  const knownRoots = useRef<Set<string>>(new Set(roots));
   useEffect(() => {
+    const fresh = agents.filter((item) => item.parentId === null && !knownRoots.current.has(item.id));
+    if (!fresh.length) return;
+    for (const item of fresh) knownRoots.current.add(item.id);
     setExpanded((current) => {
-      let changed = false;
       const next = new Set(current);
-      for (const item of agents) {
-        if (item.parentId === null && !current.has(item.id)) {
-          next.add(item.id);
-          changed = true;
-        }
-      }
-      return changed ? next : current;
+      for (const item of fresh) next.add(item.id);
+      return next;
     });
   }, [agents]);
 
@@ -152,6 +162,22 @@ export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
     });
   }
 
+  async function stopAgent(id: string): Promise<void> {
+    if (!onAbort || stoppingIds.has(id)) return;
+    setStoppingIds((current) => new Set(current).add(id));
+    try {
+      await onAbort(id);
+    } catch {
+      // The gateway store exposes the error while the row becomes available for retry.
+    } finally {
+      setStoppingIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>, agent: AgentSummary) {
     const index = visible.findIndex((item) => item.id === agent.id);
     const hasChildren = (childrenByParent.get(agent.id)?.length ?? 0) > 0;
@@ -196,7 +222,7 @@ export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
             onClick={() => onSelect(agent.id)}
           >
             <span className="tree-indent" aria-hidden="true" />
-            {children.length > 0 ? (
+            {children.length > 0 && (
               <button
                 className="disclosure"
                 tabIndex={-1}
@@ -208,13 +234,11 @@ export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
               >
                 {expanded.has(agent.id) ? <ChevronDown /> : <ChevronRight />}
               </button>
-            ) : (
-              <span className="disclosure-placeholder"><GitBranch aria-hidden="true" /></span>
             )}
             <StateIcon agent={agent} />
             <span className="agent-copy">
               <strong>{agent.name}</strong>
-              <span>{agent.description || stateLabel(agent)}</span>
+              <span>{subtitle(agent)}</span>
             </span>
             {agent.unreadCount > 0 && selectedId !== agent.id && (
               <span className="tree-unread" aria-label={`${agent.unreadCount} unread`}>
@@ -222,6 +246,21 @@ export function AgentTree({ agents, selectedId, onSelect, drawerOpen }: Props) {
               </span>
             )}
             <span className={`state-pill ${agent.attention ? "attention" : ""}`}>{stateLabel(agent)}</span>
+            {onAbort && agent.activity !== "idle" && agent.capabilities.abort && (
+              <button
+                className="row-stop"
+                aria-label={`${stoppingIds.has(agent.id) ? "Stopping" : "Stop"} ${agent.name}`}
+                aria-busy={stoppingIds.has(agent.id)}
+                disabled={stoppingIds.has(agent.id)}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void stopAgent(agent.id);
+                }}
+              >
+                <Square aria-hidden="true" />
+              </button>
+            )}
           </div>
         );
       })}

@@ -16,6 +16,26 @@ export interface CodeBlockModel {
 export type MessageBlock = TextBlock | CodeBlockModel;
 
 const FENCE_PATTERN = /```([^\n`]*)\n([\s\S]*?)```/g;
+const JSON_BLOCK_MAX_CHARS = 20_000;
+
+function appendTextBlock(blocks: MessageBlock[], text: string): void {
+  const candidate = text.trim();
+  if (
+    candidate.length > 1 &&
+    candidate.length <= JSON_BLOCK_MAX_CHARS &&
+    ((candidate.startsWith("{") && candidate.endsWith("}")) ||
+      (candidate.startsWith("[") && candidate.endsWith("]")))
+  ) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      blocks.push({ kind: "code", lang: "json", code: JSON.stringify(parsed, null, 2), streaming: false });
+      return;
+    } catch {
+      // Invalid JSON remains ordinary transcript text.
+    }
+  }
+  blocks.push({ kind: "text", text });
+}
 
 export function parseMessageBlocks(text: string): MessageBlock[] {
   const blocks: MessageBlock[] = [];
@@ -23,7 +43,7 @@ export function parseMessageBlocks(text: string): MessageBlock[] {
   FENCE_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = FENCE_PATTERN.exec(text))) {
-    if (match.index > index) blocks.push({ kind: "text", text: text.slice(index, match.index) });
+    if (match.index > index) appendTextBlock(blocks, text.slice(index, match.index));
     blocks.push({ kind: "code", lang: match[1].trim(), code: match[2].replace(/\n$/, ""), streaming: false });
     index = FENCE_PATTERN.lastIndex;
   }
@@ -32,14 +52,14 @@ export function parseMessageBlocks(text: string): MessageBlock[] {
   const fenceCount = (text.match(/```/g) ?? []).length;
   if (fenceCount % 2 === 1) {
     const openIndex = remainder.indexOf("```");
-    if (openIndex > 0) blocks.push({ kind: "text", text: remainder.slice(0, openIndex) });
+    if (openIndex > 0) appendTextBlock(blocks, remainder.slice(0, openIndex));
     const afterTicks = remainder.slice(openIndex + 3);
     const newline = afterTicks.indexOf("\n");
     const lang = newline >= 0 ? afterTicks.slice(0, newline).trim() : "";
     const code = newline >= 0 ? afterTicks.slice(newline + 1) : "";
     blocks.push({ kind: "code", lang, code, streaming: true });
   } else {
-    blocks.push({ kind: "text", text: remainder });
+    appendTextBlock(blocks, remainder);
   }
   return blocks;
 }

@@ -182,12 +182,9 @@ function toIso(value: unknown, fallback = new Date().toISOString()): string {
 
 function isEmptyStub(summary: PrimeSessionSummary): boolean {
   const firstMessage = typeof summary.firstMessage === "string" ? summary.firstMessage.trim() : "";
-  return (
-    !summary.sessionName &&
-    !summary.summary &&
-    !summary.activeSessionId &&
-    (!firstMessage || firstMessage === "(no messages)")
-  );
+  const hasTitle = Boolean(summary.sessionName || summary.summary || (firstMessage && firstMessage !== "(no messages)"));
+  if (hasTitle) return false;
+  return !summary.activeSessionId || summary.lifecycle === "draft";
 }
 
 function messageText(message: unknown): string {
@@ -553,11 +550,12 @@ export class PrimeBackend implements AgentBackend {
       : summary.parentActiveSessionId
         ? this.publicByActive.get(summary.parentActiveSessionId) ?? null
         : null;
+    const hasActiveWork = Boolean(
+      summary.isStreaming || summary.isCompacting || summary.isBashRunning ||
+      summary.hasRunningRlmChildren || (summary.unfinishedActionCount ?? 0) > 0,
+    );
     const working = Boolean(summary.activeSessionId) && (
-      summary.activity === "working" || Boolean(
-        summary.isStreaming || summary.isCompacting || summary.isBashRunning ||
-        summary.hasRunningRlmChildren || (summary.unfinishedActionCount ?? 0) > 0,
-      )
+      hasActiveWork || (summary.lifecycle !== "draft" && summary.activity === "working")
     );
     const pending = [...this.pendingExtensions.values()].find((request) => request.publicAgentId === id);
     const attention = pending?.method === "confirm" ? "approval" : pending ? "question" : null;
@@ -565,7 +563,7 @@ export class PrimeBackend implements AgentBackend {
       ? "inactive"
       : summary.workerState === "failed"
         ? "failed"
-        : summary.workerState === "starting" || summary.workerState === "recovering"
+        : summary.lifecycle === "draft" || summary.workerState === "starting" || summary.workerState === "recovering"
           ? "starting"
           : "live";
     const name = conciseTitle(summary.sessionName)

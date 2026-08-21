@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
-import { AgentTree, buildVisibleAgents } from "./AgentTree";
+import { AgentTree, buildVisibleAgents, directoryLeaf } from "./AgentTree";
 
 function makeAgent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -47,6 +47,18 @@ describe("AgentTree", () => {
     expect(screen.getByRole("treeitem", { name: /root/i })).toBeDefined();
   });
 
+  it("keeps a root collapsed when catalog data updates", async () => {
+    const { rerender } = render(<AgentTree agents={agents} selectedId="root" onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse root" }));
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(1));
+
+    const updated = agents.map((item) => ({ ...item, updatedAt: "2026-01-01T00:01:00.000Z" }));
+    rerender(<AgentTree agents={updated} selectedId="root" onSelect={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Expand root" })).toBeDefined();
+  });
+
   it("expands root sessions that appear after mount", () => {
     const { rerender } = render(<AgentTree agents={[makeAgent("root", null, 0)]} selectedId="root" onSelect={vi.fn()} />);
     rerender(<AgentTree agents={[makeAgent("root", null, 0), makeAgent("new-root", null, 0), makeAgent("new-child", "new-root", 1)]} selectedId="root" onSelect={vi.fn()} />);
@@ -65,6 +77,26 @@ describe("AgentTree", () => {
     expect(onSelect).toHaveBeenCalledWith("child");
   });
 
+  it("stops a working agent without selecting it", async () => {
+    const user = userEvent.setup();
+    const working = makeAgent("root", null, 0);
+    working.activity = "working";
+    working.capabilities = { ...working.capabilities, abort: true };
+    const onSelect = vi.fn();
+    let finishAbort: (() => void) | undefined;
+    const onAbort = vi.fn(() => new Promise<void>((resolve) => { finishAbort = resolve; }));
+    render(<AgentTree agents={[working]} selectedId={null} onSelect={onSelect} onAbort={onAbort} />);
+
+    await user.click(screen.getByRole("button", { name: "Stop root" }));
+
+    expect(onAbort).toHaveBeenCalledWith("root");
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Stopping root" })).toBeDisabled();
+
+    await act(async () => { finishAbort?.(); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop root" })).toBeEnabled());
+  });
+
   it("guards cycles rather than recursing forever", () => {
     const cyclic = [makeAgent("a", "b", 1), makeAgent("b", "a", 1)];
     expect(buildVisibleAgents(cyclic, new Set(["a", "b"])).map((item) => item.id).sort()).toEqual(["a", "b"]);
@@ -78,5 +110,11 @@ describe("AgentTree", () => {
       "great-grandchild",
     ]);
     expect(buildVisibleAgents(agents, new Set(["root", "grandchild"])).map((item) => item.id)).toEqual(["root", "child"]);
+  });
+
+  it("derives the directory leaf for row subtitles", () => {
+    expect(directoryLeaf("/workspace/mobile-ui")).toBe("mobile-ui");
+    expect(directoryLeaf("/")).toBeNull();
+    expect(directoryLeaf(undefined)).toBeNull();
   });
 });

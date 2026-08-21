@@ -49,7 +49,7 @@ export function ActivityPanel({ onClose, onNavigate }: ActivityPanelProps) {
             {selectedSnapshot.activity.map((item) => (
               <li key={item.id} className={item.status}>
                 <span className="activity-icon"><Icon kind={item.kind} status={item.status} /></span>
-                <span><strong>{item.title}</strong>{item.detail && <small>{item.detail}</small>}</span>
+                <span><strong>{item.title}</strong>{item.detail && <small className="activity-detail">{item.detail}</small>}</span>
                 <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
               </li>
             ))}

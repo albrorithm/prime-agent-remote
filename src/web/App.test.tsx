@@ -74,4 +74,23 @@ describe("mobile shell navigation", () => {
     expect(shell).toHaveAttribute("data-activity-open", "false");
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
+
+  it("stops a working session from the drawer without navigating", async () => {
+    const user = userEvent.setup();
+    const workingRoot = { ...rootAgent, activity: "working" as const };
+    gatewayMock.current = {
+      ...gatewayMock.current,
+      catalog: { revision: 2, agents: [workingRoot, childAgent] },
+      selectedAgent: workingRoot,
+    };
+    render(<App />);
+    const shell = screen.getByRole("main");
+    await user.click(screen.getByRole("button", { name: "Open sessions" }));
+
+    await user.click(screen.getByRole("button", { name: "Stop Root agent" }));
+
+    expect(gatewayMock.current.abort).toHaveBeenCalledWith("root");
+    expect(gatewayMock.current.selectAgent).not.toHaveBeenCalled();
+    expect(shell).toHaveAttribute("data-sessions-open", "true");
+  });
 });

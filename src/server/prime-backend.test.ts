@@ -203,12 +203,28 @@ describe("PrimeBackend", () => {
     }
   });
 
-  it("hides empty daemon session stubs and requires an active worker for working state", async () => {
+  it("hides empty drafts and requires real activity before showing working state", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     const originalSessions = fixture.sessions;
     fixture.sessions = [
       ...originalSessions,
       { id: "stub-row", sessionId: "private-stub-session", firstMessage: "(no messages)", activity: "working" },
+      {
+        id: "draft-row",
+        sessionId: "private-draft-session",
+        activeSessionId: "private-draft-active",
+        lifecycle: "draft",
+        activity: "working",
+        firstMessage: "(no messages)",
+      },
+      {
+        id: "named-draft-row",
+        sessionId: "private-named-draft-session",
+        activeSessionId: "private-named-draft-active",
+        sessionName: "Fresh draft",
+        lifecycle: "draft",
+        activity: "working",
+      },
       { id: "idle-row", sessionId: "private-idle-session", sessionName: "Idle but marked working", activity: "working" },
     ];
     const backend = new PrimeBackend(moduleSpecifier());
@@ -217,6 +233,9 @@ describe("PrimeBackend", () => {
     try {
       const agents = backend.catalog().agents;
       expect(agents.find((agent) => agent.name === "Untitled session")).toBeUndefined();
+      const draft = agents.find((agent) => agent.name === "Fresh draft");
+      expect(draft).toMatchObject({ lifecycle: "starting", activity: "idle" });
+      expect(draft?.capabilities.abort).toBe(false);
       const idle = agents.find((agent) => agent.name === "Idle but marked working");
       expect(idle?.activity).toBe("idle");
       expect(agents.find((agent) => agent.name === "Live agent")?.activity).toBe("working");

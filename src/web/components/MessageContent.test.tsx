@@ -21,6 +21,22 @@ describe("parseMessageBlocks", () => {
   it("keeps plain text intact when no fences exist", () => {
     expect(parseMessageBlocks("just words")).toEqual([{ kind: "text", text: "just words" }]);
   });
+
+  it("formats a pure JSON payload as a code block", () => {
+    expect(parseMessageBlocks('{"type":"tool","payload":{"ok":true}}')).toEqual([
+      {
+        kind: "code",
+        lang: "json",
+        code: '{\n  "type": "tool",\n  "payload": {\n    "ok": true\n  }\n}',
+        streaming: false,
+      },
+    ]);
+  });
+
+  it("leaves malformed JSON as transcript text", () => {
+    const text = '{"type":tool}';
+    expect(parseMessageBlocks(text)).toEqual([{ kind: "text", text }]);
+  });
 });
 
 describe("renderInline", () => {

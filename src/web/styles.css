@@ -96,10 +96,9 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .agent-row:hover { background: rgba(255,255,255,.035); }
 .agent-row.selected { border-color: #303030; background: #151515; }
 .tree-indent { width: 0; }
-.disclosure, .disclosure-placeholder { display: inline-flex; width: 34px; height: 42px; flex: 0 0 34px; align-items: center; justify-content: center; border: 0; color: var(--muted-2); background: transparent; }
+.disclosure { display: inline-flex; width: 26px; height: 42px; flex: 0 0 26px; align-items: center; justify-content: center; border: 0; color: var(--muted-2); background: transparent; }
 .disclosure:hover { color: var(--text); }
 .disclosure svg { width: 15px; height: 15px; }
-.disclosure-placeholder svg { width: 12px; height: 12px; }
 .agent-state { width: 15px; height: 15px; flex: 0 0 auto; margin-right: 8px; color: var(--muted-2); }
 .agent-state.working { color: #fff; }
 .agent-state.attention { color: #fff; filter: drop-shadow(0 0 5px rgba(255,255,255,.45)); }
@@ -109,6 +108,10 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .agent-copy > span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .state-pill { max-width: 88px; flex: 0 0 auto; overflow: hidden; padding: 3px 6px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: 9px; font-weight: 650; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
 .state-pill.attention { border-color: #777; color: #fff; background: #1b1b1b; }
+.row-stop { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid #383838; border-radius: 50%; color: #ddd; background: #191919; }
+.row-stop:hover { border-color: #666; color: #fff; background: #262626; }
+.row-stop:disabled { cursor: wait; opacity: .45; }
+.row-stop svg { width: 11px; height: 11px; fill: currentColor; }
 
 .transcript-panel { position: relative; background: #000; }
 .conversation-header { display: flex; min-height: var(--header-height); flex: 0 0 var(--header-height); align-items: center; gap: 3px; padding: 5px 7px; border-bottom: 1px solid #171717; background: rgba(0,0,0,.9); backdrop-filter: blur(18px); }
@@ -231,8 +234,10 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 
 .agents-panel, .activity-panel { width: 100%; min-width: 0; overflow: hidden; }
 .activity-panel { background: #050505; }
-.new-session-trigger { color: #fff; }
-.new-session-trigger:hover { color: #fff; background: var(--accent-soft); }
+.new-session-fab { position: absolute; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 10; display: grid; width: 52px; height: 52px; place-items: center; border: 0; border-radius: 50%; color: #000; background: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.6); }
+.new-session-fab:hover { opacity: .88; }
+.new-session-fab svg { width: 22px; height: 22px; }
+.agents-panel { position: relative; }
 .agents-panel > .new-session-panel { width: 100%; min-height: 0; flex: 1; }
 .directory-crumbs { display: flex; flex: 0 0 auto; align-items: center; overflow-x: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); scrollbar-width: none; }
 .directory-crumbs::-webkit-scrollbar { display: none; }
@@ -272,6 +277,7 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 .activity-list li > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding-top: 5px; }
 .activity-list strong { overflow-wrap: anywhere; font-size: 12px; font-weight: 620; }
 .activity-list small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.activity-list .activity-detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5; white-space: pre-wrap; }
 .activity-list time { padding-top: 6px; color: var(--muted-2); font: 500 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .login-shell, .splash { display: grid; width: 100%; height: 100svh; height: 100dvh; place-items: center; padding: max(22px, env(safe-area-inset-top)) 18px max(22px, env(safe-area-inset-bottom)); background: #000; }

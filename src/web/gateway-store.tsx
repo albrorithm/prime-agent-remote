@@ -210,7 +210,7 @@ interface GatewayContextValue extends State {
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string) => Promise<string>;
   send: (text: string) => Promise<void>;
-  abort: () => Promise<void>;
+  abort: (agentId?: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   reconnect: () => void;
 }
@@ -398,11 +398,15 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const runMutation = useCallback(
-    async (agentId: string, run: (revision: number) => Promise<MutationAccepted>) => {
-      const snapshot = stateRef.current.snapshots[agentId];
-      if (!snapshot) throw new Error("No agent selected");
+    async (
+      agentId: string,
+      run: (revision: number) => Promise<MutationAccepted>,
+      initialRevision?: number,
+    ) => {
+      const revision = initialRevision ?? stateRef.current.snapshots[agentId]?.revision;
+      if (revision == null) throw new Error("Agent snapshot is not loaded");
       try {
-        return await run(snapshot.revision);
+        return await run(revision);
       } catch (error) {
         if (!(error instanceof ApiError) || error.status !== 409) throw error;
         const fresh = await api.loadAgent(agentId);
@@ -455,13 +459,18 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [runMutation, showError],
   );
 
-  const abort = useCallback(async () => {
+  const abort = useCallback(async (agentId?: string) => {
     const current = stateRef.current;
-    const id = current.selectedAgentId;
-    const snapshot = id ? current.snapshots[id] : null;
-    if (!id || !snapshot) return;
+    const id = agentId ?? current.selectedAgentId;
+    if (!id) throw new Error("No agent selected");
     try {
-      const result = await runMutation(id, (revision) => api.abortAgent(id, current.csrfToken, revision));
+      const snapshot = current.snapshots[id] ?? await api.loadAgent(id);
+      if (!current.snapshots[id]) dispatch({ type: "snapshot", value: snapshot });
+      const result = await runMutation(
+        id,
+        (revision) => api.abortAgent(id, current.csrfToken, revision),
+        snapshot.revision,
+      );
       dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
       showError(null);
     } catch (error) {

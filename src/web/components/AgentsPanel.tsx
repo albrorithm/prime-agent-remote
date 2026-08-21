@@ -1,4 +1,4 @@
-import { Bot, CircleAlert, FolderPlus, Search, X } from "lucide-react";
+import { Bot, CircleAlert, Plus, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { AgentTree } from "./AgentTree";
@@ -11,7 +11,7 @@ interface AgentsPanelProps {
 }
 
 export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) {
-  const { catalog, selectedAgentId, selectAgent } = useGateway();
+  const { abort, catalog, selectedAgentId, selectAgent } = useGateway();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const filtered = useMemo(() => {
@@ -48,9 +48,6 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           <img src="/prime-mark.svg" alt="" />
           <div><p className="eyebrow">Prime Agent</p><h1 id="agents-heading">Sessions</h1></div>
         </div>
-        {!creating && (
-          <button className="icon-button new-session-trigger" onClick={() => setCreating(true)} aria-label="Start a new session"><FolderPlus /></button>
-        )}
         {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
       </header>
       {creating ? (
@@ -74,11 +71,14 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           </label>
           <div className="panel-scroll">
             {filtered.length ? (
-              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} drawerOpen={visible} />
+              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} onAbort={abort} drawerOpen={visible} />
             ) : (
               <p className="empty-state">No sessions match that search.</p>
             )}
           </div>
+          <button className="new-session-fab" onClick={() => setCreating(true)} aria-label="Start a new session">
+            <Plus />
+          </button>
         </>
       )}
     </section>
