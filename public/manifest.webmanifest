@@ -1,11 +1,19 @@
 {
+  "id": "/",
   "name": "Prime Agent",
   "short_name": "Prime",
   "description": "Mobile control for Prime Agent",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0b0d12",
-  "theme_color": "#0b0d12",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "/prime-mark-192.png",

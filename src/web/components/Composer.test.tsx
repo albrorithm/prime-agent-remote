@@ -64,6 +64,7 @@ describe("Composer", () => {
     const user = userEvent.setup();
     render(<Composer />);
     const input = screen.getByRole("textbox", { name: "Message Agent" });
+    expect(input).toHaveAttribute("placeholder", "Send a message");
     await user.type(input, "  hello  ");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 

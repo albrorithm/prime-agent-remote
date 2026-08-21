@@ -435,7 +435,7 @@ export function Composer() {
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={1}
-          placeholder={selectedAgent.capabilities.send ? `Message ${selectedAgent.name}` : "Resume this agent before sending"}
+          placeholder="Send a message"
           disabled={!selectedAgent.capabilities.send}
         />
         {attachmentStatus && <span className="composer-attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>}
