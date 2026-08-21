@@ -1,4 +1,4 @@
-import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, GitBranch, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
+import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -58,6 +58,27 @@ function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete"
   return <Circle aria-hidden="true" />;
 }
 
+function TranscriptImage({ image, index }: { image: { id: string; src: string }; index: number }) {
+  const [unavailable, setUnavailable] = useState(false);
+  if (unavailable) {
+    return <div className="message-image-unavailable" role="img" aria-label={`Attached image ${index + 1} is unavailable`}>Image unavailable</div>;
+  }
+  return (
+    <a href={image.src} target="_blank" rel="noopener noreferrer" aria-label={`View attached image ${index + 1}`}>
+      <img src={image.src} alt={`Attached image ${index + 1}`} loading="lazy" decoding="async" onError={() => setUnavailable(true)} />
+    </a>
+  );
+}
+
+function TranscriptImages({ images }: { images: Array<{ id: string; src: string }> }) {
+  if (!images.length) return null;
+  return (
+    <div className={`message-images ${images.length === 1 ? "single" : "multiple"}`} aria-label={`${images.length} attached image${images.length === 1 ? "" : "s"}`} data-gesture-exclusion>
+      {images.map((image, index) => <TranscriptImage key={image.id} image={image} index={index} />)}
+    </div>
+  );
+}
+
 export function TranscriptEntry({
   message,
   agentName,
@@ -103,6 +124,12 @@ export function TranscriptEntry({
         <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
       </div>
       <div className="message-body">
+        <TranscriptImages
+          images={(message.attachments ?? []).map((attachment) => ({
+            id: attachment.id,
+            src: `/api/v1/attachments/${encodeURIComponent(attachment.id)}`,
+          }))}
+        />
         {searchTerm !== undefined
           ? <p><HighlightedText text={message.text} term={searchTerm} /></p>
           : <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />}
@@ -262,19 +289,17 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                         <User aria-hidden="true" />
                         <span>You</span>
                       </div>
-                      <div className="message-body"><p>{message.text}</p></div>
+                      <div className="message-body">
+                        <TranscriptImages
+                          images={(message.attachments ?? []).flatMap((attachment, index) => attachment.previewUrl
+                            ? [{ id: `${message.id}:${index}`, src: attachment.previewUrl }]
+                            : [])}
+                        />
+                        {message.text && <p>{message.text}</p>}
+                      </div>
                     </article>
                   ))}
                   {!selectedSnapshot.messages.length && !pendingMessages.length && <div className="empty-transcript"><p>Start a conversation with {selectedAgent.name}.</p></div>}
-                  {selectedSnapshot.activity.some((item) => item.kind === "child" && item.agentId) && (
-                    <div className="inline-children">
-                      {selectedSnapshot.activity.filter((item) => item.kind === "child" && item.agentId).map((item) => (
-                        <button key={item.id} onClick={() => void selectAgent(item.agentId!)}>
-                          <GitBranch /> <span><strong>{item.title}</strong><small>{item.status}</small></span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -289,7 +314,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
             ><ArrowDown /> Latest ({unseen})</button>
           )}
           <GoalStrip goal={selectedSnapshot?.goal} />
-          <Composer />
+          <Composer key={selectedAgent.id} />
         </>
       )}
     </section>

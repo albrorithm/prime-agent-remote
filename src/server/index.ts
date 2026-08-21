@@ -26,6 +26,11 @@ import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
 import { PrimeBackend } from "./prime-backend.js";
 import { MutationCache } from "./mutation-cache.js";
+import {
+  ImageAttachmentValidationError,
+  MAX_IMAGE_REQUEST_BASE64_CHARS,
+  validateImageAttachments,
+} from "./image-attachments.js";
 
 const config = loadConfig();
 const backend: AgentBackend = config.backend === "prime"
@@ -39,7 +44,7 @@ const mutationCache = new MutationCache<unknown>(10 * 60_000);
 const mutationTimes = new Map<string, number[]>();
 
 function securityHeaders(res: ServerResponse): void {
-  res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -62,13 +67,15 @@ function problem(res: ServerResponse, status: number, title: string, detail?: st
   json(res, status, value);
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
+  const declaredLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error("request_too_large");
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 1_048_576) throw new Error("request_too_large");
+    if (size > maxBytes) throw new Error("request_too_large");
     chunks.push(buffer);
   }
   if (chunks.length === 0) return {};
@@ -149,6 +156,23 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     return true;
   }
 
+  const attachmentMatch = pathname.match(/^\/api\/v1\/attachments\/([^/]+)$/);
+  if (req.method === "GET" && attachmentMatch) {
+    const attachmentId = decodeSegment(attachmentMatch[1]);
+    const attachment = attachmentId ? backend.attachment(attachmentId) : null;
+    if (!attachment) {
+      problem(res, 404, "Attachment not found");
+    } else {
+      securityHeaders(res);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", attachment.mimeType);
+      res.setHeader("Content-Length", attachment.bytes.byteLength);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.end(attachment.bytes);
+    }
+    return true;
+  }
+
   if (req.method === "GET" && pathname === "/api/v1/directories") {
     const url = new URL(req.url ?? "/", "http://gateway.invalid");
     const requested = url.searchParams.get("path") ?? undefined;
@@ -174,10 +198,19 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
   const messageMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/messages$/);
   if (req.method === "POST" && messageMatch) {
     const agentId = decodeSegment(messageMatch[1]);
-    const parsed = sendMessageRequestSchema.safeParse(await readJson(req));
+    const messageBodyLimit = MAX_IMAGE_REQUEST_BASE64_CHARS + 1024 * 1024;
+    const parsed = sendMessageRequestSchema.safeParse(await readJson(req, messageBodyLimit));
     if (!agentId || !parsed.success) { problem(res, 400, "Invalid message request"); return true; }
+    let images;
+    try {
+      images = validateImageAttachments(parsed.data.images);
+    } catch (error) {
+      if (!(error instanceof ImageAttachmentValidationError)) throw error;
+      problem(res, 400, "Invalid image attachment", error.message);
+      return true;
+    }
     const result = await deduplicated(session, parsed.data.requestId, () =>
-      backend.sendMessage({ agentId, ...parsed.data }),
+      backend.sendMessage({ agentId, ...parsed.data, images }),
     );
     json(res, 202, result);
     return true;

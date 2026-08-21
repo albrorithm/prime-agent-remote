@@ -2,6 +2,7 @@ import type {
   AgentSnapshot,
   BootstrapResponse,
   DirectoryListing,
+  ImageAttachmentInput,
   MutationAccepted,
   ProblemDetails,
   SessionCreated,
@@ -62,11 +63,19 @@ async function mutate<T = MutationAccepted>(path: string, csrfToken: string, bod
   );
 }
 
-export function sendMessage(agentId: string, csrfToken: string, expectedRevision: number, text: string) {
+export function sendMessage(
+  agentId: string,
+  csrfToken: string,
+  expectedRevision: number,
+  text: string,
+  images: ImageAttachmentInput[] = [],
+  requestId: string = crypto.randomUUID(),
+) {
   return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/messages`, csrfToken, {
-    requestId: crypto.randomUUID(),
+    requestId,
     expectedRevision,
     text,
+    images,
   });
 }
 

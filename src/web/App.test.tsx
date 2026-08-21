@@ -21,7 +21,7 @@ function agent(id: string, parentId: string | null, depth: number): AgentSummary
     childCount: id === "root" ? 1 : 0,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    capabilities: { send: true, abort: true, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: true },
+    capabilities: { send: true, abort: true, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: true, images: true },
   };
 }
 

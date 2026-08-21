@@ -3,16 +3,24 @@ import type {
   AgentSummary,
   CatalogSnapshot,
   DirectoryListing,
+  ImageMimeType,
   MutationAccepted,
   SessionCreated,
 } from "../protocol.js";
 import type { EventHub } from "./event-hub.js";
+import type { ValidatedImageAttachment } from "./image-attachments.js";
 
 export interface SendMessageInput {
   agentId: string;
   requestId: string;
   expectedRevision: number;
   text: string;
+  images: ValidatedImageAttachment[];
+}
+
+export interface AttachmentData {
+  mimeType: ImageMimeType;
+  bytes: Uint8Array;
 }
 
 export interface ResolveAttentionInput {
@@ -54,6 +62,7 @@ export interface AgentBackend {
   catalog(): CatalogSnapshot;
   agentSnapshot(agentId: string): Promise<AgentSnapshot | null>;
   sendMessage(input: SendMessageInput): Promise<MutationAccepted>;
+  attachment(id: string): AttachmentData | null;
   abort(input: AbortInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
   listDirectories(path?: string): Promise<DirectoryListing>;

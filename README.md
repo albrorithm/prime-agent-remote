@@ -11,6 +11,7 @@ A mobile-first, first-party web interface for Prime Agent. It keeps the daemon o
 - Markdown-lite transcript rendering with copyable code blocks, including while streaming.
 - In-transcript search with match highlighting.
 - Optimistic send bubbles that reconcile against the server echo.
+- JPEG, PNG, and WebP attachments for image-capable models, with client-side resizing and authenticated transcript thumbnails.
 - Quick replies and per-agent drafts that survive reloads.
 - Approval and question cards.
 - Authenticated HTTP mutations and WebSocket events.
@@ -20,7 +21,7 @@ A mobile-first, first-party web interface for Prime Agent. It keeps the daemon o
 - Live Prime Agent adapter through `DaemonClient` and `DaemonAgentConnection`.
 - Installable manifest and shell-only service worker.
 
-The browser never connects to the daemon socket directly. Terminal access and file contents are intentionally not exposed. The only filesystem surface is a read-only directory-name browser used to choose a working directory for new sessions; it lists directory names, never file contents.
+The browser never connects to the daemon socket directly. Terminal access and arbitrary host file contents are intentionally not exposed. The browser sends only images that the user explicitly selects, captures, pastes, or drops into the composer. The remaining filesystem surface is a read-only directory-name browser used to choose a working directory for new sessions; it lists directory names, never file contents.
 
 ## Requirements
 

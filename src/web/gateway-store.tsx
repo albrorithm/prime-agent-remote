@@ -15,6 +15,7 @@ import type {
   CatalogSnapshot,
   EventEnvelope,
   GatewayEvent,
+  ImageAttachmentInput,
   ServerFrame,
   StreamCursor,
   TranscriptMessage,
@@ -23,6 +24,7 @@ import type {
 import { PROTOCOL_VERSION } from "../protocol";
 import * as api from "./api";
 import { ApiError } from "./api";
+import type { PreparedImage } from "./image-attachments";
 
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
 
@@ -30,13 +32,48 @@ export interface PendingMessage {
   id: string;
   text: string;
   createdAt: string;
+  knownUserMessageIds: string[];
+  attachments?: Array<{
+    mimeType: PreparedImage["mimeType"];
+    previewUrl?: string;
+    ownsPreviewUrl?: boolean;
+  }>;
 }
 
 const SNAPSHOT_CAP = 24;
 const ERROR_TTL_MS = 6000;
 
+export function imageInputsForRequest(images: PreparedImage[]): ImageAttachmentInput[] {
+  return images.map(({ type, mimeType, data }) => ({ type, mimeType, data }));
+}
+
+function pendingAttachment(image: PreparedImage): NonNullable<PendingMessage["attachments"]>[number] {
+  if (typeof URL.createObjectURL !== "function") return { mimeType: image.mimeType };
+  try {
+    const preview = image.previewBlob.slice(0, image.previewBlob.size, image.previewBlob.type);
+    return { mimeType: image.mimeType, previewUrl: URL.createObjectURL(preview), ownsPreviewUrl: true };
+  } catch {
+    return { mimeType: image.mimeType };
+  }
+}
+
 export function reconcilePending(pending: PendingMessage[], messages: TranscriptMessage[]): PendingMessage[] {
-  return pending.filter((item) => !messages.some((message) => message.role === "user" && message.text === item.text));
+  const claimedMessageIds = new Set<string>();
+  return pending.filter((item) => {
+    const known = new Set(item.knownUserMessageIds);
+    const match = messages.find((message) => {
+      if (message.role !== "user" || message.text !== item.text || known.has(message.id) || claimedMessageIds.has(message.id)) {
+        return false;
+      }
+      const pendingMimes = (item.attachments ?? []).map((attachment) => attachment.mimeType).sort();
+      const messageMimes = (message.attachments ?? []).map((attachment) => attachment.mimeType).sort();
+      return pendingMimes.length === messageMimes.length
+        && pendingMimes.every((mimeType, index) => mimeType === messageMimes[index]);
+    });
+    if (!match) return true;
+    claimedMessageIds.add(match.id);
+    return false;
+  });
 }
 
 function pruneSnapshots(snapshots: Record<string, AgentSnapshot>, keep: string | null): Record<string, AgentSnapshot> {
@@ -209,7 +246,7 @@ interface GatewayContextValue extends State {
   pair: (token: string) => Promise<void>;
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string) => Promise<string>;
-  send: (text: string) => Promise<void>;
+  send: (text: string, images?: PreparedImage[], requestId?: string) => Promise<void>;
   abort: (agentId?: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   reconnect: () => void;
@@ -223,6 +260,8 @@ function socketUrl(): string {
 
 export function GatewayProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const pendingPreviewUrlsRef = useRef(new Set<string>());
+  const requestBaselinesRef = useRef(new Map<string, string[]>());
   const stateRef = useRef(state);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
@@ -232,6 +271,25 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const manuallyClosed = useRef(false);
   const errorTimer = useRef<number | null>(null);
   stateRef.current = state;
+
+  useEffect(() => {
+    const next = new Set(
+      Object.values(state.pending)
+        .flat()
+        .flatMap((message) => (message.attachments ?? [])
+          .filter((attachment) => attachment.ownsPreviewUrl && attachment.previewUrl)
+          .map((attachment) => attachment.previewUrl!)),
+    );
+    for (const url of pendingPreviewUrlsRef.current) {
+      if (!next.has(url)) URL.revokeObjectURL(url);
+    }
+    pendingPreviewUrlsRef.current = next;
+  }, [state.pending]);
+
+  useEffect(() => () => {
+    for (const url of pendingPreviewUrlsRef.current) URL.revokeObjectURL(url);
+    pendingPreviewUrlsRef.current.clear();
+  }, []);
 
   const showError = useCallback((message: string | null) => {
     if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
@@ -435,23 +493,49 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, images: PreparedImage[] = [], requestId: string = crypto.randomUUID()) => {
       const current = stateRef.current;
       const id = current.selectedAgentId;
       const snapshot = id ? current.snapshots[id] : null;
       if (!id || !snapshot) throw new Error("No agent selected");
+      const displayText = text || (images.length ? "Image attached." : "");
+      const pendingAttachments = images.map(pendingAttachment);
+      for (const attachment of pendingAttachments) {
+        if (attachment.ownsPreviewUrl && attachment.previewUrl) pendingPreviewUrlsRef.current.add(attachment.previewUrl);
+      }
+      const knownUserMessageIds = requestBaselinesRef.current.get(requestId)
+        ?? snapshot.messages.filter((message) => message.role === "user").map((message) => message.id);
+      requestBaselinesRef.current.set(requestId, knownUserMessageIds);
+      while (requestBaselinesRef.current.size > 100) {
+        const oldest = requestBaselinesRef.current.keys().next().value as string | undefined;
+        if (!oldest) break;
+        requestBaselinesRef.current.delete(oldest);
+      }
       const pendingMessage: PendingMessage = {
-        id: crypto.randomUUID(),
-        text,
+        id: requestId,
+        text: displayText,
         createdAt: new Date().toISOString(),
+        knownUserMessageIds,
+        ...(pendingAttachments.length ? { attachments: pendingAttachments } : {}),
       };
-      dispatch({ type: "pending_add", agentId: id, value: pendingMessage });
+      const echoAlreadyPresent = reconcilePending([pendingMessage], snapshot.messages).length === 0;
+      if (echoAlreadyPresent) {
+        for (const attachment of pendingAttachments) {
+          if (!attachment.ownsPreviewUrl || !attachment.previewUrl) continue;
+          pendingPreviewUrlsRef.current.delete(attachment.previewUrl);
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+      } else {
+        dispatch({ type: "pending_add", agentId: id, value: pendingMessage });
+      }
       try {
-        const result = await runMutation(id, (revision) => api.sendMessage(id, current.csrfToken, revision, text));
+        const requestImages = imageInputsForRequest(images);
+        const result = await runMutation(id, (revision) => api.sendMessage(id, current.csrfToken, revision, text, requestImages, requestId));
+        requestBaselinesRef.current.delete(requestId);
         dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
         showError(null);
       } catch (error) {
-        dispatch({ type: "pending_remove", agentId: id, id: pendingMessage.id });
+        if (!echoAlreadyPresent) dispatch({ type: "pending_remove", agentId: id, id: pendingMessage.id });
         showError(error instanceof Error ? error.message : "Message failed");
         throw error;
       }

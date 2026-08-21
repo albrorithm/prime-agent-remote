@@ -6,6 +6,24 @@ export type AgentLifecycle = "starting" | "live" | "inactive" | "stopped" | "fai
 export type AgentActivityState = "working" | "idle" | "blocked";
 export type AttentionKind = "approval" | "question" | "error";
 
+export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+export const MAX_IMAGE_ATTACHMENTS = 3;
+export const MAX_IMAGE_BASE64_CHARS = Math.floor(4.5 * 1024 * 1024);
+export const MAX_IMAGE_REQUEST_BASE64_CHARS = MAX_IMAGE_ATTACHMENTS * MAX_IMAGE_BASE64_CHARS;
+export type ImageMimeType = typeof IMAGE_MIME_TYPES[number];
+
+export interface ImageAttachmentInput {
+  type: "image";
+  mimeType: ImageMimeType;
+  data: string;
+}
+
+export interface TranscriptAttachment {
+  id: string;
+  type: "image";
+  mimeType: ImageMimeType;
+}
+
 export interface AgentCapabilities {
   send: boolean;
   abort: boolean;
@@ -15,6 +33,7 @@ export interface AgentCapabilities {
   deactivate: boolean;
   delete: boolean;
   respond: boolean;
+  images: boolean;
 }
 
 export interface AgentSummary {
@@ -57,6 +76,7 @@ export interface TranscriptMessage {
   state: MessageState;
   createdAt: string;
   presentation?: TranscriptPresentation;
+  attachments?: TranscriptAttachment[];
 }
 
 export type ActivityKind = "tool" | "thinking" | "child" | "status";
@@ -199,10 +219,21 @@ export const pairRequestSchema = z.object({
   token: z.string().min(1).max(512),
 });
 
+const imageAttachmentRequestSchema = z.object({
+  type: z.literal("image"),
+  mimeType: z.enum(IMAGE_MIME_TYPES),
+  data: z.string().min(1).max(MAX_IMAGE_BASE64_CHARS),
+}).strict();
+
 export const sendMessageRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
-  text: z.string().trim().min(1).max(100_000),
+  text: z.string().trim().max(100_000),
+  images: z.array(imageAttachmentRequestSchema).max(MAX_IMAGE_ATTACHMENTS).default([]),
+}).superRefine((value, context) => {
+  if (!value.text && value.images.length === 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A message or image is required" });
+  }
 });
 
 export const attentionResponseSchema = z.object({

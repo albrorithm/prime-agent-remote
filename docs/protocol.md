@@ -42,6 +42,12 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 
 Session creation is a mutation too: `POST /api/v1/sessions` with `{ requestId, cwd, name? }` creates a daemon session with `cwd` as its working directory and returns the new agent id. `GET /api/v1/directories?path=…` is the read-only companion used by the picker: it returns one directory level as `{ path, home, crumbs, entries, truncated }` where every entry carries an absolute path and clients never join path segments themselves.
 
+### Image messages
+
+`POST /api/v1/agents/:id/messages` accepts `text` plus up to three `images`. Each image is exactly `{ type: "image", mimeType, data }`, where `mimeType` is JPEG, PNG, or WebP and `data` is canonical base64. Either text or at least one image is required. The gateway validates count, per-image size, total size, canonical encoding, and MIME signature before calling Prime Agent's native image prompt API.
+
+Transcript streams contain only `{ id, type, mimeType }` attachment metadata. They never contain image base64. A paired browser loads bytes from `GET /api/v1/attachments/:id`; the content-addressed ID is opaque in the browser protocol and the route uses the same authenticated session boundary as snapshots.
+
 ## Projection states
 
 Agent state is split into independent fields:

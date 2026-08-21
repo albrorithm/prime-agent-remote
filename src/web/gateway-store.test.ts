@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSnapshot, GatewayEvent } from "../protocol";
-import { applyGatewayEvent, reconcilePending } from "./gateway-store";
+import { applyGatewayEvent, imageInputsForRequest, reconcilePending } from "./gateway-store";
 
 const snapshot: AgentSnapshot = {
   revision: 1,
@@ -41,13 +41,25 @@ describe("applyGatewayEvent", () => {
 
 describe("reconcilePending", () => {
   const pending = [
-    { id: "p1", text: "hello", createdAt: "2026-01-01T00:00:00.000Z" },
-    { id: "p2", text: "again", createdAt: "2026-01-01T00:00:01.000Z" },
+    { id: "p1", text: "hello", createdAt: "2026-01-01T00:00:00.000Z", knownUserMessageIds: [] },
+    { id: "p2", text: "again", createdAt: "2026-01-01T00:00:01.000Z", knownUserMessageIds: [] },
   ];
 
   it("drops pending messages once the server echoes them", () => {
     const messages = [{ id: "m1", role: "user" as const, text: "hello", state: "complete" as const, createdAt: "2026-01-01T00:00:02.000Z" }];
     expect(reconcilePending(pending, messages).map((item) => item.id)).toEqual(["p2"]);
+  });
+
+  it("matches repeated sends one-to-one and ignores messages known before submission", () => {
+    const repeated = [
+      { id: "p1", text: "same", createdAt: "2026-01-01T00:00:01.000Z", knownUserMessageIds: ["old"] },
+      { id: "p2", text: "same", createdAt: "2026-01-01T00:00:02.000Z", knownUserMessageIds: ["old"] },
+    ];
+    const messages = [
+      { id: "old", role: "user" as const, text: "same", state: "complete" as const, createdAt: "2025-01-01T00:00:00.000Z" },
+      { id: "new", role: "user" as const, text: "same", state: "complete" as const, createdAt: "2026-01-01T00:00:03.000Z" },
+    ];
+    expect(reconcilePending(repeated, messages).map((item) => item.id)).toEqual(["p2"]);
   });
 
   it("keeps everything while the server has not echoed", () => {
@@ -57,5 +69,42 @@ describe("reconcilePending", () => {
   it("ignores assistant messages with matching text", () => {
     const messages = [{ id: "m1", role: "assistant" as const, text: "hello", state: "complete" as const, createdAt: "2026-01-01T00:00:02.000Z" }];
     expect(reconcilePending(pending, messages)).toHaveLength(2);
+  });
+
+  it("waits for the matching attachment count before clearing an image-only send", () => {
+    const imagePending = [{
+      id: "image-pending",
+      text: "Image attached.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      knownUserMessageIds: [],
+      attachments: [{ mimeType: "image/jpeg" as const, previewUrl: "blob:preview" }],
+    }];
+    const textOnly = [{
+      id: "m1",
+      role: "user" as const,
+      text: "Image attached.",
+      state: "complete" as const,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    }];
+    expect(reconcilePending(imagePending, textOnly)).toHaveLength(1);
+    expect(reconcilePending(imagePending, [{
+      ...textOnly[0],
+      attachments: [{ id: "image_safe", type: "image" as const, mimeType: "image/jpeg" as const }],
+    }])).toEqual([]);
+  });
+});
+
+
+describe("imageInputsForRequest", () => {
+  it("strips browser-only preview URLs before transmission", () => {
+    const inputs = imageInputsForRequest([{
+      type: "image",
+      mimeType: "image/jpeg",
+      data: "canonical-base64",
+      previewUrl: "blob:browser-only-preview",
+      previewBlob: new Blob(["preview"], { type: "image/jpeg" }),
+    }]);
+    expect(inputs).toEqual([{ type: "image", mimeType: "image/jpeg", data: "canonical-base64" }]);
+    expect(JSON.stringify(inputs)).not.toContain("browser-only-preview");
   });
 });

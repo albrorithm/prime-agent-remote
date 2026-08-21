@@ -17,7 +17,7 @@ function agent(id: string, parentId: string | null, depth: number): AgentSummary
     childCount: 0,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    capabilities: { send: true, abort: false, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: false },
+    capabilities: { send: true, abort: false, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: false, images: false },
   };
 }
 
@@ -84,5 +84,24 @@ describe("compact transcript entries", () => {
 
     expect(screen.getByLabelText("Thinking: Planning focused checks")).toBeInTheDocument();
     expect(screen.getByLabelText("bash tool complete: npm test, ↑ 2 ↓ 12 lines · 1.2s")).toBeInTheDocument();
+  });
+
+  it("renders attachment metadata through the authenticated image route", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "image-message",
+          role: "user",
+          text: "See this",
+          attachments: [{ id: "image_safe", type: "image", mimeType: "image/jpeg" }],
+        }}
+      />,
+    );
+
+    const image = screen.getByRole("img", { name: "Attached image 1" });
+    expect(image).toHaveAttribute("src", "/api/v1/attachments/image_safe");
+    expect(image).toHaveAttribute("loading", "lazy");
   });
 });

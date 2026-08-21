@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
+import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
 import type {
   ActivityItem,
   AgentCapabilities,
@@ -14,6 +15,8 @@ import type {
   AttentionRequest,
   CatalogSnapshot,
   DirectoryListing,
+  ImageAttachmentInput,
+  TranscriptAttachment,
   MutationAccepted,
   SessionCreated,
   TranscriptMessage,
@@ -23,6 +26,7 @@ import {
   BackendConflictError,
   BackendNotFoundError,
   uniqueSessionName,
+  type AttachmentData,
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
@@ -36,7 +40,12 @@ import {
   type ListedChild,
 } from "./directories.js";
 import type { EventHub } from "./event-hub.js";
-import { summarizeBashExecution, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
+import {
+  ImageAttachmentValidationError,
+  validateImageAttachments,
+  type ValidatedImageAttachment,
+} from "./image-attachments.js";
+import { sanitizeTranscriptPreview, summarizeBashExecution, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
 
 interface PrimeResponse {
   success: boolean;
@@ -70,6 +79,7 @@ interface PrimeSessionSummary {
   summary?: string;
   firstMessage?: string;
   cwd?: string;
+  model?: { input?: string[] };
 }
 
 interface PrimeSnapshot {
@@ -109,7 +119,11 @@ interface PrimeSnapshot {
 interface PrimeConnection {
   subscribe(listener: (event: PrimeConnectionEvent) => void | Promise<void>): () => void;
   getInitialSnapshot(): Promise<PrimeSnapshot>;
-  prompt(message: string, options?: { queueIfBusy?: boolean }): Promise<void>;
+  prompt(message: string, options?: {
+    queueIfBusy?: boolean;
+    streamingBehavior?: "steer" | "followUp";
+    images?: ImageAttachmentInput[];
+  }): Promise<void>;
   abort(): Promise<void>;
   respondToExtensionUiRequest(
     requestId: string,
@@ -160,6 +174,8 @@ interface PendingExtension {
   timer?: NodeJS.Timeout;
 }
 
+const ATTACHMENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+
 const defaultCapabilities: AgentCapabilities = {
   send: true,
   abort: true,
@@ -169,6 +185,7 @@ const defaultCapabilities: AgentCapabilities = {
   deactivate: false,
   delete: false,
   respond: true,
+  images: false,
 };
 
 function opaqueId(value: string): string {
@@ -213,9 +230,38 @@ function primeRecord(value: unknown): PrimeRecord | undefined {
   return value && typeof value === "object" ? value as PrimeRecord : undefined;
 }
 
+type ImageAttachmentSink = (attachment: ValidatedImageAttachment) => void;
+
+function projectImageAttachments(content: unknown, sink?: ImageAttachmentSink): TranscriptAttachment[] {
+  if (!Array.isArray(content)) return [];
+  const projected: TranscriptAttachment[] = [];
+  for (const part of content) {
+    const record = primeRecord(part);
+    if (record?.type !== "image") continue;
+    try {
+      const attachment = validateImageAttachments([record])[0];
+      if (!attachment) continue;
+      sink?.(attachment);
+      projected.push({ id: attachment.id, type: "image", mimeType: attachment.mimeType });
+    } catch (error) {
+      if (!(error instanceof ImageAttachmentValidationError)) throw error;
+      // Invalid persisted image payloads are omitted without exposing their data.
+    }
+  }
+  return projected;
+}
+
 function messageIdentity(record: PrimeRecord, index: number, suffix?: string): string {
-  const stamp = typeof record.timestamp === "string" || (typeof record.timestamp === "number" && Number.isFinite(record.timestamp)) ? record.timestamp : index;
-  const base = typeof record.id === "string" ? record.id : `${String(record.role)}:${stamp}:${index}`;
+  const sourceStamp = record.timestamp ?? record.__savedCreatedAt;
+  const hasStableStamp = typeof sourceStamp === "string"
+    || (typeof sourceStamp === "number" && Number.isFinite(sourceStamp));
+  const parsedStamp = typeof sourceStamp === "string" ? Date.parse(sourceStamp) : Number.NaN;
+  const stamp = hasStableStamp
+    ? (Number.isFinite(parsedStamp) ? parsedStamp : sourceStamp)
+    : index;
+  const base = typeof record.id === "string"
+    ? record.id
+    : `${String(record.role)}:${stamp}${hasStableStamp ? "" : `:${index}`}`;
   return opaqueId(suffix ? `${base}:${suffix}` : base);
 }
 
@@ -230,14 +276,16 @@ function plainMessage(
   text: string,
   streaming: boolean,
   suffix?: string,
+  attachments: TranscriptAttachment[] = [],
 ): TranscriptMessage | null {
-  if (!streaming && !text.trim()) return null;
+  if (!streaming && !text.trim() && attachments.length === 0) return null;
   return {
     id: messageIdentity(record, index, suffix),
     role,
     text,
     state: streaming ? "streaming" : "complete",
     createdAt: messageCreatedAt(record),
+    ...(attachments.length ? { attachments } : {}),
   };
 }
 
@@ -246,6 +294,7 @@ function projectMessage(
   index: number,
   streaming: boolean,
   toolResults: ReadonlyMap<string, PrimeRecord>,
+  imageSink?: ImageAttachmentSink,
 ): TranscriptMessage[] {
   const record = primeRecord(message);
   if (!record) return [];
@@ -278,6 +327,10 @@ function projectMessage(
       if (part.type === "text" && typeof part.text === "string") {
         const item = plainMessage(record, index, "assistant", part.text, streaming, `text:${partIndex}`);
         if (item) entries.push(item);
+      } else if (part.type === "image") {
+        const attachments = projectImageAttachments([part], imageSink);
+        const item = plainMessage(record, index, "assistant", "", streaming, `image:${partIndex}`, attachments);
+        if (item) entries.push(item);
       } else if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
         entries.push({
           id: messageIdentity(record, index, `thinking:${partIndex}`),
@@ -308,7 +361,8 @@ function projectMessage(
   if (rawRole === "user" || rawRole === "assistant" || rawRole === "system") role = rawRole;
   else if (rawRole === "custom" || rawRole === "compactionSummary" || rawRole === "branchSummary") role = "system";
   else return [];
-  const item = plainMessage(record, index, role, messageText(record), streaming);
+  const attachments = projectImageAttachments(record.content, imageSink);
+  const item = plainMessage(record, index, role, messageText(record), streaming, undefined, attachments);
   return item ? [item] : [];
 }
 
@@ -321,11 +375,25 @@ function collectToolResults(messages: readonly unknown[]): Map<string, PrimeReco
   return results;
 }
 
-export function projectPrimeTranscript(messages: unknown[], streamingMessage?: unknown): TranscriptMessage[] {
+function ensureUniqueMessageIds(messages: TranscriptMessage[]): TranscriptMessage[] {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    const count = counts.get(message.id) ?? 0;
+    counts.set(message.id, count + 1);
+    if (count > 0) message.id = opaqueId(`${message.id}:duplicate:${count}`);
+  }
+  return messages;
+}
+
+export function projectPrimeTranscript(
+  messages: unknown[],
+  streamingMessage?: unknown,
+  imageSink?: ImageAttachmentSink,
+): TranscriptMessage[] {
   const toolResults = collectToolResults(messages);
-  const projected = messages.flatMap((message, index) => projectMessage(message, index, false, toolResults));
+  const projected = messages.flatMap((message, index) => projectMessage(message, index, false, toolResults, imageSink));
   if (streamingMessage) {
-    const streaming = projectMessage(streamingMessage, messages.length, true, toolResults);
+    const streaming = projectMessage(streamingMessage, messages.length, true, toolResults, imageSink);
     if (streaming.length) projected.push(...streaming);
     else {
       const record = primeRecord(streamingMessage) ?? { role: "assistant" };
@@ -333,11 +401,11 @@ export function projectPrimeTranscript(messages: unknown[], streamingMessage?: u
       if (placeholder) projected.push(placeholder);
     }
   }
-  return projected;
+  return ensureUniqueMessageIds(projected);
 }
 
 const SAVED_TRANSCRIPT_SCAN_BYTES = 64 * 1024 * 1024;
-const SAVED_TRANSCRIPT_MAX_LINE_CHARS = 1024 * 1024;
+const SAVED_TRANSCRIPT_MAX_LINE_CHARS = MAX_IMAGE_REQUEST_BASE64_CHARS + 1024 * 1024;
 const SAVED_TRANSCRIPT_MAX_MESSAGES = 1_000;
 const SAVED_TRANSCRIPT_MAX_TEXT_CHARS = 2 * 1024 * 1024;
 const SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS = 120_000;
@@ -350,7 +418,10 @@ function conciseTitle(value: unknown, maxChars = 80): string | undefined {
 }
 
 /** Project a bounded, compact transcript from a daemon-designated session file. */
-export async function projectSavedSessionTranscript(sessionFile: string): Promise<TranscriptMessage[]> {
+export async function projectSavedSessionTranscript(
+  sessionFile: string,
+  imageSink?: ImageAttachmentSink,
+): Promise<TranscriptMessage[]> {
   try {
     const file = await stat(sessionFile);
     if (!file.isFile() || file.size <= 0) return [];
@@ -418,7 +489,7 @@ export async function projectSavedSessionTranscript(sessionFile: string): Promis
         return;
       }
 
-      const projected = projectMessage(hydrated, index, false, new Map());
+      const projected = projectMessage(hydrated, index, false, new Map(), imageSink);
       for (const item of projected) appendProjected(item);
       if (hydrated.role === "assistant" && Array.isArray(hydrated.content)) {
         for (const rawPart of hydrated.content) {
@@ -460,7 +531,7 @@ export async function projectSavedSessionTranscript(sessionFile: string): Promis
         pending.message.presentation = { ...pending.message.presentation, status: "unknown" };
       }
     }
-    return messages;
+    return ensureUniqueMessageIds(messages);
   } catch {
     return [];
   }
@@ -511,6 +582,8 @@ export class PrimeBackend implements AgentBackend {
   private readonly snapshots = new Map<string, AgentSnapshot>();
   private readonly connections = new Map<string, ConnectionRecord>();
   private readonly pendingExtensions = new Map<string, PendingExtension>();
+  private readonly attachmentCache = new Map<string, AttachmentData>();
+  private attachmentCacheBytes = 0;
   private pollTimer?: NodeJS.Timeout;
   private catalogFingerprint = "";
 
@@ -551,11 +624,34 @@ export class PrimeBackend implements AgentBackend {
     return structuredClone(inactive);
   }
 
+  attachment(id: string): AttachmentData | null {
+    const cached = this.attachmentCache.get(id);
+    if (!cached) return null;
+    this.attachmentCache.delete(id);
+    this.attachmentCache.set(id, cached);
+    return cached;
+  }
+
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
     const record = await this.requiredConnection(input.agentId);
     const snapshot = this.requiredSnapshot(input.agentId);
     if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
-    await record.connection.prompt(input.text, { queueIfBusy: true });
+    const summary = this.rawSummaries.get(input.agentId);
+    if (input.images.length > 0 && summary?.model?.input?.includes("image") !== true) {
+      throw new BackendCapabilityError("This model does not accept image attachments");
+    }
+    const images = input.images.map(({ type, mimeType, data }) => ({ type, mimeType, data }));
+    try {
+      await record.connection.prompt(input.text || "Image attached.", {
+        queueIfBusy: true,
+        streamingBehavior: "followUp",
+        images,
+      });
+    } catch {
+      // Do not let daemon/provider errors echo prompt text or image payloads into gateway logs.
+      throw new Error("Prime prompt failed");
+    }
+    for (const image of input.images) this.cacheImage(image);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 
@@ -659,6 +755,8 @@ export class PrimeBackend implements AgentBackend {
       await record.connection.dispose();
     }
     this.connections.clear();
+    this.attachmentCache.clear();
+    this.attachmentCacheBytes = 0;
     this.client?.close();
   }
 
@@ -753,6 +851,7 @@ export class PrimeBackend implements AgentBackend {
         abort: Boolean(summary.activeSessionId && working),
         resume: !summary.activeSessionId,
         respond: Boolean(summary.activeSessionId),
+        images: summary.model?.input?.includes("image") === true,
       },
     };
   }
@@ -836,7 +935,7 @@ export class PrimeBackend implements AgentBackend {
 
   private applyPrimeSnapshot(record: ConnectionRecord, source: PrimeSnapshot, publish: boolean): void {
     record.revision += 1;
-    const messages = projectPrimeTranscript(source.messages, source.streamingMessage);
+    const messages = projectPrimeTranscript(source.messages, source.streamingMessage, (image) => this.cacheImage(image));
     const status: ActivityItem = {
       id: `${record.publicId}:status`,
       kind: "status",
@@ -851,15 +950,23 @@ export class PrimeBackend implements AgentBackend {
       status: source.state.isStreaming || source.state.isCompacting || source.state.isBashRunning ? "running" : "complete",
       createdAt: new Date().toISOString(),
     };
-    const childActivity: ActivityItem[] = (source.children ?? []).map((child) => ({
-      id: `${record.publicId}:child:${child.id}`,
-      kind: "child",
-      title: child.label,
-      detail: child.error || child.activity?.toolName,
-      status: child.status === "error" ? "failed" : child.status === "done" ? "complete" : child.status === "queued" ? "waiting" : "running",
-      createdAt: new Date().toISOString(),
-      agentId: child.activeSessionId ? this.publicByActive.get(child.activeSessionId) : undefined,
-    }));
+    const childActivity: ActivityItem[] = (source.children ?? []).map((child) => {
+      const agentId = child.activeSessionId ? this.publicByActive.get(child.activeSessionId) : undefined;
+      const agentName = agentId ? this.catalogState.agents.find((agent) => agent.id === agentId)?.name : undefined;
+      return {
+        id: `${record.publicId}:child:${opaqueId(child.id)}`,
+        kind: "child",
+        title: agentName ?? "Subagent",
+        detail: child.status === "error"
+          ? "Subagent failed"
+          : child.activity?.toolName
+            ? sanitizeTranscriptPreview(child.activity.toolName, 48)
+            : undefined,
+        status: child.status === "error" ? "failed" : child.status === "done" ? "complete" : child.status === "queued" ? "waiting" : "running",
+        createdAt: new Date().toISOString(),
+        agentId,
+      };
+    });
     const attention = [...this.pendingExtensions.entries()]
       .filter(([, pending]) => pending.publicAgentId === record.publicId)
       .map(([id, pending]) => this.projectAttention(id, pending));
@@ -875,6 +982,24 @@ export class PrimeBackend implements AgentBackend {
     const streamId = `agent:${record.publicId}`;
     if (!this.hub.has(streamId)) this.hub.register(streamId, snapshot);
     else if (publish) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
+  }
+
+  private cacheImage(image: ValidatedImageAttachment): void {
+    if (image.bytes.byteLength > ATTACHMENT_CACHE_MAX_BYTES) return;
+    const existing = this.attachmentCache.get(image.id);
+    if (existing) {
+      this.attachmentCacheBytes -= existing.bytes.byteLength;
+      this.attachmentCache.delete(image.id);
+    }
+    this.attachmentCache.set(image.id, { mimeType: image.mimeType, bytes: image.bytes });
+    this.attachmentCacheBytes += image.bytes.byteLength;
+    while (this.attachmentCacheBytes > ATTACHMENT_CACHE_MAX_BYTES) {
+      const oldestId = this.attachmentCache.keys().next().value as string | undefined;
+      if (!oldestId) break;
+      const oldest = this.attachmentCache.get(oldestId);
+      this.attachmentCache.delete(oldestId);
+      this.attachmentCacheBytes -= oldest?.bytes.byteLength ?? 0;
+    }
   }
 
   private clearPendingExtensions(publicId: string): void {
@@ -922,7 +1047,9 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private async projectInactiveSnapshot(publicId: string, summary: PrimeSessionSummary): Promise<AgentSnapshot> {
-    const messages = summary.sessionFile ? await projectSavedSessionTranscript(summary.sessionFile) : [];
+    const messages = summary.sessionFile
+      ? await projectSavedSessionTranscript(summary.sessionFile, (image) => this.cacheImage(image))
+      : [];
     const fallback = conciseTitle(summary.firstMessage, 4_000);
     if (!messages.length && fallback) {
       messages.push({ id: `${publicId}:first`, role: "user", text: fallback, state: "complete", createdAt: toIso(summary.created) });

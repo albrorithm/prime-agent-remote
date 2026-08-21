@@ -2,15 +2,20 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
 import { BackendCapabilityError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
+import { validateImageAttachments } from "./image-attachments.js";
 import { PrimeBackend, projectPrimeTranscript, projectSavedSessionTranscript } from "./prime-backend.js";
+
+const FIXTURE_JPEG_DATA = "/9j/wAALCAABAAEBAREA/9oACAEBAAA/AAD/2Q==";
 
 interface FixtureState {
   sessions: Array<Record<string, unknown>>;
   snapshot: Record<string, unknown>;
   attachOptions: Record<string, unknown> | null;
-  prompts: string[];
+  prompts: Array<{ message: string; options?: Record<string, unknown> }>;
+  promptError?: Error;
   aborts: number;
   responses: unknown[];
   creates: Array<Record<string, unknown>>;
@@ -28,6 +33,7 @@ const fixture: FixtureState = {
     unfinishedActionCount: 2,
     taskState: "needs_input",
     cwd: "/projects/alpha",
+    model: { input: ["text", "image"] },
   }, {
     id: "saved-row",
     sessionId: "private-saved-session",
@@ -53,8 +59,20 @@ const fixture: FixtureState = {
         continuationsUsed: 1,
       },
     },
-    messages: [{ id: "message-1", role: "assistant", content: "Ready", timestamp: "2026-01-01T00:00:00.000Z" }],
-    children: [],
+    messages: [
+      { id: "message-1", role: "assistant", content: "Ready", timestamp: "2026-01-01T00:00:00.000Z" },
+      {
+        id: "message-2",
+        role: "user",
+        content: [{ type: "image", mimeType: "image/jpeg", data: FIXTURE_JPEG_DATA }],
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ],
+    children: [{
+      id: "private-child-id",
+      label: "Investigate every internal detail of the delegated task and report exact implementation notes",
+      status: "running",
+    }],
   },
   attachOptions: null,
   prompts: [],
@@ -91,7 +109,10 @@ export class DaemonClient {
 const connection = {
   subscribe(listener) { state.listener = listener; return () => { state.listener = null; }; },
   async getInitialSnapshot() { return structuredClone(state.snapshot); },
-  async prompt(message) { state.prompts.push(message); },
+  async prompt(message, options) {
+    if (state.promptError) throw state.promptError;
+    state.prompts.push({ message, options });
+  },
   async abort() { state.aborts += 1; },
   async respondToExtensionUiRequest(id, response) { state.responses.push({ id, response }); },
   async dispose() {},
@@ -161,6 +182,24 @@ describe("projectPrimeTranscript", () => {
     expect(JSON.stringify(messages)).not.toContain("hidden notice");
   });
 
+  it("keeps fallback IDs unique and content-stable for equal timestamps", () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const source = [
+      { role: "user", content: "first", timestamp },
+      { role: "user", content: "second", timestamp },
+      { role: "user", content: "first", timestamp },
+    ];
+    const projected = projectPrimeTranscript(source);
+    expect(new Set(projected.map((message) => message.id)).size).toBe(3);
+
+    expect(projectPrimeTranscript(source).map((message) => message.id))
+      .toEqual(projected.map((message) => message.id));
+
+    const streamingBefore = projectPrimeTranscript([], { role: "assistant", content: "Hel", timestamp })[0];
+    const streamingAfter = projectPrimeTranscript([], { role: "assistant", content: "Hello", timestamp })[0];
+    expect(streamingAfter?.id).toBe(streamingBefore?.id);
+  });
+
   it("keeps branch and compaction summaries", () => {
     const messages = projectPrimeTranscript([
       { role: "compactionSummary", summary: "Earlier work was compacted", timestamp: 1 },
@@ -206,12 +245,31 @@ describe("PrimeBackend", () => {
       const summary = backend.catalog().agents[0];
       expect(summary.id).toMatch(/^agent_/);
       expect(summary.id).not.toContain("private-session");
-      expect(summary).toMatchObject({ activity: "working", attention: null, unreadCount: 0, cwd: "/projects/alpha" });
+      expect(summary).toMatchObject({
+        activity: "working",
+        attention: null,
+        unreadCount: 0,
+        cwd: "/projects/alpha",
+        capabilities: { images: true },
+      });
       expect(backend.catalog().agents.find((agent) => agent.id !== summary.id)?.name)
         .toBe("Refine the mobile session drawer behavior");
 
       const snapshot = await backend.agentSnapshot(summary.id);
       expect(snapshot?.messages[0].text).toBe("Ready");
+      expect(snapshot?.messages[1]).toMatchObject({
+        role: "user",
+        text: "",
+        attachments: [{ id: expect.stringMatching(/^image_/), type: "image", mimeType: "image/jpeg" }],
+      });
+      expect(JSON.stringify(snapshot)).not.toContain("/9j/");
+      expect(JSON.stringify(snapshot)).not.toContain("Investigate every internal detail");
+      expect(snapshot?.activity.find((item) => item.kind === "child")).toMatchObject({
+        title: "Subagent",
+        status: "running",
+      });
+      const attachmentId = snapshot?.messages[1].attachments?.[0]?.id;
+      expect(attachmentId && backend.attachment(attachmentId)?.bytes.byteLength).toBe(28);
       expect(snapshot?.goal).toMatchObject({
         status: "active",
         objective: "Ship the mobile shell",
@@ -224,8 +282,52 @@ describe("PrimeBackend", () => {
         supportsExtensionUi: true,
       });
 
-      await backend.sendMessage({ agentId: summary.id, requestId: crypto.randomUUID(), expectedRevision: snapshot!.revision, text: "Hello" });
-      expect(fixture.prompts).toEqual(["Hello"]);
+      await backend.sendMessage({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        text: "Hello",
+        images: [],
+      });
+      expect(fixture.prompts).toEqual([{ message: "Hello", options: { queueIfBusy: true, streamingBehavior: "followUp", images: [] } }]);
+
+      await backend.sendMessage({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        text: "",
+        images: validateImageAttachments([{
+          type: "image",
+          mimeType: "image/jpeg",
+          data: FIXTURE_JPEG_DATA,
+        }]),
+      });
+      expect(fixture.prompts[1]).toEqual({
+        message: "Image attached.",
+        options: {
+          queueIfBusy: true,
+          streamingBehavior: "followUp",
+          images: [{ type: "image", mimeType: "image/jpeg", data: FIXTURE_JPEG_DATA }],
+        },
+      });
+
+      fixture.promptError = new Error("provider detail with sensitive image payload");
+      let promptError: unknown;
+      try {
+        await backend.sendMessage({
+          agentId: summary.id,
+          requestId: crypto.randomUUID(),
+          expectedRevision: snapshot!.revision,
+          text: "sensitive prompt text",
+          images: [],
+        });
+      } catch (error) {
+        promptError = error;
+      }
+      expect(promptError).toBeInstanceOf(Error);
+      expect((promptError as Error).message).toBe("Prime prompt failed");
+      expect(JSON.stringify(promptError)).not.toContain("sensitive");
+      delete fixture.promptError;
 
       const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void) | null;
       expect(listener).not.toBeNull();
@@ -369,6 +471,11 @@ describe("PrimeBackend", () => {
     const directory = await mkdtemp(join(tmpdir(), "prime-mobile-session-"));
     const sessionFile = join(directory, "session.jsonl");
     try {
+      const savedImageBytes = Buffer.alloc(900 * 1024);
+      Buffer.from(FIXTURE_JPEG_DATA, "base64").copy(savedImageBytes);
+      savedImageBytes.set([0xff, 0xd9], savedImageBytes.length - 2);
+      const savedImageData = savedImageBytes.toString("base64");
+      expect(savedImageData.length).toBeGreaterThan(1024 * 1024);
       const entries = [
         { type: "session", id: "private-session-header", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/project" },
         {
@@ -411,6 +518,15 @@ describe("PrimeBackend", () => {
         },
         {
           type: "message",
+          id: "private-image-entry",
+          timestamp: "2026-01-01T00:03:50.000Z",
+          message: {
+            role: "user",
+            content: [{ type: "image", mimeType: "image/jpeg", data: savedImageData }],
+          },
+        },
+        {
+          type: "message",
           id: "private-assistant-entry",
           timestamp: "2026-01-01T00:04:00.000Z",
           message: { role: "assistant", content: [{ type: "text", text: "The drawer needs an overflow lock." }] },
@@ -425,6 +541,7 @@ describe("PrimeBackend", () => {
         { role: "assistant", text: "print(…)" },
         { role: "system", text: "Exploration branch was summarized." },
         { role: "system", text: "Earlier context was compacted." },
+        { role: "user", text: "" },
         { role: "assistant", text: "The drawer needs an overflow lock." },
       ]);
       expect(messages[2].presentation).toEqual({
@@ -433,11 +550,15 @@ describe("PrimeBackend", () => {
         status: "complete",
         meta: "↑ 1 ↓ 1 lines · 12ms",
       });
+      expect(messages[5].attachments).toEqual([
+        { id: expect.stringMatching(/^image_/), type: "image", mimeType: "image/jpeg" },
+      ]);
+      expect(JSON.stringify(messages)).not.toContain(savedImageData);
       expect(JSON.stringify(messages)).not.toContain("private tool output");
       expect(messages.every((message) => !message.id.includes("private"))).toBe(true);
       const liveSource: unknown[] = [];
       for (const entry of entries) {
-        if (entry.type === "message") liveSource.push(entry.message);
+        if (entry.type === "message") liveSource.push({ ...entry.message, timestamp: entry.timestamp });
         else if (entry.type === "branch_summary") liveSource.push({ role: "branchSummary", summary: entry.summary, timestamp: Date.parse(entry.timestamp) });
         else if (entry.type === "compaction") liveSource.push({ role: "compactionSummary", summary: entry.summary, timestamp: Date.parse(entry.timestamp) });
       }
@@ -467,7 +588,7 @@ describe("PrimeBackend", () => {
         message: {
           role: "toolResult",
           toolCallId: "oversized-tool",
-          content: [{ type: "text", text: "x".repeat(1024 * 1024 + 100) }],
+          content: [{ type: "text", text: "x".repeat(MAX_IMAGE_REQUEST_BASE64_CHARS + 1024 * 1024 + 100) }],
         },
       };
       await writeFile(sessionFile, `${JSON.stringify(call)}\n${JSON.stringify(result)}\n`);

@@ -17,6 +17,7 @@ import {
   BackendConflictError,
   BackendNotFoundError,
   uniqueSessionName,
+  type AttachmentData,
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
@@ -36,6 +37,7 @@ const fullCapabilities: AgentCapabilities = {
   deactivate: true,
   delete: true,
   respond: true,
+  images: false,
 };
 
 function agent(
@@ -194,6 +196,10 @@ export class DemoBackend implements AgentBackend {
   async agentSnapshot(agentId: string): Promise<AgentSnapshot | null> {
     const value = this.snapshots.get(agentId);
     return value ? structuredClone(value) : null;
+  }
+
+  attachment(_id: string): AttachmentData | null {
+    return null;
   }
 
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
