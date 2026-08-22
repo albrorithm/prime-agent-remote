@@ -60,6 +60,9 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .icon-button { display: grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: var(--muted); background: transparent; }
 .icon-button:hover { color: var(--text); background: var(--accent-soft); }
 .icon-button svg { width: 19px; height: 19px; }
+.switch-haptic-button { position: relative; display: inline-grid; cursor: pointer; }
+.switch-haptic-input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch-haptic-input:disabled { cursor: not-allowed; }
 
 .connection-banner { position: fixed; z-index: 80; top: calc(env(safe-area-inset-top) + 5px); left: 50%; display: flex; align-items: center; justify-content: center; gap: 7px; max-width: calc(100vw - 24px); min-height: 36px; padding: 6px 10px; transform: translateX(-50%); border: 1px solid #555; border-radius: 99px; color: #fff; background: rgba(17,17,17,.96); box-shadow: 0 8px 30px rgba(0,0,0,.5); font-size: 12px; font-weight: 650; }
 .connection-banner svg { width: 14px; height: 14px; }

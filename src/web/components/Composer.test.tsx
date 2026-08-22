@@ -100,7 +100,56 @@ async function uploadImage(user: ReturnType<typeof userEvent.setup>, name = "pho
   return file;
 }
 
+function hapticSwitchFor(button: HTMLElement): HTMLInputElement {
+  const input = button.parentElement?.querySelector<HTMLInputElement>(".switch-haptic-input");
+  expect(input).not.toBeNull();
+  return input!;
+}
+
 describe("Composer", () => {
+  it("uses directly tappable native switches for composer options and send", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const optionsButton = screen.getByRole("button", { name: "Composer options" });
+    const optionsSwitch = hapticSwitchFor(optionsButton);
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    const sendSwitch = hapticSwitchFor(sendButton);
+    expect(optionsSwitch).toHaveAttribute("switch", "");
+    expect(optionsSwitch).toBeEnabled();
+    expect(sendSwitch).toHaveAttribute("switch", "");
+    expect(sendSwitch).toBeDisabled();
+
+    const composerInput = screen.getByRole("textbox", { name: "Message Agent" });
+    composerInput.focus();
+    expect(composerInput).toHaveFocus();
+    await user.click(optionsSwitch);
+    expect(composerInput).toHaveFocus();
+    expect(screen.getByRole("menu", { name: "Composer options" })).toBeInTheDocument();
+    await user.click(optionsSwitch);
+    expect(screen.queryByRole("menu", { name: "Composer options" })).not.toBeInTheDocument();
+
+    await user.type(composerInput, "hello");
+    expect(sendSwitch).toBeEnabled();
+    await user.click(sendSwitch);
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("hello", undefined, expect.any(String)));
+  });
+
+  it("dismisses composer options when a pointer starts outside the menu", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.click(screen.getByRole("button", { name: "Composer options" }));
+    const menu = screen.getByRole("menu", { name: "Composer options" });
+    fireEvent.pointerDown(menu);
+    expect(menu).toBeInTheDocument();
+
+    const composerInput = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.click(composerInput);
+    expect(screen.queryByRole("menu", { name: "Composer options" })).not.toBeInTheDocument();
+    expect(composerInput).toHaveFocus();
+  });
+
   it("lets a message wake an inactive thread", async () => {
     gatewayMock.current.selectedAgent = {
       ...agent,

@@ -19,6 +19,7 @@ import {
   parseSlashCommandInput,
   type SlashCommandSuggestion,
 } from "../slash-commands";
+import { SwitchHapticButton } from "./SwitchHapticButton";
 
 const DRAFTS_KEY = "prime-web-drafts";
 const SUCCESS_PREVIEW_REVOKE_DELAY_MS = 2_000;
@@ -79,7 +80,7 @@ export function Composer() {
   const [dismissedSlashDraft, setDismissedSlashDraft] = useState("");
   const [slashCatalog, setSlashCatalog] = useState(FALLBACK_SLASH_COMMAND_CATALOG);
   const [slashCatalogReady, setSlashCatalogReady] = useState(false);
-  const composerRef = useRef<HTMLDivElement>(null);
+  const optionsMenuRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const imagesRef = useRef<PreparedImage[]>([]);
@@ -228,7 +229,11 @@ export function Composer() {
   useEffect(() => {
     if (!optionsOpen) return;
     const close = (event: PointerEvent) => {
-      if (!composerRef.current?.contains(event.target as Node)) setOptionsOpen(false);
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (optionsMenuRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".composer-options-control")) return;
+      setOptionsOpen(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -514,7 +519,7 @@ export function Composer() {
 
   if (!selectedAgent) return null;
   return (
-    <div className="composer" ref={composerRef} data-gesture-exclusion>
+    <div className="composer" data-gesture-exclusion>
       <input
         ref={imageInputRef}
         type="file"
@@ -561,20 +566,22 @@ export function Composer() {
         </div>
       )}
       {optionsOpen && (
-        <div className="composer-menu" id="composer-options" role="menu" aria-label="Composer options">
+        <div ref={optionsMenuRef} className="composer-menu" id="composer-options" role="menu" aria-label="Composer options">
           <button role="menuitem" onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
           <button role="menuitem" onClick={chooseImages} disabled={!canAttachImages || preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
           <button role="menuitem" disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
         </div>
       )}
-      <button
-        className="composer-options-trigger"
-        aria-label="Composer options"
-        aria-expanded={optionsOpen}
-        aria-controls="composer-options"
+      <SwitchHapticButton
+        className="composer-options-control"
+        buttonClassName="composer-options-trigger"
+        label="Composer options"
+        ariaExpanded={optionsOpen}
+        ariaControls="composer-options"
         disabled={!selectedAgent.capabilities.send}
-        onClick={() => setOptionsOpen((open) => !open)}
-      ><Plus /></button>
+        onActivate={() => setOptionsOpen((open) => !open)}
+        preserveFocus
+      ><Plus aria-hidden="true" /></SwitchHapticButton>
       <div className="composer-input" onDragOver={onDragOver} onDrop={onDrop}>
         {visibleImages.length > 0 && (
           <div
@@ -630,12 +637,12 @@ export function Composer() {
       {streaming && selectedAgent.capabilities.abort ? (
         <button className="composer-action stop" onClick={() => void stop()} disabled={stopping} aria-label="Stop agent"><Square /></button>
       ) : (
-        <button
-          className="composer-action send"
-          onClick={() => void submit()}
+        <SwitchHapticButton
+          buttonClassName="composer-action send"
+          onActivate={() => void submit()}
           disabled={!canCompose || (!draft.trim() && !visibleImages.length) || preparing || sending}
-          aria-label={wakeOnSend ? "Wake thread and send message" : experimentalCommandDraft ? "Run experimental command" : commandDraft ? "Run command" : "Send message"}
-        ><Send /></button>
+          label={wakeOnSend ? "Wake thread and send message" : experimentalCommandDraft ? "Run experimental command" : commandDraft ? "Run command" : "Send message"}
+        ><Send aria-hidden="true" /></SwitchHapticButton>
       )}
     </div>
   );

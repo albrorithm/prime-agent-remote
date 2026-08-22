@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { AgentsPanel } from "./components/AgentsPanel";
@@ -53,13 +53,14 @@ export function App() {
   const sessionsRef = useRef<HTMLElement>(null);
   const activityRef = useRef<HTMLElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const openSessions = useCallback(() => {
+    setActivityOpen(false);
+    setSessionsOpen(true);
+  }, []);
   const gesture = useDrawerGesture({
     open: sessionsOpen,
     disabled: activityOpen,
-    onOpen: () => {
-      setActivityOpen(false);
-      setSessionsOpen(true);
-    },
+    onOpen: openSessions,
     onClose: () => setSessionsOpen(false),
   });
 
@@ -143,10 +144,7 @@ export function App() {
 
       <section className="conversation-stage">
         <TranscriptPanel
-          onOpenSessions={() => {
-            setActivityOpen(false);
-            setSessionsOpen(true);
-          }}
+          onOpenSessions={openSessions}
           onOpenActivity={() => {
             setSessionsOpen(false);
             setActivityOpen(true);

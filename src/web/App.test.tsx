@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary } from "../protocol";
@@ -56,12 +56,39 @@ describe("mobile shell navigation", () => {
     const shell = screen.getByRole("main");
     expect(shell).toHaveAttribute("data-sessions-open", "false");
 
-    await user.click(screen.getByRole("button", { name: "Open sessions" }));
+    const openButton = screen.getByRole("button", { name: "Open sessions" });
+    const nativeSwitch = openButton.parentElement!.querySelector<HTMLInputElement>(".switch-haptic-input")!;
+    expect(nativeSwitch).toHaveAttribute("type", "checkbox");
+    expect(nativeSwitch).toHaveAttribute("switch", "");
+    expect(nativeSwitch).toHaveAttribute("aria-hidden", "true");
+    await user.click(nativeSwitch);
     expect(shell).toHaveAttribute("data-sessions-open", "true");
 
     await user.click(screen.getByRole("treeitem", { name: /Child agent/ }));
     expect(gatewayMock.current.selectAgent).toHaveBeenCalledWith("child");
     expect(shell).toHaveAttribute("data-sessions-open", "false");
+  });
+
+  it("opens the session drawer when a swipe commits", () => {
+    render(<App />);
+    const shell = screen.getByRole("main");
+
+    const dispatchPointer = (type: string, clientX: number, clientY: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        pointerId: { value: 7 },
+        pointerType: { value: "touch" },
+        isPrimary: { value: true },
+        clientX: { value: clientX },
+        clientY: { value: clientY },
+      });
+      fireEvent(shell, event);
+    };
+    dispatchPointer("pointerdown", 8, 160);
+    dispatchPointer("pointermove", 170, 162);
+    dispatchPointer("pointerup", 170, 162);
+
+    expect(shell).toHaveAttribute("data-sessions-open", "true");
   });
 
   it("opens activity from the compact header and closes it without a footer tab", async () => {

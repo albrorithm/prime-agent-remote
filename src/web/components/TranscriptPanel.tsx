@@ -6,6 +6,7 @@ import { AttentionCard } from "./AttentionCard";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { MessageContent } from "./MessageContent";
+import { SwitchHapticButton } from "./SwitchHapticButton";
 
 interface TranscriptPanelProps {
   onOpenSessions: () => void;
@@ -228,10 +229,15 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   return (
     <section className="panel transcript-panel" aria-labelledby="transcript-heading">
       <header className="conversation-header">
-        <button className="icon-button sessions-trigger" onClick={onOpenSessions} aria-label={`Open sessions${attentionCount ? `, ${attentionCount} need attention` : ""}`}>
-          <Menu />
+        <SwitchHapticButton
+          className="sessions-trigger"
+          buttonClassName="icon-button"
+          label={`Open sessions${attentionCount ? `, ${attentionCount} need attention` : ""}`}
+          onActivate={onOpenSessions}
+        >
+          <Menu aria-hidden="true" />
           {attentionCount > 0 && <span className="icon-badge" aria-hidden="true">{attentionCount > 9 ? "9+" : attentionCount}</span>}
-        </button>
+        </SwitchHapticButton>
         <nav className="agent-lineage" aria-label="Agent ancestry" data-gesture-exclusion>
           {lineage.map((agent, index) => (
             <span className="lineage-item" key={agent.id}>
@@ -282,7 +288,9 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           <Bot aria-hidden="true" />
           <h2>Choose a session</h2>
           <p>Open the session drawer to continue a conversation.</p>
-          <button onClick={onOpenSessions}>Open sessions</button>
+          <SwitchHapticButton label="Open sessions" onActivate={onOpenSessions}>
+            Open sessions
+          </SwitchHapticButton>
         </div>
       ) : (
         <>
