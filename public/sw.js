@@ -1,5 +1,5 @@
-const CACHE_NAME = "prime-agent-shell-v2";
-const SHELL = ["/", "/manifest.webmanifest", "/prime-mark.svg", "/prime-mark-192.png", "/prime-mark-512.png"];
+const CACHE_NAME = "prime-agent-shell-v3";
+const SHELL = ["/", "/manifest.webmanifest", "/prime-mark.svg", "/prime-mark-180.png", "/prime-mark-192.png", "/prime-mark-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)));

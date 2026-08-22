@@ -41,12 +41,20 @@ describe("PWA assets", () => {
     }
   });
 
-  it("provides Apple standalone metadata and a 180px touch icon", async () => {
+  it("uses the Prime butterfly for the app and install icons", async () => {
     const html = await readFile(join(projectRoot, "index.html"), "utf8");
+    const logo = await readFile(join(projectRoot, "public/prime-mark.svg"), "utf8");
+    const agentsPanel = await readFile(join(projectRoot, "src/web/components/AgentsPanel.tsx"), "utf8");
+
     expect(html).toContain('name="apple-mobile-web-app-capable" content="yes"');
     expect(html).toContain('name="apple-mobile-web-app-status-bar-style" content="black"');
     expect(html).toContain('rel="apple-touch-icon" sizes="180x180" href="/prime-mark-180.png"');
+    expect(logo).toContain('viewBox="0 0 178 178"');
+    expect(logo.match(/fill="#ffffff"/g)).toHaveLength(2);
+    expect(agentsPanel).toContain('<img src="/prime-mark.svg" alt="" />');
     await expect(pngSize(join(projectRoot, "public/prime-mark-180.png"))).resolves.toEqual({ width: 180, height: 180 });
+    await expect(pngSize(join(projectRoot, "public/prime-mark-192.png"))).resolves.toEqual({ width: 192, height: 192 });
+    await expect(pngSize(join(projectRoot, "public/prime-mark-512.png"))).resolves.toEqual({ width: 512, height: 512 });
   });
 
   it("lets the installed viewport size the fixed app shell", async () => {
