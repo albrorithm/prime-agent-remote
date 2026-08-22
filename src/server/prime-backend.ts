@@ -784,27 +784,34 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
-    const record = await this.requiredConnection(input.agentId);
-    const snapshot = this.requiredSnapshot(input.agentId);
-    if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
-    const summary = this.rawSummaries.get(input.agentId);
-    if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
-    if (input.images.length > 0 && summary?.model?.input?.includes("image") !== true) {
-      throw new BackendCapabilityError("This model does not accept image attachments");
-    }
-    const images = input.images.map(({ type, mimeType, data }) => ({ type, mimeType, data }));
-    try {
-      await record.connection.prompt(input.text || "Image attached.", {
-        queueIfBusy: true,
-        streamingBehavior: "followUp",
-        images,
-      });
-    } catch {
-      // Do not let daemon/provider errors echo prompt text or image payloads into gateway logs.
-      throw new Error("Prime prompt failed");
-    }
-    for (const image of input.images) this.cacheImage(image);
-    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+    return this.withCommandLock(input.agentId, async () => {
+      const snapshot = this.requiredSnapshot(input.agentId);
+      if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+      if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
+
+      const record = await this.resumeConnection(input.agentId);
+      const summary = this.rawSummaries.get(input.agentId);
+      if (input.images.length > 0 && summary?.model?.input?.includes("image") !== true) {
+        throw new BackendCapabilityError("This model does not accept image attachments");
+      }
+      const images = input.images.map(({ type, mimeType, data }) => ({ type, mimeType, data }));
+      try {
+        await record.connection.prompt(input.text || "Image attached.", {
+          queueIfBusy: true,
+          streamingBehavior: "followUp",
+          images,
+        });
+      } catch {
+        // Do not let daemon/provider errors echo prompt text or image payloads into gateway logs.
+        throw new Error("Prime prompt failed");
+      }
+      for (const image of input.images) this.cacheImage(image);
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: this.requiredSnapshot(input.agentId).revision,
+      };
+    });
   }
 
   async slashCommandCatalog(agentId: string): Promise<SlashCommandCatalog | null> {
@@ -1238,7 +1245,7 @@ export class PrimeBackend implements AgentBackend {
         ...defaultCapabilities,
         send: Boolean(summary.activeSessionId),
         abort: Boolean(summary.activeSessionId && working),
-        resume: !summary.activeSessionId,
+        resume: !summary.activeSessionId && typeof summary.sessionFile === "string" && Boolean(summary.sessionFile),
         respond: Boolean(summary.activeSessionId),
         images: summary.model?.input?.includes("image") === true,
       },
@@ -1279,7 +1286,7 @@ export class PrimeBackend implements AgentBackend {
       });
       this.connections.set(publicId, record);
       const snapshot = await connection.getInitialSnapshot();
-      this.applyPrimeSnapshot(record, snapshot, false);
+      this.applyPrimeSnapshot(record, snapshot, this.hub.has(`agent:${publicId}`));
       ready = true;
       for (const event of buffered) this.handleConnectionEvent(record, event);
       return record;
@@ -1493,6 +1500,32 @@ export class PrimeBackend implements AgentBackend {
     if (record) record.revision = Math.max(record.revision, snapshot.revision);
     this.hub.publish(`agent:${agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
     return snapshot.revision;
+  }
+
+  private async resumeConnection(agentId: string): Promise<ConnectionRecord> {
+    const summary = this.rawSummaries.get(agentId);
+    if (!summary) throw new BackendNotFoundError("Agent not found");
+    if (summary.activeSessionId) return this.ensureConnection(agentId, summary.activeSessionId);
+    if (typeof summary.sessionFile !== "string" || !summary.sessionFile) {
+      throw new BackendCapabilityError("This agent cannot receive messages");
+    }
+
+    let response: PrimeResponse;
+    try {
+      response = await this.client.request({ type: "create", sessionPath: summary.sessionFile }, 120_000);
+    } catch {
+      throw new Error("Prime session resume failed");
+    }
+    if (!response.success) throw new Error("Prime session resume failed");
+    const created = (response.data ?? {}) as { sessionId?: unknown };
+    if (typeof created.sessionId === "string" && created.sessionId !== summary.sessionId) {
+      throw new Error("Prime session resume failed");
+    }
+    await this.refreshCatalog(true);
+
+    const resumed = this.rawSummaries.get(agentId);
+    if (!resumed?.activeSessionId) throw new Error("Prime session resume failed");
+    return this.ensureConnection(agentId, resumed.activeSessionId);
   }
 
   private async requiredConnection(agentId: string): Promise<ConnectionRecord> {

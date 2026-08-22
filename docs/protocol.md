@@ -62,6 +62,8 @@ Command responses use a closed result union. Experimental results contain only t
 
 `POST /api/v1/agents/:id/messages` accepts `text` plus up to three `images`. Each image is exactly `{ type: "image", mimeType, data }`, where `mimeType` is JPEG, PNG, or WebP and `data` is canonical base64. Either text or at least one image is required. The gateway validates count, per-image size, total size, canonical encoding, and MIME signature before calling Prime Agent's native image prompt API.
 
+For a resumable inactive agent, the same revision-checked and request-ID-deduplicated message mutation first resolves the server-only saved-session path, creates and attaches the live Prime runtime, then admits the text prompt. The composer accepts text while inactive and describes this as `Send a message to wake`. Images and slash commands remain unavailable until the session is live.
+
 Transcript streams contain only `{ id, type, mimeType }` attachment metadata. They never contain image base64. A paired browser loads bytes from `GET /api/v1/attachments/:id`; the content-addressed ID is opaque in the browser protocol and the route uses the same authenticated session boundary as snapshots.
 
 ## Projection states

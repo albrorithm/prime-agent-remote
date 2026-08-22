@@ -101,6 +101,26 @@ async function uploadImage(user: ReturnType<typeof userEvent.setup>, name = "pho
 }
 
 describe("Composer", () => {
+  it("lets a message wake an inactive thread", async () => {
+    gatewayMock.current.selectedAgent = {
+      ...agent,
+      lifecycle: "inactive",
+      capabilities: { ...agent.capabilities, send: false, abort: false, resume: true, respond: false },
+    };
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute("placeholder", "Send a message to wake");
+    expect(screen.getByRole("button", { name: "Composer options" })).toBeDisabled();
+    await user.type(input, "continue this thread");
+    await user.click(screen.getByRole("button", { name: "Wake thread and send message" }));
+
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("continue this thread", undefined, expect.any(String)));
+    expect(gatewayMock.current.loadSlashCommands).not.toHaveBeenCalled();
+  });
+
   it("sends trimmed text and clears the draft only after success", async () => {
     const user = userEvent.setup();
     render(<Composer />);

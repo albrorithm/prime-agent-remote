@@ -214,9 +214,9 @@ export class DemoBackend implements AgentBackend {
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
     const snapshot = this.requiredSnapshot(input.agentId);
     const summary = this.requiredSummary(input.agentId);
-    if (!summary.capabilities.send) throw new BackendCapabilityError("This agent cannot receive messages");
-    if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
     if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+    if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
+    if (!summary.capabilities.send) this.wakeAgent(summary, snapshot);
 
     this.clearTimers(input.agentId);
     const createdAt = new Date().toISOString();
@@ -474,6 +474,25 @@ export class DemoBackend implements AgentBackend {
 
   async close(): Promise<void> {
     for (const agentId of this.timers.keys()) this.clearTimers(agentId);
+  }
+
+  private wakeAgent(summary: AgentSummary, snapshot: AgentSnapshot): void {
+    if (!summary.capabilities.resume) throw new BackendCapabilityError("This agent cannot receive messages");
+    summary.lifecycle = "live";
+    summary.activity = "idle";
+    summary.capabilities = { ...fullCapabilities, resume: false };
+    summary.updatedAt = new Date().toISOString();
+    snapshot.revision += 1;
+    snapshot.activity = [{
+      id: `${summary.id}-activity`,
+      kind: "status",
+      title: "Agent is idle",
+      status: "complete",
+      createdAt: summary.updatedAt,
+    }];
+    this.catalogState.revision += 1;
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    this.hub.publish(`agent:${summary.id}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
   }
 
   private requiredSnapshot(agentId: string): AgentSnapshot {

@@ -50,6 +50,7 @@ const fixture: FixtureState = {
     firstMessage: "Refine the mobile session drawer behavior",
     created: "2026-01-02T00:00:00.000Z",
     modified: "2026-01-02T01:00:00.000Z",
+    sessionFile: "/fixture/saved-session.jsonl",
   }],
   snapshot: {
     state: {
@@ -127,6 +128,13 @@ export class DaemonClient {
     if (command.type === "create") {
       state.creates.push(command);
       state.createdCount = (state.createdCount ?? 0) + 1;
+      if (typeof command.sessionPath === "string") {
+        const saved = state.sessions.find((session) => session.sessionFile === command.sessionPath);
+        if (!saved) return { success: false, error: "saved session missing" };
+        const activeSessionId = "private-resumed-active-" + state.createdCount;
+        saved.activeSessionId = activeSessionId;
+        return { success: true, data: { activeSessionId, sessionId: saved.sessionId } };
+      }
       const sessionId = "private-created-session-" + state.createdCount;
       const activeSessionId = "private-created-active-" + state.createdCount;
       state.sessions.push({
@@ -748,6 +756,73 @@ describe("PrimeBackend", () => {
       const idle = agents.find((agent) => agent.name === "Idle but marked working");
       expect(idle?.activity).toBe("idle");
       expect(agents.find((agent) => agent.name === "Live agent")?.activity).toBe("working");
+    } finally {
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("wakes an inactive saved session when sending and replaces its subscribed snapshot", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = originalSessions.map((session) => ({ ...session }));
+    fixture.creates = [];
+    fixture.prompts = [];
+    fixture.attachCount = 0;
+    fixture.attachOptions = null;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const inactive = backend.catalog().agents.find((agent) => agent.lifecycle === "inactive");
+      expect(inactive?.capabilities).toMatchObject({ send: false, resume: true });
+      const snapshot = await backend.agentSnapshot(inactive!.id);
+      const frames: unknown[] = [];
+      const subscription = hub.attach(`agent:${inactive!.id}`, null, (frame) => frames.push(frame));
+      expect(subscription).not.toBeNull();
+
+      const result = await backend.sendMessage({
+        agentId: inactive!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        text: "Continue this thread",
+        images: [],
+      });
+
+      expect(fixture.creates).toEqual([{ type: "create", sessionPath: "/fixture/saved-session.jsonl" }]);
+      expect(fixture.prompts).toEqual([{
+        message: "Continue this thread",
+        options: { queueIfBusy: true, streamingBehavior: "followUp", images: [] },
+      }]);
+      expect(fixture.attachOptions).toMatchObject({
+        activeSessionId: expect.stringMatching(/^private-resumed-active-/),
+        closeClientOnDispose: false,
+        supportsExtensionUi: true,
+      });
+      expect(result.revision).toBeGreaterThan(snapshot!.revision);
+      expect(backend.catalog().agents.find((agent) => agent.id === inactive!.id)).toMatchObject({
+        lifecycle: "live",
+        capabilities: { send: true, resume: false },
+      });
+      expect(frames).toContainEqual(expect.objectContaining({
+        type: "event",
+        envelope: expect.objectContaining({
+          event: expect.objectContaining({ kind: "agent.replaced" }),
+        }),
+      }));
+      expect(hub.getSnapshot(`agent:${inactive!.id}`)).toMatchObject({ agentId: inactive!.id, revision: result.revision });
+      subscription?.detach();
+
+      await expect(backend.sendMessage({
+        agentId: inactive!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        text: "A stale retry",
+        images: [],
+      })).rejects.toBeInstanceOf(BackendConflictError);
+      expect(fixture.creates).toHaveLength(1);
+      expect(fixture.prompts).toHaveLength(1);
     } finally {
       fixture.sessions = originalSessions;
       hub.close();

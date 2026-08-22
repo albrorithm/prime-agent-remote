@@ -102,6 +102,29 @@ try {
   if (bootstrap.protocolVersion !== 1 || bootstrap.catalog.agents.length < 1) throw new Error("Bootstrap projection is invalid");
   const agentId = bootstrap.catalog.agents.find((agent) => agent.capabilities.send)?.id;
   if (!agentId) throw new Error("No interactive demo agent found");
+  const inactiveAgentId = bootstrap.catalog.agents.find((agent) => agent.capabilities.resume)?.id;
+  if (!inactiveAgentId) throw new Error("No resumable demo agent found");
+  const inactiveSnapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(inactiveAgentId)}/snapshot`, {
+    headers: { Origin: origin, Cookie: cookie },
+  }));
+  const wakeMessage = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(inactiveAgentId)}/messages`, {
+    method: "POST",
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      "Content-Type": "application/json",
+      "X-CSRF-Token": pairBody.csrfToken,
+    },
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: inactiveSnapshot.revision,
+      text: "Wake this thread",
+    }),
+  });
+  if (wakeMessage.status !== 202) throw new Error(`Wake message failed: ${wakeMessage.status} ${await wakeMessage.text()}`);
+  const resumedBootstrap = await json(await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin, Cookie: cookie } }));
+  const resumed = resumedBootstrap.catalog.agents.find((agent) => agent.id === inactiveAgentId);
+  if (!resumed?.capabilities.send || resumed.capabilities.resume) throw new Error("Resumed demo agent did not become interactive");
 
   const snapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(agentId)}/snapshot`, {
     headers: { Origin: origin, Cookie: cookie },

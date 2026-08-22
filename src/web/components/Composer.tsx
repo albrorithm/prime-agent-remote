@@ -95,6 +95,8 @@ export function Composer() {
   const activeAgentIdRef = useRef(id);
   activeAgentIdRef.current = id;
   const draft = drafts[id] ?? "";
+  const wakeOnSend = Boolean(selectedAgent?.capabilities.resume && !selectedAgent.capabilities.send);
+  const canCompose = Boolean(selectedAgent?.capabilities.send || selectedAgent?.capabilities.resume);
   const commandDraft = draft.trimStart().startsWith("/");
   const draftCommandEntry = commandDraft ? commandEntry(draft.trim(), slashCatalog) : undefined;
   const experimentalCommandDraft = draftCommandEntry?.availability === "experimental";
@@ -211,7 +213,7 @@ export function Composer() {
   }, [id, selectedAgent?.capabilities.send, loadSlashCommands]);
 
   useEffect(() => {
-    if (selectedAgent?.capabilities.images) return;
+    if (canAttachImages) return;
     preparationVersionRef.current += 1;
     preparingRef.current = false;
     setPreparing(false);
@@ -221,7 +223,7 @@ export function Composer() {
     revokeImages(inProgressImagesRef.current);
     inProgressImagesRef.current.length = 0;
     inProgressImagesRef.current = [];
-  }, [id, selectedAgent?.capabilities.images]);
+  }, [id, canAttachImages]);
 
   useEffect(() => {
     if (!optionsOpen) return;
@@ -371,8 +373,12 @@ export function Composer() {
   async function submit() {
     const text = draft.trim();
     const selectedImages = imageOwnerRef.current === id ? imagesRef.current : [];
-    if (!id || !selectedAgent?.capabilities.send || (selectedImages.length > 0 && !canAttachImages) || (!text && !selectedImages.length)) return;
+    if (!id || !canCompose || (selectedImages.length > 0 && !canAttachImages) || (!text && !selectedImages.length)) return;
     if (submittingRef.current || preparingRef.current) return;
+    if (wakeOnSend && text.startsWith("/")) {
+      setAttachmentStatus("Send a message to wake this thread before running commands.");
+      return;
+    }
     if (text.startsWith("/") && !slashCatalogReady) {
       setAttachmentStatus("Command catalog unavailable. Reload after the gateway restarts.");
       return;
@@ -566,6 +572,7 @@ export function Composer() {
         aria-label="Composer options"
         aria-expanded={optionsOpen}
         aria-controls="composer-options"
+        disabled={!selectedAgent.capabilities.send}
         onClick={() => setOptionsOpen((open) => !open)}
       ><Plus /></button>
       <div className="composer-input" onDragOver={onDragOver} onDrop={onDrop}>
@@ -604,8 +611,8 @@ export function Composer() {
           aria-expanded={slashMenuOpen}
           aria-controls={slashMenuOpen ? "slash-command-options" : undefined}
           aria-activedescendant={slashMenuOpen && activeSlashCommand && selectableSlashIndexes.length ? `slash-command-${activeSlashCommandIndex}` : undefined}
-          placeholder="Send a message"
-          disabled={!selectedAgent.capabilities.send}
+          placeholder={wakeOnSend ? "Send a message to wake" : "Send a message"}
+          disabled={!canCompose}
         />
         {attachmentStatus && (
           <span className="composer-attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>
@@ -626,8 +633,8 @@ export function Composer() {
         <button
           className="composer-action send"
           onClick={() => void submit()}
-          disabled={!selectedAgent.capabilities.send || (!draft.trim() && !visibleImages.length) || preparing || sending}
-          aria-label={experimentalCommandDraft ? "Run experimental command" : commandDraft ? "Run command" : "Send message"}
+          disabled={!canCompose || (!draft.trim() && !visibleImages.length) || preparing || sending}
+          aria-label={wakeOnSend ? "Wake thread and send message" : experimentalCommandDraft ? "Run experimental command" : commandDraft ? "Run command" : "Send message"}
         ><Send /></button>
       )}
     </div>

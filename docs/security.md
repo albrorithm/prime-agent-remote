@@ -8,7 +8,7 @@ The gateway currently permits these live operations:
 
 - list projected agents;
 - read projected transcripts and activity;
-- send a text prompt or explicitly user-selected image prompt with queue-if-busy semantics;
+- send a text prompt or explicitly user-selected image prompt with queue-if-busy semantics, waking a daemon-projected saved session first when needed;
 - execute four enumerated session commands and five explicit `AgentConnection` adapters with bounded single-line arguments;
 - detect additional installed extension, prompt, and skill command names through a metadata-stripping projection;
 - experimentally execute an exact currently detected command after a live catalog re-check;

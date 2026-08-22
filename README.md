@@ -17,6 +17,7 @@ A mobile-first, first-party web interface for Prime Agent. It keeps the daemon o
 - Approval and question cards.
 - Authenticated HTTP mutations and WebSocket events.
 - Starting new sessions: pick a working directory with the in-app browser and name the session.
+- Waking an inactive saved session by sending its next message.
 - Per-stream sequence cursors, replay, and snapshot fallback.
 - Safe demo backend for UI review.
 - Live Prime Agent adapter through `DaemonClient` and `DaemonAgentConnection`.
