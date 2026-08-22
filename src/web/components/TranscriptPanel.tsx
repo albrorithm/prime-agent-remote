@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { AttentionCard } from "./AttentionCard";
+import { AgentFamilyPicker } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { MessageContent } from "./MessageContent";
@@ -238,21 +239,31 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           <Menu aria-hidden="true" />
           {attentionCount > 0 && <span className="icon-badge" aria-hidden="true">{attentionCount > 9 ? "9+" : attentionCount}</span>}
         </SwitchHapticButton>
-        <nav className="agent-lineage" aria-label="Agent ancestry" data-gesture-exclusion>
-          {lineage.map((agent, index) => (
-            <span className="lineage-item" key={agent.id}>
-              {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
-              {index === lineage.length - 1 ? (
-                <h1 id="transcript-heading" title={agent.name}>{agent.name}</h1>
-              ) : (
-                <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
-              )}
-            </span>
-          ))}
-          {!lineage.length && <h1 id="transcript-heading">Prime Agent</h1>}
+        <nav className="agent-hierarchy" aria-label="Agent hierarchy" data-gesture-exclusion>
+          <div className="agent-lineage" role="group" aria-label="Agent ancestry" tabIndex={0}>
+            {lineage.map((agent, index) => (
+              <span className="lineage-item" key={agent.id}>
+                {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
+                {index === lineage.length - 1 ? (
+                  <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
+                ) : (
+                  <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
+                )}
+              </span>
+            ))}
+            {!lineage.length && <h1 id="transcript-heading" tabIndex={-1}>Prime Agent</h1>}
+          </div>
+          {selectedAgent && (
+            <AgentFamilyPicker
+              agents={catalog.agents}
+              selectedAgent={selectedAgent}
+              onSelect={(id) => void selectAgent(id)}
+            />
+          )}
         </nav>
         <span
           className={`agent-presence ${selectedAgent?.attention ? "attention" : selectedAgent?.activity ?? "idle"}`}
+          role="img"
           aria-label={selectedAgent?.attention ? `Needs ${selectedAgent.attention}` : selectedAgent?.activity ?? "No agent selected"}
         />
         <button
