@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  executeSessionSlashCommandRequestSchema,
+  executeSlashCommandRequestSchema,
   sendMessageRequestSchema,
-  SESSION_SLASH_COMMAND_NAMES,
+  EXECUTABLE_SLASH_COMMAND_NAMES,
 } from "./protocol";
 
 const valid = {
@@ -12,10 +12,10 @@ const valid = {
   args: "status",
 };
 
-describe("session slash command requests", () => {
-  it("accepts the four session-owned commands", () => {
-    for (const name of SESSION_SLASH_COMMAND_NAMES) {
-      expect(executeSessionSlashCommandRequestSchema.safeParse({ ...valid, name }).success).toBe(true);
+describe("slash command requests", () => {
+  it("accepts the explicitly executable commands", () => {
+    for (const name of EXECUTABLE_SLASH_COMMAND_NAMES) {
+      expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name }).success).toBe(true);
     }
   });
 
@@ -28,12 +28,15 @@ describe("session slash command requests", () => {
     }).success).toBe(false);
   });
 
-  it("rejects client-only, multiline, oversized, and extra input", () => {
-    expect(executeSessionSlashCommandRequestSchema.safeParse({ ...valid, name: "model" }).success).toBe(false);
+  it("accepts conservative command tokens but rejects malformed, multiline, oversized, and extra input", () => {
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "settings" }).success).toBe(true);
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "detected-extension" }).success).toBe(true);
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "../../invalid" }).success).toBe(false);
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "bad command" }).success).toBe(false);
     for (const separator of ["\r", "\n", "\u2028", "\u2029"]) {
-      expect(executeSessionSlashCommandRequestSchema.safeParse({ ...valid, args: `status${separator}now` }).success).toBe(false);
+      expect(executeSlashCommandRequestSchema.safeParse({ ...valid, args: `status${separator}now` }).success).toBe(false);
     }
-    expect(executeSessionSlashCommandRequestSchema.safeParse({ ...valid, args: "x".repeat(4_001) }).success).toBe(false);
-    expect(executeSessionSlashCommandRequestSchema.safeParse({ ...valid, extra: true }).success).toBe(false);
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, args: "x".repeat(4_001) }).success).toBe(false);
+    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, extra: true }).success).toBe(false);
   });
 });

@@ -6,7 +6,8 @@ import type {
   MutationAccepted,
   ProblemDetails,
   SessionCreated,
-  SessionSlashCommandName,
+  SlashCommandAccepted,
+  SlashCommandCatalog,
 } from "../protocol";
 
 export class ApiError extends Error {
@@ -80,31 +81,27 @@ export function sendMessage(
   });
 }
 
-export async function executeSessionSlashCommand(
+export async function loadSlashCommandCatalog(agentId: string): Promise<SlashCommandCatalog> {
+  return decode(await fetch(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  }));
+}
+
+export function executeSlashCommand(
   agentId: string,
   csrfToken: string,
   expectedRevision: number,
-  name: SessionSlashCommandName,
+  name: string,
   args: string,
   requestId: string = crypto.randomUUID(),
-): Promise<MutationAccepted> {
-  try {
-    return await mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, csrfToken, {
-      requestId,
-      expectedRevision,
-      name,
-      args,
-    });
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 404) throw error;
-    const text = `/${name}${args ? ` ${args}` : ""}`;
-    return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/messages`, csrfToken, {
-      requestId,
-      expectedRevision,
-      text,
-      images: [],
-    });
-  }
+): Promise<SlashCommandAccepted> {
+  return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, csrfToken, {
+    requestId,
+    expectedRevision,
+    name,
+    args,
+  });
 }
 
 export function abortAgent(agentId: string, csrfToken: string, expectedRevision: number) {

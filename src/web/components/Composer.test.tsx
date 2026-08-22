@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSnapshot, AgentSummary } from "../../protocol";
+import type { AgentSnapshot, AgentSummary, SlashCommandCatalog } from "../../protocol";
 import { Composer } from "./Composer";
 
 const gatewayMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
@@ -28,6 +28,45 @@ const agent: AgentSummary = {
   capabilities: { send: true, abort: true, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: true, images: true },
 };
 const snapshot: AgentSnapshot = { revision: 1, agentId: agent.id, messages: [], activity: [], attention: [] };
+const slashCatalog: SlashCommandCatalog = {
+  agentId: agent.id,
+  agentRevision: snapshot.revision,
+  partial: false,
+  commands: [
+    { name: "compact", description: "Compact session context", argumentHint: "[instructions]", source: "session", availability: "available", takesArguments: true },
+    { name: "refine", description: "Refine continual harness", argumentHint: "[instructions]", source: "session", availability: "available", takesArguments: true },
+    { name: "goal", description: "Manage persistent goal", argumentHint: "[objective]", source: "session", availability: "available", takesArguments: true },
+    { name: "autonomous", description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", availability: "available", takesArguments: true },
+    {
+      name: "model",
+      description: "Show or select the session model",
+      argumentHint: "[provider/model]",
+      source: "adapter",
+      availability: "available",
+      takesArguments: true,
+      options: [{ value: "openai/example", label: "Example", current: true }],
+    },
+    { name: "effort", description: "Show or select thinking level", argumentHint: "[level]", source: "adapter", availability: "available", takesArguments: true },
+    { name: "name", description: "Show or set session name", argumentHint: "[name]", source: "adapter", availability: "available", takesArguments: true },
+    { name: "context", description: "Show context usage", source: "adapter", availability: "available", takesArguments: false },
+    { name: "heartbeat", description: "Manage heartbeat", argumentHint: "[status]", source: "adapter", availability: "available", takesArguments: true },
+    {
+      name: "deploy",
+      description: "Extension command",
+      source: "extension",
+      availability: "experimental",
+      takesArguments: true,
+    },
+    {
+      name: "future",
+      description: "Unavailable adapter command",
+      source: "adapter",
+      availability: "unavailable",
+      unavailableReason: "adapter_missing",
+      takesArguments: false,
+    },
+  ],
+};
 
 let preparedImageCount = 0;
 
@@ -46,7 +85,8 @@ beforeEach(() => {
     selectedAgent: agent,
     selectedSnapshot: snapshot,
     send: vi.fn().mockResolvedValue(undefined),
-    runSlashCommand: vi.fn().mockResolvedValue(undefined),
+    loadSlashCommands: vi.fn().mockResolvedValue(slashCatalog),
+    runSlashCommand: vi.fn().mockResolvedValue({ kind: "session_accepted" }),
     abort: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -113,8 +153,8 @@ describe("Composer", () => {
 
     await user.click(screen.getByRole("button", { name: "Composer options" }));
     await user.click(screen.getByRole("menuitem", { name: /^Slash command/ }));
-    expect(screen.getByRole("listbox", { name: "Session commands" })).toBeInTheDocument();
-    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeInTheDocument();
+    expect(screen.getAllByRole("option")).toHaveLength(11);
     await user.click(screen.getByRole("option", { name: /^\/goal/ }));
     expect(input).toHaveValue("/goal ");
 
@@ -125,10 +165,92 @@ describe("Composer", () => {
     await waitFor(() => expect(input).toHaveValue(""));
   });
 
+  it("uses catalog argument suggestions for direct adapter commands", async () => {
+    gatewayMock.current.runSlashCommand = vi.fn().mockResolvedValue({
+      kind: "model",
+      provider: "openai",
+      modelId: "example",
+    });
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+
+    await user.type(input, "/model ");
+    await user.click(await screen.findByRole("option", { name: /Example.*Current/ }));
+    expect(input).toHaveValue("/model openai/example");
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand)
+      .toHaveBeenCalledWith("model", "openai/example", expect.any(String)));
+    expect(await screen.findByRole("status")).toHaveTextContent("Model: openai/example");
+  });
+
+  it("runs cataloged experimental commands with explicit warnings", async () => {
+    gatewayMock.current.runSlashCommand = vi.fn().mockResolvedValue({
+      kind: "experimental_accepted",
+      source: "extension",
+    });
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+
+    await user.type(input, "/dep");
+    const detected = await screen.findByRole("option", { name: /deploy.*Experimental extension command/ });
+    expect(input).toHaveAttribute("aria-expanded", "true");
+    expect(input).toHaveAttribute("aria-activedescendant", detected.id);
+    expect(detected).toHaveAttribute("aria-disabled", "false");
+    expect(detected).toHaveAttribute("data-availability", "experimental");
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(false);
+    expect(input).toHaveValue("/deploy ");
+    expect(screen.getByRole("status")).toHaveAccessibleName("Experimental extension command. May run local extension code.");
+    expect(screen.getByRole("status")).toHaveTextContent("EXPERIMENTAL ACCESS");
+
+    await user.type(input, "target");
+    await user.click(screen.getByRole("button", { name: "Run experimental command" }));
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand)
+      .toHaveBeenCalledWith("deploy", "target", expect.any(String)));
+    expect(gatewayMock.current.send).not.toHaveBeenCalled();
+    expect(await screen.findByRole("status")).toHaveTextContent("Extension command accepted");
+  });
+
+  it("keeps unavailable commands readable without trapping Tab or submitting", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "/fut");
+    const unavailable = await screen.findByRole("option", { name: /future.*Detected, unavailable on mobile/ });
+    expect(input).toHaveAttribute("aria-activedescendant", unavailable.id);
+    expect(unavailable).toHaveAttribute("aria-disabled", "true");
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(true);
+    await user.click(unavailable);
+    expect(gatewayMock.current.runSlashCommand).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent("detected but is unavailable");
+  });
+
+  it("fails closed while the command catalog is unavailable", async () => {
+    gatewayMock.current.loadSlashCommands = vi.fn().mockRejectedValue(new Error("offline"));
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "/goal status");
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+    expect(gatewayMock.current.runSlashCommand).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent("Command catalog unavailable");
+  });
+
+  it("completes no-argument commands without adding a space", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "/con");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("/context");
+  });
+
   it("keeps a failed command for retry with the same request id", async () => {
     gatewayMock.current.runSlashCommand = vi.fn()
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ kind: "session_accepted" });
     const user = userEvent.setup();
     render(<Composer />);
     const input = screen.getByRole("textbox", { name: "Message Agent" });
@@ -151,16 +273,16 @@ describe("Composer", () => {
     const input = screen.getByRole("textbox", { name: "Message Agent" });
 
     await user.type(input, "/go");
-    await user.keyboard("{Enter}");
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(false);
     expect(input).toHaveValue("/goal ");
     await user.keyboard("{Shift>}{Enter}{/Shift}");
     expect(input).toHaveValue("/goal ");
     await user.clear(input);
-    await user.type(input, "/model gpt");
+    await user.type(input, "/settings");
     await user.click(screen.getByRole("button", { name: "Run command" }));
     expect(gatewayMock.current.runSlashCommand).not.toHaveBeenCalled();
     expect(gatewayMock.current.send).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent("Unknown or invalid session command.");
+    expect(screen.getByRole("status")).toHaveTextContent("Unknown or invalid slash command.");
   });
 
   it("selects, previews, and removes images without exposing their filenames", async () => {

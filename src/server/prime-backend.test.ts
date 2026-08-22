@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
-import { BackendCapabilityError } from "./backend.js";
+import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
 import { PrimeBackend, projectPrimeTranscript, projectSavedSessionTranscript } from "./prime-backend.js";
@@ -14,8 +14,18 @@ interface FixtureState {
   sessions: Array<Record<string, unknown>>;
   snapshot: Record<string, unknown>;
   attachOptions: Record<string, unknown> | null;
+  attachCount: number;
+  attachDelayMs: number;
+  snapshotDelayMs: number;
+  adapterDelayMs: number;
   prompts: Array<{ message: string; options?: Record<string, unknown> }>;
   promptError?: Error;
+  commands: Array<Record<string, unknown>>;
+  availableModels: Array<Record<string, unknown>>;
+  connectionState: Record<string, unknown>;
+  sessionStats: Record<string, unknown>;
+  heartbeat?: Record<string, unknown>;
+  adapterCalls: Array<Record<string, unknown>>;
   aborts: number;
   responses: unknown[];
   creates: Array<Record<string, unknown>>;
@@ -75,7 +85,34 @@ const fixture: FixtureState = {
     }],
   },
   attachOptions: null,
+  attachCount: 0,
+  attachDelayMs: 0,
+  snapshotDelayMs: 0,
+  adapterDelayMs: 0,
   prompts: [],
+  commands: [
+    { name: "deploy", source: "extension", description: "private extension", sourceInfo: { path: "/private/extensions/deploy.ts" } },
+    { name: "skill:review", source: "skill", sourceInfo: { path: "/private/skills/review.md" } },
+    { name: "../../invalid", source: "prompt", sourceInfo: { path: "/private/prompts/invalid.md" } },
+  ],
+  availableModels: [
+    { provider: "openai", id: "example", name: "Example", baseUrl: "https://private.invalid", headers: { Authorization: "secret" } },
+    { provider: "other", id: "example", name: "Other Example" },
+  ],
+  connectionState: {
+    sessionName: "Live agent",
+    model: { provider: "openai", id: "example", name: "Example", headers: { Authorization: "secret" } },
+    thinkingLevel: "medium",
+    availableThinkingLevels: ["low", "medium", "high"],
+  },
+  sessionStats: {
+    sessionFile: "/private/session.jsonl",
+    sessionId: "private-session",
+    tokens: { total: 12345 },
+    cost: 1.25,
+    contextUsage: { tokens: 5000, contextWindow: 100000, percent: 5 },
+  },
+  adapterCalls: [],
   aborts: 0,
   responses: [],
   creates: [],
@@ -108,7 +145,51 @@ export class DaemonClient {
 }
 const connection = {
   subscribe(listener) { state.listener = listener; return () => { state.listener = null; }; },
-  async getInitialSnapshot() { return structuredClone(state.snapshot); },
+  async getInitialSnapshot() {
+    if (state.snapshotDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.snapshotDelayMs));
+    return structuredClone(state.snapshot);
+  },
+  async getCommands() { return structuredClone(state.commands); },
+  async getAvailableModels() { return structuredClone(state.availableModels); },
+  async getState() { return structuredClone(state.connectionState); },
+  async setModel(provider, modelId) {
+    if (state.adapterDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.adapterDelayMs));
+    state.adapterCalls.push({ method: "setModel", provider, modelId });
+    const model = state.availableModels.find((item) => item.provider === provider && item.id === modelId);
+    if (!model) throw new Error("private model error");
+    state.connectionState.model = structuredClone(model);
+    return structuredClone(model);
+  },
+  async setThinkingLevel(level) {
+    state.adapterCalls.push({ method: "setThinkingLevel", level });
+    state.connectionState.thinkingLevel = level;
+  },
+  async setSessionName(name) {
+    state.adapterCalls.push({ method: "setSessionName", name });
+    state.connectionState.sessionName = name;
+  },
+  async getSessionStats() { return structuredClone(state.sessionStats); },
+  async getHeartbeat() { return state.heartbeat ? structuredClone(state.heartbeat) : undefined; },
+  async setHeartbeat(schedule, instruction, deliveryMode) {
+    state.adapterCalls.push({ method: "setHeartbeat", schedule, instruction, deliveryMode });
+    state.heartbeat = {
+      id: "private-heartbeat-id",
+      cwd: "/private/project",
+      prompt: instruction,
+      status: "active",
+      schedule: { expression: schedule },
+      deliveryMode: deliveryMode ?? "steer",
+      nextRunAt: "2026-01-02T00:00:00.000Z",
+    };
+    return structuredClone(state.heartbeat);
+  },
+  async updateHeartbeat(action) {
+    state.adapterCalls.push({ method: "updateHeartbeat", action });
+    if (!state.heartbeat) return undefined;
+    if (action === "clear") { const previous = state.heartbeat; state.heartbeat = undefined; return structuredClone(previous); }
+    state.heartbeat.status = action === "pause" ? "paused" : "active";
+    return structuredClone(state.heartbeat);
+  },
   async prompt(message, options) {
     if (state.promptError) throw state.promptError;
     state.prompts.push({ message, options });
@@ -119,7 +200,9 @@ const connection = {
 };
 export const DaemonAgentConnection = {
   async attach(client, activeSessionId, options) {
+    state.attachCount += 1;
     state.attachOptions = { activeSessionId, ...options };
+    if (state.attachDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.attachDelayMs));
     return connection;
   },
 };
@@ -253,12 +336,21 @@ describe("projectPrimeTranscript", () => {
         details: { command: { name: "refine", args: "rollback invalid", text: "/refine rollback invalid" }, success: false },
         timestamp: 3,
       },
+      {
+        role: "custom",
+        customType: "session_slash_command",
+        content: "/goalEvil",
+        display: true,
+        details: { command: { name: "goal", args: "", text: "/goalEvil" } },
+        timestamp: 4,
+      },
     ]);
 
     expect(messages).toMatchObject([
       { role: "user", text: "/goal status", state: "complete" },
       { role: "system", text: "Goal active: Ship it", state: "complete" },
       { role: "system", text: "/refine failed.", state: "failed" },
+      { role: "system", text: "/goalEvil", state: "complete" },
     ]);
     expect(JSON.stringify(messages)).not.toContain("private internal detail");
   });
@@ -268,9 +360,21 @@ describe("PrimeBackend", () => {
   it("uses the public daemon adapter and validates browser approval choices", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     fixture.attachOptions = null;
+    fixture.attachCount = 0;
+    fixture.attachDelayMs = 0;
+    fixture.snapshotDelayMs = 20;
+    fixture.adapterDelayMs = 0;
     fixture.prompts = [];
     fixture.aborts = 0;
     fixture.responses = [];
+    fixture.adapterCalls = [];
+    fixture.heartbeat = undefined;
+    fixture.connectionState = {
+      sessionName: "Live agent",
+      model: { provider: "openai", id: "example", name: "Example", headers: { Authorization: "secret" } },
+      thinkingLevel: "medium",
+      availableThinkingLevels: ["low", "medium", "high"],
+    };
     fixture.listener = null;
 
     const backend = new PrimeBackend(moduleSpecifier());
@@ -290,7 +394,12 @@ describe("PrimeBackend", () => {
       expect(backend.catalog().agents.find((agent) => agent.id !== summary.id)?.name)
         .toBe("Refine the mobile session drawer behavior");
 
-      const snapshot = await backend.agentSnapshot(summary.id);
+      const [snapshot, initialCommandCatalog] = await Promise.all([
+        backend.agentSnapshot(summary.id),
+        backend.slashCommandCatalog(summary.id),
+      ]);
+      fixture.snapshotDelayMs = 0;
+      expect(fixture.attachCount).toBe(1);
       expect(snapshot?.messages[0].text).toBe("Ready");
       expect(snapshot?.messages[1]).toMatchObject({
         role: "user",
@@ -346,7 +455,7 @@ describe("PrimeBackend", () => {
         },
       });
 
-      await backend.executeSessionSlashCommand({
+      await backend.executeSlashCommand({
         agentId: summary.id,
         requestId: crypto.randomUUID(),
         expectedRevision: snapshot!.revision,
@@ -366,13 +475,124 @@ describe("PrimeBackend", () => {
       })).rejects.toBeInstanceOf(BackendCapabilityError);
       expect(fixture.prompts).toHaveLength(3);
 
+      const commandCatalog = initialCommandCatalog;
+      expect(commandCatalog?.commands.filter((command) => command.availability === "available").map((command) => command.name))
+        .toEqual(["compact", "refine", "goal", "autonomous", "model", "effort", "name", "context", "heartbeat"]);
+      expect(commandCatalog?.commands.filter((command) => command.availability === "experimental").map((command) => command.name))
+        .toEqual(["deploy", "skill:review"]);
+      expect(JSON.stringify(commandCatalog)).not.toContain("/private/");
+      expect(JSON.stringify(commandCatalog)).not.toContain("Authorization");
+      expect(JSON.stringify(commandCatalog)).not.toContain("baseUrl");
+
+      const experimentalResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "deploy",
+        args: "staging",
+      });
+      expect(experimentalResult.result).toEqual({ kind: "experimental_accepted", source: "extension" });
+      expect(fixture.prompts[3]).toEqual({
+        message: "/deploy staging",
+        options: { queueIfBusy: true, streamingBehavior: "followUp" },
+      });
+      await expect(backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "settings",
+        args: "",
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(fixture.prompts).toHaveLength(4);
+
+      await expect(backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "model",
+        args: "example",
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      const modelResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "model",
+        args: "openai/example",
+      });
+      expect(modelResult.result).toEqual({ kind: "model", provider: "openai", modelId: "example" });
+
+      const effortResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: modelResult.revision,
+        name: "effort",
+        args: "high",
+      });
+      expect(effortResult.result).toEqual({ kind: "effort", level: "high", availableLevels: ["low", "medium", "high"] });
+
+      const nameResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: effortResult.revision,
+        name: "name",
+        args: "Renamed safely",
+      });
+      expect(nameResult.result).toEqual({ kind: "name", name: "Renamed safely" });
+
+      const contextResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: nameResult.revision,
+        name: "context",
+        args: "",
+      });
+      expect(contextResult.result).toEqual({
+        kind: "context_usage",
+        contextTokens: 5_000,
+        contextWindow: 100_000,
+        percent: 5,
+        totalTokens: 12_345,
+        cost: 1.25,
+      });
+      expect(JSON.stringify(contextResult)).not.toContain("private-session");
+      expect(JSON.stringify(contextResult)).not.toContain("session.jsonl");
+
+      const heartbeatResult = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: contextResult.revision,
+        name: "heartbeat",
+        args: "every 15m --follow-up private instruction",
+      });
+      expect(heartbeatResult.result).toEqual({
+        kind: "heartbeat",
+        status: "active",
+        schedule: "every 15m",
+        deliveryMode: "follow_up",
+        nextRunAt: "2026-01-02T00:00:00.000Z",
+      });
+      expect(JSON.stringify(heartbeatResult)).not.toContain("private instruction");
+      expect(JSON.stringify(heartbeatResult)).not.toContain("private-heartbeat-id");
+      const clearedHeartbeat = await backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: heartbeatResult.revision,
+        name: "heartbeat",
+        args: "clear",
+      });
+      expect(clearedHeartbeat.result).toEqual({ kind: "heartbeat", status: "none" });
+      expect(fixture.adapterCalls.map((call) => call.method)).toEqual([
+        "setModel", "setThinkingLevel", "setSessionName", "setHeartbeat", "updateHeartbeat",
+      ]);
+      expect(fixture.prompts).toHaveLength(4);
+
       fixture.promptError = new Error("provider detail with sensitive image payload");
       let promptError: unknown;
       try {
         await backend.sendMessage({
           agentId: summary.id,
           requestId: crypto.randomUUID(),
-          expectedRevision: snapshot!.revision,
+          expectedRevision: clearedHeartbeat.revision,
           text: "sensitive prompt text",
           images: [],
         });
@@ -385,10 +605,10 @@ describe("PrimeBackend", () => {
 
       let commandError: unknown;
       try {
-        await backend.executeSessionSlashCommand({
+        await backend.executeSlashCommand({
           agentId: summary.id,
           requestId: crypto.randomUUID(),
-          expectedRevision: snapshot!.revision,
+          expectedRevision: clearedHeartbeat.revision,
           name: "refine",
           args: "private command argument",
         });
@@ -448,6 +668,45 @@ describe("PrimeBackend", () => {
       await backend.abort({ agentId: summary.id, requestId: crypto.randomUUID(), expectedRevision: latest!.revision });
       expect(fixture.aborts).toBe(1);
     } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("serializes direct adapter mutations and rejects stale overlapping commands", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    delete fixture.promptError;
+    fixture.adapterCalls = [];
+    fixture.attachDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.adapterDelayMs = 20;
+    fixture.connectionState = {
+      sessionName: "Live agent",
+      model: { provider: "openai", id: "example" },
+      thinkingLevel: "medium",
+      availableThinkingLevels: ["low", "medium", "high"],
+    };
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const summary = backend.catalog().agents[0];
+      const snapshot = await backend.agentSnapshot(summary.id);
+      const execute = () => backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "model",
+        args: "openai/example",
+      });
+      const results = await Promise.allSettled([execute(), execute()]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const rejected = results.find((result) => result.status === "rejected");
+      expect(rejected).toMatchObject({ status: "rejected", reason: expect.any(BackendConflictError) });
+      expect(fixture.adapterCalls.filter((call) => call.method === "setModel")).toHaveLength(1);
+      expect((await backend.agentSnapshot(summary.id))?.revision).toBe(snapshot!.revision + 1);
+    } finally {
+      fixture.adapterDelayMs = 0;
       hub.close();
       await backend.close();
     }

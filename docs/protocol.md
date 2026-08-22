@@ -42,13 +42,21 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 
 Session creation is a mutation too: `POST /api/v1/sessions` with `{ requestId, cwd, name? }` creates a daemon session with `cwd` as its working directory and returns the new agent id. `GET /api/v1/directories?path=…` is the read-only companion used by the picker: it returns one directory level as `{ path, home, crumbs, entries, truncated }` where every entry carries an absolute path and clients never join path segments themselves.
 
-### Session slash commands
+### Slash commands
 
-`POST /api/v1/agents/:id/commands` accepts `{ requestId, expectedRevision, name, args }`. `name` is restricted to `compact`, `refine`, `goal`, or `autonomous`, and `args` is a bounded single-line string. The gateway reconstructs the command and calls Prime through the normal session-input admission path. It never accepts raw command text or daemon command objects.
+`GET /api/v1/agents/:id/commands` returns an authenticated, no-store, per-agent catalog. The gateway owns all descriptions and argument hints. Prime’s dynamic `getCommands()` rows are reduced to a bounded command name and broad source category. Paths, package sources, raw descriptions, registered names, and other daemon metadata are discarded. Detected extension, prompt, and skill commands are exposed by sanitized name and broad source category as **experimental**. The gateway re-checks the live catalog immediately before execution, reconstructs the command server-side, and calls Prime’s normal prompt entry point. A catalog reload between those two operations can still make Prime treat the text as a model prompt; this accepted experimental limitation is shown in the mobile UI.
 
-These four commands are owned by the Prime session and work without terminal UI. Client-only commands such as `/model`, `/settings`, `/login`, `/export`, and `/quit` are not forwarded as prompts. Unknown or multiline slash input is rejected in the composer instead of becoming a model turn.
+`POST /api/v1/agents/:id/commands` accepts `{ requestId, expectedRevision, name, args }`. `name` must be a conservative bounded command token, `args` is a bounded single-line string, and unknown fields are rejected. The backend authorizes either one of the nine explicit commands or an exact name present in the current sanitized dynamic catalog. TUI-only and unknown names are rejected.
 
-Command mutations use the same authentication, CSRF, revision, idempotency, and rate-limit checks as message sends. They do not create optimistic transcript bubbles. During a rolling local upgrade, a browser that receives a route-level 404 may reconstruct one of the same four enum-validated commands through the existing message route; the strict endpoint is used after the gateway restarts. Authoritative command and result rows arrive through the agent stream.
+The four session-owned commands—`compact`, `refine`, `goal`, and `autonomous`—are reconstructed server-side and admitted through Prime’s normal session-input path. The five adapter commands never use `prompt()`:
+
+- `model` validates an exact available provider/model before calling `setModel()`;
+- `effort` validates the current model’s available thinking levels before calling `setThinkingLevel()`;
+- `name` reads or updates the session name through `getState()` and `setSessionName()`;
+- `context` returns only finite token, context-window, percentage, and cost fields from `getSessionStats()`;
+- `heartbeat` maps conservative status, pause, resume, clear, and set syntax to the explicit heartbeat methods.
+
+Command responses use a closed result union. Experimental results contain only the broad command source. Responses never return raw models, context-tree labels, heartbeat prompts, filesystem paths, daemon errors, provider configuration, or extension output. Command mutations use authentication, CSRF, revision, rate-limit, and request-ID binding checks. They create no optimistic transcript bubbles. Unknown, unavailable, multiline, or stale-client slash input fails closed and never falls back through the ordinary message endpoint. Experimental commands are the explicit exception: after a live catalog re-check, they use Prime’s prompt entry point and therefore retain Prime’s acknowledged command-reload race.
 
 ### Image messages
 

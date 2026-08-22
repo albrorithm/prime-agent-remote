@@ -12,10 +12,12 @@ import {
 import { useGateway } from "../gateway-store";
 import { MAX_IMAGE_ATTACHMENTS, prepareImageFile, type PreparedImage } from "../image-attachments";
 import {
-  completeSessionSlashCommand,
-  matchingSessionSlashCommands,
-  parseSessionSlashCommandInput,
-  type SessionSlashCommandOption,
+  commandEntry,
+  FALLBACK_SLASH_COMMAND_CATALOG,
+  formatSlashCommandResult,
+  matchingSlashCommandSuggestions,
+  parseSlashCommandInput,
+  type SlashCommandSuggestion,
 } from "../slash-commands";
 
 const DRAFTS_KEY = "prime-web-drafts";
@@ -58,8 +60,14 @@ function preparationErrorMessage(error: unknown): string {
   return "Could not prepare one of the selected images.";
 }
 
+function experimentalCommandNotice(command: SlashCommandSuggestion["command"]): string {
+  return command.source === "extension"
+    ? "Experimental extension command. May run local extension code."
+    : "Experimental command. Sends a model prompt.";
+}
+
 export function Composer() {
-  const { selectedAgent, selectedSnapshot, send, runSlashCommand, abort } = useGateway();
+  const { selectedAgent, selectedSnapshot, send, loadSlashCommands, runSlashCommand, abort } = useGateway();
   const [drafts, setDraftsState] = useState<Record<string, string>>(loadDrafts);
   const [images, setImages] = useState<PreparedImage[]>([]);
   const [preparing, setPreparing] = useState(false);
@@ -69,6 +77,8 @@ export function Composer() {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [dismissedSlashDraft, setDismissedSlashDraft] = useState("");
+  const [slashCatalog, setSlashCatalog] = useState(FALLBACK_SLASH_COMMAND_CATALOG);
+  const [slashCatalogReady, setSlashCatalogReady] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -86,13 +96,18 @@ export function Composer() {
   activeAgentIdRef.current = id;
   const draft = drafts[id] ?? "";
   const commandDraft = draft.trimStart().startsWith("/");
-  const slashCommands = matchingSessionSlashCommands(draft);
+  const draftCommandEntry = commandDraft ? commandEntry(draft.trim(), slashCatalog) : undefined;
+  const experimentalCommandDraft = draftCommandEntry?.availability === "experimental";
+  const slashCommands = matchingSlashCommandSuggestions(draft, slashCatalog);
+  const selectableSlashIndexes = slashCatalogReady ? slashCommands.map((_, index) => index) : [];
   const slashMenuOpen = slashCommands.length > 0
     && dismissedSlashDraft !== draft
     && !optionsOpen
     && !sending
     && Boolean(selectedAgent?.capabilities.send);
-  const activeSlashCommandIndex = slashCommands.length > 0 ? Math.min(slashCommandIndex, slashCommands.length - 1) : 0;
+  const activeSlashCommandIndex = selectableSlashIndexes.includes(slashCommandIndex)
+    ? slashCommandIndex
+    : selectableSlashIndexes[0] ?? 0;
   const activeSlashCommand = slashCommands[activeSlashCommandIndex];
   const streaming = selectedSnapshot?.messages.some((message) => message.state === "streaming") ?? false;
   const canAttachImages = Boolean(selectedAgent?.capabilities.send && selectedAgent.capabilities.images);
@@ -174,6 +189,26 @@ export function Composer() {
       flushDelayedRevocations();
     };
   }, [id]);
+
+  useEffect(() => {
+    let current = true;
+    setSlashCatalog(FALLBACK_SLASH_COMMAND_CATALOG);
+    setSlashCatalogReady(false);
+    if (!id || !selectedAgent?.capabilities.send) return () => { current = false; };
+    if (typeof loadSlashCommands !== "function") {
+      setSlashCatalogReady(true);
+      return () => { current = false; };
+    }
+    void loadSlashCommands(id).then((catalog) => {
+      if (!current || activeAgentIdRef.current !== id || catalog.agentId !== id) return;
+      setSlashCatalog(catalog);
+      setSlashCatalogReady(true);
+    }).catch(() => {
+      if (!current || activeAgentIdRef.current !== id) return;
+      setSlashCatalogReady(false);
+    });
+    return () => { current = false; };
+  }, [id, selectedAgent?.capabilities.send, loadSlashCommands]);
 
   useEffect(() => {
     if (selectedAgent?.capabilities.images) return;
@@ -338,9 +373,16 @@ export function Composer() {
     const selectedImages = imageOwnerRef.current === id ? imagesRef.current : [];
     if (!id || !selectedAgent?.capabilities.send || (selectedImages.length > 0 && !canAttachImages) || (!text && !selectedImages.length)) return;
     if (submittingRef.current || preparingRef.current) return;
-    const slashCommand = text.startsWith("/") ? parseSessionSlashCommandInput(text) : null;
+    if (text.startsWith("/") && !slashCatalogReady) {
+      setAttachmentStatus("Command catalog unavailable. Reload after the gateway restarts.");
+      return;
+    }
+    const slashCommand = text.startsWith("/") ? parseSlashCommandInput(text, slashCatalog) : null;
     if (text.startsWith("/") && !slashCommand) {
-      setAttachmentStatus("Unknown or invalid session command.");
+      const detected = commandEntry(text, slashCatalog);
+      setAttachmentStatus(detected?.availability === "unavailable"
+        ? "This command was detected but is unavailable in the mobile UI."
+        : "Unknown or invalid slash command.");
       return;
     }
     if (slashCommand && selectedImages.length > 0) {
@@ -359,15 +401,23 @@ export function Composer() {
     setSending(true);
     setOptionsOpen(false);
     try {
-      if (slashCommand) await runSlashCommand(slashCommand.name, slashCommand.args, requestId);
-      else if (selectedImages.length) await send(text, selectedImages, requestId);
+      let resultStatus = "";
+      if (slashCommand) {
+        const commandResult = await runSlashCommand(slashCommand.name, slashCommand.args, requestId);
+        resultStatus = formatSlashCommandResult(commandResult);
+        if (commandResult.kind !== "session_accepted" && typeof loadSlashCommands === "function") {
+          void loadSlashCommands(agentId).then((catalog) => {
+            if (activeAgentIdRef.current === agentId && catalog.agentId === agentId) setSlashCatalog(catalog);
+          }).catch(() => {});
+        }
+      } else if (selectedImages.length) await send(text, selectedImages, requestId);
       else await send(text, undefined, requestId);
       if (activeAgentIdRef.current === agentId && submissionVersion === submissionVersionRef.current) {
         setDrafts((current) => ({ ...current, [agentId]: "" }));
         imagesRef.current = [];
         imageOwnerRef.current = "";
         setImages([]);
-        setAttachmentStatus("");
+        setAttachmentStatus(resultStatus);
         retryRequestRef.current = null;
         delaySuccessfulRevocation(selectedImages);
       }
@@ -393,8 +443,13 @@ export function Composer() {
     }
   }
 
-  function selectSlashCommand(command: SessionSlashCommandOption) {
-    setDrafts((current) => ({ ...current, [id]: completeSessionSlashCommand(command) }));
+  function selectSlashCommand(suggestion: SlashCommandSuggestion) {
+    if (!slashCatalogReady || suggestion.command.availability === "unavailable") {
+      setAttachmentStatus("This command was detected but is unavailable in the mobile UI.");
+      return;
+    }
+    setDrafts((current) => ({ ...current, [id]: suggestion.completion }));
+    setAttachmentStatus("");
     setSlashCommandIndex(0);
     setDismissedSlashDraft("");
     queueMicrotask(() => textareaRef.current?.focus());
@@ -416,19 +471,23 @@ export function Composer() {
       setDismissedSlashDraft(draft);
       return;
     }
-    if (slashMenuOpen && activeSlashCommand) {
+    if (slashMenuOpen && activeSlashCommand && selectableSlashIndexes.length > 0) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         const direction = event.key === "ArrowDown" ? 1 : -1;
-        setSlashCommandIndex((current) => (current + direction + slashCommands.length) % slashCommands.length);
+        const position = Math.max(0, selectableSlashIndexes.indexOf(activeSlashCommandIndex));
+        const next = (position + direction + selectableSlashIndexes.length) % selectableSlashIndexes.length;
+        setSlashCommandIndex(selectableSlashIndexes[next]);
         return;
       }
-      if (event.key === "Tab") {
+      if (event.key === "Tab" && activeSlashCommand.command.availability !== "unavailable") {
         event.preventDefault();
         selectSlashCommand(activeSlashCommand);
         return;
       }
-      if (event.key === "Enter" && !event.shiftKey && draft !== `/${activeSlashCommand.name}`) {
+      const exactCommand = activeSlashCommand.argumentValue === undefined
+        && draft === `/${activeSlashCommand.command.name}`;
+      if (event.key === "Enter" && !event.shiftKey && !exactCommand) {
         event.preventDefault();
         selectSlashCommand(activeSlashCommand);
         return;
@@ -461,25 +520,43 @@ export function Composer() {
         onChange={onImageSelection}
       />
       {slashMenuOpen && (
-        <div className="slash-command-menu" id="slash-command-options" role="listbox" aria-label="Session commands">
-          {slashCommands.map((command, index) => (
-            <button
-              key={command.name}
-              id={`slash-command-${command.name}`}
-              type="button"
-              role="option"
-              aria-selected={index === activeSlashCommandIndex}
-              onClick={() => selectSlashCommand(command)}
-            >
-              <span><strong>/{command.name}</strong><code>{command.argumentHint}</code></span>
-              <small>{command.description}</small>
-            </button>
-          ))}
+        <div className="slash-command-menu" id="slash-command-options" role="listbox" aria-label="Slash commands">
+          {slashCommands.map((suggestion, index) => {
+            const unavailable = !slashCatalogReady || suggestion.command.availability === "unavailable";
+            return (
+              <button
+                key={suggestion.key}
+                id={`slash-command-${index}`}
+                type="button"
+                role="option"
+                aria-selected={index === activeSlashCommandIndex}
+                aria-disabled={unavailable}
+                data-availability={suggestion.command.availability}
+                onClick={() => selectSlashCommand(suggestion)}
+              >
+                <span>
+                  <strong>{suggestion.display}</strong>
+                  {suggestion.argumentValue === undefined && <code>{suggestion.command.argumentHint}</code>}
+                </span>
+                <small>
+                  {suggestion.command.availability === "experimental" ? (
+                    <em
+                      className="slash-command-experimental-label"
+                      aria-label={experimentalCommandNotice(suggestion.command)}
+                      title={experimentalCommandNotice(suggestion.command)}
+                    >EXPERIMENTAL ACCESS</em>
+                  ) : (
+                    <span>{unavailable ? "Detected, unavailable on mobile" : suggestion.description}</span>
+                  )}
+                </small>
+              </button>
+            );
+          })}
         </div>
       )}
       {optionsOpen && (
         <div className="composer-menu" id="composer-options" role="menu" aria-label="Composer options">
-          <button role="menuitem" onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a Prime command</small></span></button>
+          <button role="menuitem" onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
           <button role="menuitem" onClick={chooseImages} disabled={!canAttachImages || preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
           <button role="menuitem" disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
         </div>
@@ -516,17 +593,32 @@ export function Composer() {
           ref={textareaRef}
           id="message-composer"
           value={draft}
-          onChange={(event) => setDrafts((current) => ({ ...current, [id]: event.target.value }))}
+          onChange={(event) => {
+            setDrafts((current) => ({ ...current, [id]: event.target.value }));
+            setAttachmentStatus("");
+          }}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={1}
           aria-autocomplete="list"
+          aria-expanded={slashMenuOpen}
           aria-controls={slashMenuOpen ? "slash-command-options" : undefined}
-          aria-activedescendant={slashMenuOpen && activeSlashCommand ? `slash-command-${activeSlashCommand.name}` : undefined}
+          aria-activedescendant={slashMenuOpen && activeSlashCommand && selectableSlashIndexes.length ? `slash-command-${activeSlashCommandIndex}` : undefined}
           placeholder="Send a message"
           disabled={!selectedAgent.capabilities.send}
         />
-        {attachmentStatus && <span className="composer-attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>}
+        {attachmentStatus && (
+          <span className="composer-attachment-status" role="status" aria-live="polite">{attachmentStatus}</span>
+        )}
+        {experimentalCommandDraft && draftCommandEntry && (
+          <span
+            className="composer-experimental-label"
+            role="status"
+            aria-live="polite"
+            aria-label={experimentalCommandNotice(draftCommandEntry)}
+            title={experimentalCommandNotice(draftCommandEntry)}
+          >EXPERIMENTAL ACCESS</span>
+        )}
       </div>
       {streaming && selectedAgent.capabilities.abort ? (
         <button className="composer-action stop" onClick={() => void stop()} disabled={stopping} aria-label="Stop agent"><Square /></button>
@@ -535,7 +627,7 @@ export function Composer() {
           className="composer-action send"
           onClick={() => void submit()}
           disabled={!selectedAgent.capabilities.send || (!draft.trim() && !visibleImages.length) || preparing || sending}
-          aria-label={commandDraft ? "Run command" : "Send message"}
+          aria-label={experimentalCommandDraft ? "Run experimental command" : commandDraft ? "Run command" : "Send message"}
         ><Send /></button>
       )}
     </div>

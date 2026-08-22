@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { SESSION_SLASH_COMMAND_NAMES } from "../protocol.js";
 import type {
   ActivityItem,
   AgentCapabilities,
@@ -10,6 +11,9 @@ import type {
   DirectoryListing,
   MutationAccepted,
   SessionCreated,
+  SlashCommandAccepted,
+  SlashCommandCatalog,
+  SlashCommandResult,
   TranscriptMessage,
 } from "../protocol.js";
 import {
@@ -21,12 +25,13 @@ import {
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
-  type ExecuteSessionSlashCommandInput,
+  type ExecuteSlashCommandInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
 import { absoluteDirectoryPath, directoryCrumbs, selectDirectoryEntries, type ListedChild } from "./directories.js";
 import type { EventHub } from "./event-hub.js";
+import { builtinSlashCommandEntries, detectedSlashCommandEntries, parseHeartbeatArgs } from "./slash-command-catalog.js";
 
 const now = new Date().toISOString();
 const fullCapabilities: AgentCapabilities = {
@@ -182,6 +187,9 @@ export class DemoBackend implements AgentBackend {
   private readonly catalogState: CatalogSnapshot = { revision: 1, agents: structuredClone(initialAgents) };
   private readonly snapshots = new Map(initialAgents.map((item) => [item.id, initialSnapshot(item)]));
   private readonly timers = new Map<string, NodeJS.Timeout[]>();
+  private readonly models = new Map<string, { provider: string; modelId: string }>();
+  private readonly efforts = new Map<string, string>();
+  private readonly heartbeats = new Map<string, { status: "active" | "paused"; schedule: string; deliveryMode: "steer" | "follow_up" }>();
   private createdCount = 0;
 
   async initialize(hub: EventHub): Promise<void> {
@@ -261,33 +269,146 @@ export class DemoBackend implements AgentBackend {
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 
-  async executeSessionSlashCommand(input: ExecuteSessionSlashCommandInput): Promise<MutationAccepted> {
+  async slashCommandCatalog(agentId: string): Promise<SlashCommandCatalog | null> {
+    const summary = this.catalogState.agents.find((item) => item.id === agentId);
+    const snapshot = this.snapshots.get(agentId);
+    if (!summary || !snapshot) return null;
+    const active = summary.capabilities.send;
+    const currentModel = this.models.get(agentId) ?? { provider: "demo", modelId: "standard" };
+    const currentEffort = this.efforts.get(agentId) ?? "medium";
+    const builtins = builtinSlashCommandEntries({
+      sessionCommandsAvailable: active,
+      supportedDirectCommands: active
+        ? new Set(["model", "effort", "name", "context", "heartbeat"])
+        : new Set(),
+      modelOptions: [
+        { value: "demo/standard", label: "Demo Standard", current: currentModel.modelId === "standard" },
+        { value: "demo/fast", label: "Demo Fast", current: currentModel.modelId === "fast" },
+      ],
+      effortOptions: ["low", "medium", "high"].map((value) => ({ value, label: value, current: value === currentEffort })),
+      heartbeatOptions: [
+        { value: "status", label: "Show status" },
+        { value: "pause", label: "Pause" },
+        { value: "resume", label: "Resume" },
+        { value: "stop", label: "Stop and clear" },
+      ],
+    });
+    const detected = detectedSlashCommandEntries([
+      { name: "demo-extension", source: "extension", sourceInfo: { path: "/hidden/demo.ts" } },
+    ], new Set(builtins.map((entry) => entry.name)));
+    return { agentId, agentRevision: snapshot.revision, partial: false, commands: [...builtins, ...detected] };
+  }
+
+  async executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted> {
     const snapshot = this.requiredSnapshot(input.agentId);
     const summary = this.requiredSummary(input.agentId);
     if (!summary.capabilities.send) throw new BackendCapabilityError("This agent cannot run commands");
     if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
 
-    const createdAt = new Date().toISOString();
-    const commandText = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
-    const commandMessage: TranscriptMessage = {
-      id: input.requestId,
-      role: "user",
-      text: commandText,
-      state: "complete",
-      createdAt,
-    };
-    const resultMessage: TranscriptMessage = {
-      id: randomUUID(),
-      role: "system",
-      text: `/${input.name} accepted.`,
-      state: "complete",
-      createdAt,
-    };
-    snapshot.messages.push(commandMessage, resultMessage);
-    snapshot.revision += 1;
-    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: commandMessage }, snapshot);
-    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: resultMessage }, snapshot);
-    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+    if (SESSION_SLASH_COMMAND_NAMES.includes(input.name as typeof SESSION_SLASH_COMMAND_NAMES[number])) {
+      const createdAt = new Date().toISOString();
+      const commandText = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+      const commandMessage: TranscriptMessage = {
+        id: input.requestId,
+        role: "user",
+        text: commandText,
+        state: "complete",
+        createdAt,
+      };
+      const resultMessage: TranscriptMessage = {
+        id: randomUUID(),
+        role: "system",
+        text: `/${input.name} accepted.`,
+        state: "complete",
+        createdAt,
+      };
+      snapshot.messages.push(commandMessage, resultMessage);
+      snapshot.revision += 1;
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: commandMessage }, snapshot);
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: resultMessage }, snapshot);
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: snapshot.revision,
+        result: { kind: "session_accepted" },
+      };
+    }
+
+    if (input.name === "demo-extension") {
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: snapshot.revision,
+        result: { kind: "experimental_accepted", source: "extension" },
+      };
+    }
+
+    let result: SlashCommandResult;
+    switch (input.name) {
+      case "model": {
+        if (!input.args) {
+          const current = this.models.get(input.agentId) ?? { provider: "demo", modelId: "standard" };
+          result = { kind: "model", ...current };
+          break;
+        }
+        if (input.args !== "demo/standard" && input.args !== "demo/fast") {
+          throw new BackendCapabilityError("Choose an exact available model");
+        }
+        const modelId = input.args.slice("demo/".length);
+        this.models.set(input.agentId, { provider: "demo", modelId });
+        result = { kind: "model", provider: "demo", modelId };
+        break;
+      }
+      case "effort": {
+        const levels = ["low", "medium", "high"];
+        if (input.args && !levels.includes(input.args.toLowerCase())) {
+          throw new BackendCapabilityError("Choose an available thinking level");
+        }
+        if (input.args) this.efforts.set(input.agentId, input.args.toLowerCase());
+        result = { kind: "effort", level: this.efforts.get(input.agentId) ?? "medium", availableLevels: levels };
+        break;
+      }
+      case "name": {
+        if (input.args) {
+          if (input.args.length > 200) throw new BackendCapabilityError("Session name is too long");
+          summary.name = input.args;
+          this.catalogState.revision += 1;
+          this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+        }
+        result = { kind: "name", ...(summary.name ? { name: summary.name } : {}) };
+        break;
+      }
+      case "context": {
+        if (input.args) throw new BackendCapabilityError("Context command does not accept arguments");
+        result = { kind: "context_usage", contextTokens: 12_000, contextWindow: 200_000, percent: 6, totalTokens: 18_500, cost: 0.12 };
+        break;
+      }
+      case "heartbeat": {
+        const parsed = parseHeartbeatArgs(input.args);
+        if (!parsed) throw new BackendCapabilityError("Invalid heartbeat command arguments");
+        let heartbeat = this.heartbeats.get(input.agentId);
+        if (parsed.type === "set") {
+          heartbeat = { status: "active", schedule: parsed.schedule, deliveryMode: parsed.deliveryMode ?? "steer" };
+          this.heartbeats.set(input.agentId, heartbeat);
+        } else if (parsed.type === "pause" && heartbeat) {
+          heartbeat = { ...heartbeat, status: "paused" };
+          this.heartbeats.set(input.agentId, heartbeat);
+        } else if (parsed.type === "resume" && heartbeat) {
+          heartbeat = { ...heartbeat, status: "active" };
+          this.heartbeats.set(input.agentId, heartbeat);
+        } else if (parsed.type === "clear") {
+          this.heartbeats.delete(input.agentId);
+          heartbeat = undefined;
+        }
+        result = heartbeat
+          ? { kind: "heartbeat", status: heartbeat.status, schedule: heartbeat.schedule, deliveryMode: heartbeat.deliveryMode }
+          : { kind: "heartbeat", status: "none" };
+        break;
+      }
+      default:
+        throw new BackendCapabilityError("Command is not available");
+    }
+    return { accepted: true, requestId: input.requestId, revision: snapshot.revision, result };
   }
 
   async abort(input: AbortInput): Promise<MutationAccepted> {

@@ -9,14 +9,18 @@ The gateway currently permits these live operations:
 - list projected agents;
 - read projected transcripts and activity;
 - send a text prompt or explicitly user-selected image prompt with queue-if-busy semantics;
-- execute the four explicitly enumerated session commands (`compact`, `refine`, `goal`, and `autonomous`) with bounded single-line arguments;
+- execute four enumerated session commands and five explicit `AgentConnection` adapters with bounded single-line arguments;
+- detect additional installed extension, prompt, and skill command names through a metadata-stripping projection;
+- experimentally execute an exact currently detected command after a live catalog re-check;
 - retrieve a projected image through an authenticated content-addressed attachment route;
 - request abort;
 - answer supported extension confirmation and selection requests;
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker.
 
-It does not expose terminal creation, arbitrary bash, arbitrary host file contents, daemon shutdown, raw daemon commands, or client-only slash commands. Unknown slash input is not forwarded to the model. Command failures are sanitized before they cross the gateway boundary. Image bytes enter the gateway only after an explicit browser selection, capture, paste, or drop action.
+Experimental detected extension commands can run with the local capabilities already granted to Prime Agent, while detected prompt and skill commands can create model turns. This expands the paired browser’s trust boundary and retains a catalog-reload race that may turn command text into a model prompt.
+
+The gateway still adds no direct operations for terminal creation, arbitrary bash, arbitrary host file reads, daemon shutdown, raw daemon command objects, unknown slash names, or TUI-only slash-command execution. Experimental extensions are trusted local code and may provide equivalent side effects through their own implementation. Unknown slash input is not forwarded to the model. Command failures are sanitized before they cross the gateway boundary. Image bytes enter the gateway only after an explicit browser selection, capture, paste, or drop action.
 
 The directory listing is deliberately narrow: absolute paths only (a relative path is rejected rather than resolved against any base), directory entries only — never files — with a bounded result size, and no path joining on the client. It answers "what child directories exist here" and nothing more.
 

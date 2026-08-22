@@ -5,7 +5,11 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
-import { MAX_IMAGE_REQUEST_BASE64_CHARS, SESSION_SLASH_COMMAND_NAMES } from "../protocol.js";
+import {
+  DIRECT_SLASH_COMMAND_NAMES,
+  MAX_IMAGE_REQUEST_BASE64_CHARS,
+  SESSION_SLASH_COMMAND_NAMES,
+} from "../protocol.js";
 import type {
   ActivityItem,
   AgentCapabilities,
@@ -19,6 +23,11 @@ import type {
   TranscriptAttachment,
   MutationAccepted,
   SessionCreated,
+  SlashCommandAccepted,
+  SlashCommandCatalog,
+  SlashCommandCatalogEntry,
+  SlashCommandOption,
+  SlashCommandResult,
   TranscriptMessage,
 } from "../protocol.js";
 import {
@@ -30,7 +39,7 @@ import {
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
-  type ExecuteSessionSlashCommandInput,
+  type ExecuteSlashCommandInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -46,6 +55,11 @@ import {
   validateImageAttachments,
   type ValidatedImageAttachment,
 } from "./image-attachments.js";
+import {
+  builtinSlashCommandEntries,
+  detectedSlashCommandEntries,
+  parseHeartbeatArgs,
+} from "./slash-command-catalog.js";
 import { sanitizeTranscriptPreview, summarizeBashExecution, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
 
 interface PrimeResponse {
@@ -117,9 +131,45 @@ interface PrimeSnapshot {
   }>;
 }
 
+interface PrimeModel {
+  provider: string;
+  id: string;
+  name?: string;
+}
+
+interface PrimeConnectionState {
+  sessionName?: string;
+  model?: PrimeModel;
+  thinkingLevel?: string;
+  availableThinkingLevels?: string[];
+}
+
+interface PrimeHeartbeat {
+  status?: string;
+  deliveryMode?: string;
+  schedule?: { expression?: string };
+  nextRunAt?: string;
+}
+
+interface PrimeSessionStats {
+  tokens?: { total?: number };
+  cost?: number;
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
+}
+
 interface PrimeConnection {
   subscribe(listener: (event: PrimeConnectionEvent) => void | Promise<void>): () => void;
   getInitialSnapshot(): Promise<PrimeSnapshot>;
+  getCommands?(): Promise<Array<{ name?: unknown; source?: unknown; [key: string]: unknown }>>;
+  getAvailableModels?(): Promise<PrimeModel[]>;
+  getState?(): Promise<PrimeConnectionState>;
+  setModel?(provider: string, modelId: string): Promise<PrimeModel>;
+  setThinkingLevel?(level: string): Promise<void>;
+  setSessionName?(name: string): Promise<void>;
+  getSessionStats?(): Promise<PrimeSessionStats>;
+  getHeartbeat?(): Promise<PrimeHeartbeat | undefined>;
+  setHeartbeat?(schedule: string, instruction: string, deliveryMode?: "steer" | "follow_up"): Promise<PrimeHeartbeat>;
+  updateHeartbeat?(action: "pause" | "resume" | "clear"): Promise<PrimeHeartbeat | undefined>;
   prompt(message: string, options?: {
     queueIfBusy?: boolean;
     streamingBehavior?: "steer" | "followUp";
@@ -176,6 +226,70 @@ interface PendingExtension {
 }
 
 const ATTACHMENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const DIRECT_SLASH_COMMAND_NAME_SET = new Set<string>(DIRECT_SLASH_COMMAND_NAMES);
+const EXPLICIT_SLASH_COMMAND_NAMES = new Set<string>([
+  ...SESSION_SLASH_COMMAND_NAMES,
+  ...DIRECT_SLASH_COMMAND_NAMES,
+]);
+
+function safeLabel(value: unknown, fallback: string, maxChars = 120): string {
+  if (typeof value !== "string") return fallback;
+  const label = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return (label || fallback).slice(0, maxChars);
+}
+
+function modelCatalogOptions(models: readonly PrimeModel[], current?: PrimeModel): SlashCommandOption[] {
+  const seen = new Set<string>();
+  const options: SlashCommandOption[] = [];
+  for (const model of models) {
+    if (options.length >= 250 || typeof model.provider !== "string" || typeof model.id !== "string") continue;
+    const value = `${model.provider}/${model.id}`;
+    if (!model.provider || !model.id || value.length > 240 || /[\s\r\n\u2028\u2029]/u.test(value) || seen.has(value)) continue;
+    seen.add(value);
+    const reference = `${safeLabel(model.provider, "provider", 60)}/${safeLabel(model.id, "model", 120)}`;
+    options.push({
+      value,
+      label: reference,
+      ...(current?.provider === model.provider && current.id === model.id ? { current: true } : {}),
+    });
+  }
+  return options.sort((left, right) => Number(Boolean(right.current)) - Number(Boolean(left.current)) || left.label.localeCompare(right.label));
+}
+
+function numeric(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function projectContextStats(stats: PrimeSessionStats): Extract<SlashCommandResult, { kind: "context_usage" }> {
+  return {
+    kind: "context_usage",
+    ...(numeric(stats.contextUsage?.tokens) !== undefined ? { contextTokens: numeric(stats.contextUsage?.tokens) } : {}),
+    ...(numeric(stats.contextUsage?.contextWindow) !== undefined ? { contextWindow: numeric(stats.contextUsage?.contextWindow) } : {}),
+    ...(numeric(stats.contextUsage?.percent) !== undefined ? { percent: numeric(stats.contextUsage?.percent) } : {}),
+    ...(numeric(stats.tokens?.total) !== undefined ? { totalTokens: numeric(stats.tokens?.total) } : {}),
+    ...(numeric(stats.cost) !== undefined ? { cost: numeric(stats.cost) } : {}),
+  };
+}
+
+function projectHeartbeat(heartbeat: PrimeHeartbeat | undefined): Extract<SlashCommandResult, { kind: "heartbeat" }> {
+  if (!heartbeat) return { kind: "heartbeat", status: "none" };
+  const allowedStatuses = new Set(["active", "paused", "completed", "cancelled"]);
+  const status = typeof heartbeat.status === "string" && allowedStatuses.has(heartbeat.status)
+    ? heartbeat.status as "active" | "paused" | "completed" | "cancelled"
+    : "unknown";
+  const schedule = safeLabel(heartbeat.schedule?.expression, "", 80);
+  const nextRunAt = typeof heartbeat.nextRunAt === "string" && !Number.isNaN(Date.parse(heartbeat.nextRunAt))
+    ? new Date(heartbeat.nextRunAt).toISOString()
+    : undefined;
+  return {
+    kind: "heartbeat",
+    status,
+    ...(schedule ? { schedule } : {}),
+    ...(heartbeat.deliveryMode === "steer" || heartbeat.deliveryMode === "follow_up"
+      ? { deliveryMode: heartbeat.deliveryMode } : {}),
+    ...(nextRunAt ? { nextRunAt } : {}),
+  };
+}
 
 const defaultCapabilities: AgentCapabilities = {
   send: true,
@@ -235,7 +349,7 @@ function sessionSlashCommand(record: PrimeRecord): { name: string; text: string 
   const name = command?.name;
   const text = command?.text;
   if (typeof name !== "string" || !SESSION_SLASH_COMMAND_NAME_SET.has(name) || typeof text !== "string") return undefined;
-  if (!text.startsWith(`/${name}`) || /[\r\n\u2028\u2029]/u.test(text)) return undefined;
+  if ((text !== `/${name}` && !text.startsWith(`/${name} `)) || /[\r\n\u2028\u2029]/u.test(text)) return undefined;
   return { name, text: text.slice(0, 4_100) };
 }
 
@@ -616,6 +730,8 @@ export class PrimeBackend implements AgentBackend {
   private publicByActive = new Map<string, string>();
   private readonly snapshots = new Map<string, AgentSnapshot>();
   private readonly connections = new Map<string, ConnectionRecord>();
+  private readonly connectionPromises = new Map<string, Promise<ConnectionRecord>>();
+  private readonly commandLocks = new Map<string, Promise<void>>();
   private readonly pendingExtensions = new Map<string, PendingExtension>();
   private readonly attachmentCache = new Map<string, AttachmentData>();
   private attachmentCacheBytes = 0;
@@ -691,20 +807,238 @@ export class PrimeBackend implements AgentBackend {
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 
-  async executeSessionSlashCommand(input: ExecuteSessionSlashCommandInput): Promise<MutationAccepted> {
+  async slashCommandCatalog(agentId: string): Promise<SlashCommandCatalog | null> {
+    const summary = this.rawSummaries.get(agentId);
+    if (!summary) return null;
+    if (!summary.activeSessionId) {
+      return {
+        agentId,
+        agentRevision: this.snapshots.get(agentId)?.revision ?? 1,
+        partial: true,
+        commands: builtinSlashCommandEntries({
+          sessionCommandsAvailable: false,
+          supportedDirectCommands: new Set(),
+        }),
+      };
+    }
+
+    const record = await this.ensureConnection(agentId, summary.activeSessionId);
+    const connection = record.connection;
+    const supported = new Set<typeof DIRECT_SLASH_COMMAND_NAMES[number]>();
+    if (typeof connection.getState === "function" && typeof connection.getAvailableModels === "function" && typeof connection.setModel === "function") supported.add("model");
+    if (typeof connection.getState === "function" && typeof connection.setThinkingLevel === "function") supported.add("effort");
+    if (typeof connection.getState === "function" && typeof connection.setSessionName === "function") supported.add("name");
+    if (typeof connection.getSessionStats === "function") supported.add("context");
+    if (typeof connection.getHeartbeat === "function" && typeof connection.setHeartbeat === "function" && typeof connection.updateHeartbeat === "function") supported.add("heartbeat");
+
+    let state: PrimeConnectionState = {};
+    if (typeof connection.getState === "function") {
+      try {
+        const current = await connection.getState();
+        if (current && typeof current === "object") state = current;
+      } catch { /* Catalog remains useful without current values. */ }
+    }
+    let models: PrimeModel[] = [];
+    if (supported.has("model") && typeof connection.getAvailableModels === "function") {
+      try {
+        const available = await connection.getAvailableModels();
+        if (Array.isArray(available)) models = available;
+      } catch { /* Omit model options and keep the adapter. */ }
+    }
+    const effortOptions = (Array.isArray(state.availableThinkingLevels) ? state.availableThinkingLevels : []).slice(0, 12).flatMap((level) => {
+      if (typeof level !== "string" || !/^[a-z0-9_-]{1,24}$/i.test(level)) return [];
+      return [{ value: level, label: level, ...(level === state.thinkingLevel ? { current: true } : {}) }];
+    });
+    const heartbeatOptions: SlashCommandOption[] = [
+      { value: "status", label: "Show status" },
+      { value: "pause", label: "Pause" },
+      { value: "resume", label: "Resume" },
+      { value: "stop", label: "Stop and clear" },
+    ];
+
+    let detected: Array<{ name?: unknown; source?: unknown; [key: string]: unknown }> = [];
+    let partial = typeof connection.getCommands !== "function";
+    if (typeof connection.getCommands === "function") {
+      try {
+        const commands = await connection.getCommands();
+        if (Array.isArray(commands)) detected = commands;
+        else partial = true;
+      } catch { partial = true; }
+    }
+    const builtins = builtinSlashCommandEntries({
+      supportedDirectCommands: supported,
+      modelOptions: modelCatalogOptions(models, state.model),
+      effortOptions,
+      heartbeatOptions,
+    });
+    return {
+      agentId,
+      agentRevision: this.requiredSnapshot(agentId).revision,
+      partial,
+      commands: [
+        ...builtins,
+        ...detectedSlashCommandEntries(detected, EXPLICIT_SLASH_COMMAND_NAMES),
+      ],
+    };
+  }
+
+  async executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted> {
     const record = await this.requiredConnection(input.agentId);
     const snapshot = this.requiredSnapshot(input.agentId);
     if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
-    const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
-    try {
-      await record.connection.prompt(command, {
-        queueIfBusy: true,
-        streamingBehavior: "followUp",
-      });
-    } catch {
+    const connection = record.connection;
+
+    if (SESSION_SLASH_COMMAND_NAME_SET.has(input.name)) {
+      const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+      try {
+        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "followUp" });
+      } catch {
+        throw new Error("Prime command failed");
+      }
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: snapshot.revision,
+        result: { kind: "session_accepted" },
+      };
+    }
+
+    if (!DIRECT_SLASH_COMMAND_NAME_SET.has(input.name)) {
+      if (typeof connection.getCommands !== "function") throw new BackendCapabilityError("Command is not available");
+      let detected: SlashCommandCatalogEntry[];
+      try {
+        const commands = await connection.getCommands();
+        detected = Array.isArray(commands)
+          ? detectedSlashCommandEntries(commands, EXPLICIT_SLASH_COMMAND_NAMES)
+          : [];
+      } catch {
+        throw new Error("Prime experimental command discovery failed");
+      }
+      const experimental = detected.find((command) => command.name === input.name && command.availability === "experimental");
+      if (!experimental || (experimental.source !== "extension" && experimental.source !== "prompt" && experimental.source !== "skill")) {
+        throw new BackendCapabilityError("Command is not available");
+      }
+      const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+      try {
+        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "followUp" });
+      } catch {
+        throw new Error("Prime experimental command failed");
+      }
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: snapshot.revision,
+        result: { kind: "experimental_accepted", source: experimental.source },
+      };
+    }
+    return this.withCommandLock(input.agentId, async () => {
+      const lockedSnapshot = this.requiredSnapshot(input.agentId);
+      if (lockedSnapshot.revision !== input.expectedRevision) {
+        throw new BackendConflictError("The agent changed. Refresh and try again.");
+      }
+      let result: SlashCommandResult;
+      let mutated = false;
+      try {
+      switch (input.name) {
+        case "model": {
+          if (typeof connection.getState !== "function" || typeof connection.getAvailableModels !== "function" || typeof connection.setModel !== "function") {
+            throw new BackendCapabilityError("Model command is unavailable");
+          }
+          if (!input.args) {
+            const model = (await connection.getState()).model;
+            const reference = model && typeof model.provider === "string" && typeof model.id === "string"
+              ? `${model.provider}/${model.id}`
+              : "";
+            result = reference && reference.length <= 240 && !/[\s\r\n\u2028\u2029]/u.test(reference)
+              ? { kind: "model", provider: model!.provider, modelId: model!.id }
+              : { kind: "model" };
+            break;
+          }
+          const available = await connection.getAvailableModels();
+          const models = (Array.isArray(available) ? available : []).filter((model) => {
+            if (!model || typeof model.provider !== "string" || typeof model.id !== "string") return false;
+            const value = `${model.provider}/${model.id}`;
+            return value.length <= 240 && !/[\s\r\n\u2028\u2029]/u.test(value);
+          });
+          const exact = models.filter((model) => `${model.provider}/${model.id}` === input.args);
+          const byId = exact.length ? exact : models.filter((model) => model.id === input.args);
+          if (byId.length !== 1) throw new BackendCapabilityError("Choose an exact available model");
+          const selected = byId[0];
+          await connection.setModel(selected.provider, selected.id);
+          mutated = true;
+          result = { kind: "model", provider: selected.provider, modelId: selected.id };
+          break;
+        }
+        case "effort": {
+          if (typeof connection.getState !== "function" || typeof connection.setThinkingLevel !== "function") {
+            throw new BackendCapabilityError("Effort command is unavailable");
+          }
+          let state = await connection.getState();
+          const levels = (Array.isArray(state.availableThinkingLevels) ? state.availableThinkingLevels : [])
+            .filter((level) => typeof level === "string" && /^[a-z0-9_-]{1,24}$/i.test(level));
+          if (input.args) {
+            const level = input.args.toLowerCase();
+            if (!levels.includes(level)) throw new BackendCapabilityError("Choose an available thinking level");
+            await connection.setThinkingLevel(level);
+            mutated = true;
+            state = { ...state, thinkingLevel: level };
+          }
+          const currentLevel = typeof state.thinkingLevel === "string" && levels.includes(state.thinkingLevel)
+            ? state.thinkingLevel
+            : undefined;
+          result = { kind: "effort", ...(currentLevel ? { level: currentLevel } : {}), availableLevels: levels.slice(0, 12) };
+          break;
+        }
+        case "name": {
+          if (typeof connection.getState !== "function" || typeof connection.setSessionName !== "function") {
+            throw new BackendCapabilityError("Name command is unavailable");
+          }
+          if (input.args) {
+            if (input.args.length > 200) throw new BackendCapabilityError("Session name is too long");
+            await connection.setSessionName(input.args);
+            mutated = true;
+            result = { kind: "name", name: input.args };
+          } else {
+            const name = (await connection.getState()).sessionName;
+            result = { kind: "name", ...(name ? { name: safeLabel(name, "", 200) } : {}) };
+          }
+          break;
+        }
+        case "context": {
+          if (input.args) throw new BackendCapabilityError("Context command does not accept arguments");
+          if (typeof connection.getSessionStats !== "function") throw new BackendCapabilityError("Context command is unavailable");
+          result = projectContextStats(await connection.getSessionStats());
+          break;
+        }
+        case "heartbeat": {
+          if (typeof connection.getHeartbeat !== "function" || typeof connection.setHeartbeat !== "function" || typeof connection.updateHeartbeat !== "function") {
+            throw new BackendCapabilityError("Heartbeat command is unavailable");
+          }
+          const parsed = parseHeartbeatArgs(input.args);
+          if (!parsed) throw new BackendCapabilityError("Invalid heartbeat command arguments");
+          let heartbeat: PrimeHeartbeat | undefined;
+          if (parsed.type === "status") heartbeat = await connection.getHeartbeat();
+          else if (parsed.type === "set") {
+            heartbeat = await connection.setHeartbeat(parsed.schedule, parsed.instruction, parsed.deliveryMode);
+            mutated = true;
+          } else {
+            const updated = await connection.updateHeartbeat(parsed.type);
+            mutated = true;
+            heartbeat = parsed.type === "clear" ? undefined : updated;
+          }
+          result = projectHeartbeat(heartbeat);
+          break;
+        }
+        default:
+          throw new BackendCapabilityError("Command is not available");
+      }
+    } catch (error) {
+      if (error instanceof BackendCapabilityError) throw error;
       throw new Error("Prime command failed");
     }
-    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+      const revision = mutated ? this.advanceSnapshotRevision(input.agentId) : lockedSnapshot.revision;
+      return { accepted: true, requestId: input.requestId, revision, result };
+    });
   }
 
   async abort(input: AbortInput): Promise<MutationAccepted> {
@@ -801,12 +1135,15 @@ export class PrimeBackend implements AgentBackend {
     if (this.pollTimer) clearInterval(this.pollTimer);
     for (const pending of this.pendingExtensions.values()) if (pending.timer) clearTimeout(pending.timer);
     this.pendingExtensions.clear();
+    await Promise.allSettled(this.connectionPromises.values());
+    this.connectionPromises.clear();
     for (const record of this.connections.values()) {
       if (record.refreshTimer) clearTimeout(record.refreshTimer);
       record.unsubscribe();
       await record.connection.dispose();
     }
     this.connections.clear();
+    this.commandLocks.clear();
     this.attachmentCache.clear();
     this.attachmentCacheBytes = 0;
     this.client?.close();
@@ -909,8 +1246,20 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private async ensureConnection(publicId: string, activeSessionId: string): Promise<ConnectionRecord> {
+    const pending = this.connectionPromises.get(publicId);
+    if (pending) return pending;
     const existing = this.connections.get(publicId);
     if (existing) return existing;
+    const created = this.createConnection(publicId, activeSessionId);
+    this.connectionPromises.set(publicId, created);
+    try {
+      return await created;
+    } finally {
+      if (this.connectionPromises.get(publicId) === created) this.connectionPromises.delete(publicId);
+    }
+  }
+
+  private async createConnection(publicId: string, activeSessionId: string): Promise<ConnectionRecord> {
     const connection = await this.module.DaemonAgentConnection.attach(this.client, activeSessionId, {
       closeClientOnDispose: false,
       supportsExtensionUi: true,
@@ -923,16 +1272,23 @@ export class PrimeBackend implements AgentBackend {
       revision: this.snapshots.get(publicId)?.revision ?? 0,
       unsubscribe: () => {},
     };
-    record.unsubscribe = connection.subscribe((event) => {
-      if (!ready) buffered.push(event);
-      else this.handleConnectionEvent(record, event);
-    });
-    this.connections.set(publicId, record);
-    const snapshot = await connection.getInitialSnapshot();
-    this.applyPrimeSnapshot(record, snapshot, false);
-    ready = true;
-    for (const event of buffered) this.handleConnectionEvent(record, event);
-    return record;
+    try {
+      record.unsubscribe = connection.subscribe((event) => {
+        if (!ready) buffered.push(event);
+        else this.handleConnectionEvent(record, event);
+      });
+      this.connections.set(publicId, record);
+      const snapshot = await connection.getInitialSnapshot();
+      this.applyPrimeSnapshot(record, snapshot, false);
+      ready = true;
+      for (const event of buffered) this.handleConnectionEvent(record, event);
+      return record;
+    } catch (error) {
+      record.unsubscribe();
+      if (this.connections.get(publicId) === record) this.connections.delete(publicId);
+      try { await connection.dispose(); } catch { /* Best-effort cleanup after initialization failure. */ }
+      throw error;
+    }
   }
 
   private handleConnectionEvent(record: ConnectionRecord, event: PrimeConnectionEvent): void {
@@ -1113,6 +1469,30 @@ export class PrimeBackend implements AgentBackend {
       activity: [{ id: `${publicId}:inactive`, kind: "status", title: "Inactive session", status: "complete", createdAt: toIso(summary.modified) }],
       attention: [],
     };
+  }
+
+  private async withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.commandLocks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.catch(() => {}).then(() => gate);
+    this.commandLocks.set(agentId, queued);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.commandLocks.get(agentId) === queued) this.commandLocks.delete(agentId);
+    }
+  }
+
+  private advanceSnapshotRevision(agentId: string): number {
+    const snapshot = this.requiredSnapshot(agentId);
+    snapshot.revision += 1;
+    const record = this.connections.get(agentId);
+    if (record) record.revision = Math.max(record.revision, snapshot.revision);
+    this.hub.publish(`agent:${agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    return snapshot.revision;
   }
 
   private async requiredConnection(agentId: string): Promise<ConnectionRecord> {

@@ -79,6 +79,8 @@ try {
 
   const unauthenticated = await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin } });
   if (unauthenticated.status !== 401) throw new Error(`Expected unauthenticated 401, got ${unauthenticated.status}`);
+  const unauthenticatedCommands = await fetch(`${origin}/api/v1/agents/unknown/commands`, { headers: { Origin: origin } });
+  if (unauthenticatedCommands.status !== 401) throw new Error(`Expected unauthenticated command catalog 401, got ${unauthenticatedCommands.status}`);
 
   const wrongOrigin = await fetch(`${origin}/api/v1/auth/pair`, {
     method: "POST",
@@ -104,6 +106,18 @@ try {
   const snapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(agentId)}/snapshot`, {
     headers: { Origin: origin, Cookie: cookie },
   }));
+  const catalogResponse = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+    headers: { Origin: origin, Cookie: cookie },
+  });
+  const commandCatalog = await json(catalogResponse);
+  if (catalogResponse.headers.get("cache-control") !== "no-store") throw new Error("Command catalog must be no-store");
+  if (!commandCatalog.commands.some((command) => command.name === "model" && command.availability === "available")) {
+    throw new Error("Explicit adapter commands are missing from the command catalog");
+  }
+  if (!commandCatalog.commands.some((command) => command.name === "demo-extension" && command.availability === "experimental")) {
+    throw new Error("Detected commands are missing from the command catalog");
+  }
+  if (JSON.stringify(commandCatalog).includes("/hidden/")) throw new Error("Command catalog leaked daemon metadata");
   const frame = await websocketFrame(cookie, `agent:${agentId}`);
   if (frame.snapshot.agentId !== agentId) throw new Error("WebSocket stream returned the wrong snapshot");
 
@@ -119,6 +133,17 @@ try {
   });
   if (message.status !== 202) throw new Error(`Message admission failed: ${message.status} ${await message.text()}`);
   const messageBody = await message.json();
+  const slashMessage = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(agentId)}/messages`, {
+    method: "POST",
+    headers: {
+      Origin: origin,
+      Cookie: cookie,
+      "Content-Type": "application/json",
+      "X-CSRF-Token": pairBody.csrfToken,
+    },
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: messageBody.revision, text: "/settings" }),
+  });
+  if (slashMessage.status !== 400) throw new Error(`Expected ordinary slash prompt rejection, got ${slashMessage.status}`);
   const commandPath = `${origin}/api/v1/agents/${encodeURIComponent(agentId)}/commands`;
   const commandRequest = {
     requestId: crypto.randomUUID(),
@@ -155,6 +180,54 @@ try {
   if (duplicate.status !== 202 || duplicateBody.requestId !== commandBody.requestId) {
     throw new Error("Command idempotency failed");
   }
+  const mismatchedRetry = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ ...commandRequest, name: "context", args: "" }),
+  });
+  if (mismatchedRetry.status !== 409) throw new Error(`Expected request ID binding conflict, got ${mismatchedRetry.status}`);
+
+  const contextCommand = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: commandBody.revision,
+      name: "context",
+      args: "",
+    }),
+  });
+  const contextBody = await json(contextCommand);
+  if (contextCommand.status !== 202 || contextBody.result?.kind !== "context_usage") {
+    throw new Error("Direct command adapter failed");
+  }
+
+  const experimentalCommand = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: commandBody.revision,
+      name: "demo-extension",
+      args: "target",
+    }),
+  });
+  const experimentalBody = await json(experimentalCommand);
+  if (experimentalCommand.status !== 202 || experimentalBody.result?.kind !== "experimental_accepted") {
+    throw new Error("Experimental detected command failed");
+  }
+
+  const unknownCommand = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: commandBody.revision,
+      name: "settings",
+      args: "",
+    }),
+  });
+  if (unknownCommand.status !== 403) throw new Error(`Expected unknown command rejection, got ${unknownCommand.status}`);
 
   console.log("Gateway smoke test passed");
 } finally {

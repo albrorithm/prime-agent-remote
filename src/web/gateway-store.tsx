@@ -20,7 +20,8 @@ import type {
   StreamCursor,
   TranscriptMessage,
   MutationAccepted,
-  SessionSlashCommandName,
+  SlashCommandCatalog,
+  SlashCommandResult,
 } from "../protocol";
 import { PROTOCOL_VERSION } from "../protocol";
 import * as api from "./api";
@@ -211,7 +212,7 @@ function reducer(state: State, action: Action): State {
         ...state,
         snapshots: {
           ...state.snapshots,
-          [action.agentId]: { ...current, revision: action.revision },
+          [action.agentId]: { ...current, revision: Math.max(current.revision, action.revision) },
         },
       };
     }
@@ -248,7 +249,8 @@ interface GatewayContextValue extends State {
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string) => Promise<string>;
   send: (text: string, images?: PreparedImage[], requestId?: string) => Promise<void>;
-  runSlashCommand: (name: SessionSlashCommandName, args: string, requestId?: string) => Promise<void>;
+  loadSlashCommands: (agentId: string) => Promise<SlashCommandCatalog>;
+  runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
   abort: (agentId?: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   reconnect: () => void;
@@ -458,11 +460,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const runMutation = useCallback(
-    async (
+    async <T extends MutationAccepted,>(
       agentId: string,
-      run: (revision: number) => Promise<MutationAccepted>,
+      run: (revision: number) => Promise<T>,
       initialRevision?: number,
-    ) => {
+    ): Promise<T> => {
       const revision = initialRevision ?? stateRef.current.snapshots[agentId]?.revision;
       if (revision == null) throw new Error("Agent snapshot is not loaded");
       try {
@@ -545,18 +547,21 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [runMutation, showError],
   );
 
+  const loadSlashCommands = useCallback((agentId: string) => api.loadSlashCommandCatalog(agentId), []);
+
   const runSlashCommand = useCallback(
-    async (name: SessionSlashCommandName, args: string, requestId: string = crypto.randomUUID()) => {
+    async (name: string, args: string, requestId: string = crypto.randomUUID()): Promise<SlashCommandResult> => {
       const current = stateRef.current;
       const id = current.selectedAgentId;
       if (!id || !current.snapshots[id]) throw new Error("No agent selected");
       try {
         const result = await runMutation(
           id,
-          (revision) => api.executeSessionSlashCommand(id, current.csrfToken, revision, name, args, requestId),
+          (revision) => api.executeSlashCommand(id, current.csrfToken, revision, name, args, requestId),
         );
         dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
         showError(null);
+        return result.result;
       } catch (error) {
         showError(error instanceof Error ? error.message : "Command failed");
         throw error;
@@ -621,12 +626,13 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       selectAgent,
       createSession,
       send,
+      loadSlashCommands,
       runSlashCommand,
       abort,
       respond,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, runSlashCommand, abort, respond, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

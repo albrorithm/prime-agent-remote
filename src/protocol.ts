@@ -8,6 +8,59 @@ export type AttentionKind = "approval" | "question" | "error";
 
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
 export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
+export const DIRECT_SLASH_COMMAND_NAMES = ["model", "effort", "name", "context", "heartbeat"] as const;
+export type DirectSlashCommandName = typeof DIRECT_SLASH_COMMAND_NAMES[number];
+export const EXECUTABLE_SLASH_COMMAND_NAMES = [...SESSION_SLASH_COMMAND_NAMES, ...DIRECT_SLASH_COMMAND_NAMES] as const;
+export type ExecutableSlashCommandName = typeof EXECUTABLE_SLASH_COMMAND_NAMES[number];
+
+export interface SlashCommandOption {
+  value: string;
+  label: string;
+  current?: boolean;
+}
+
+export type SlashCommandAvailability = "available" | "experimental" | "unavailable";
+export type SlashCommandSource = "session" | "adapter" | "extension" | "prompt" | "skill";
+
+export interface SlashCommandCatalogEntry {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  source: SlashCommandSource;
+  availability: SlashCommandAvailability;
+  unavailableReason?: "inactive_agent" | "adapter_missing" | "not_supported_on_mobile";
+  takesArguments: boolean;
+  options?: SlashCommandOption[];
+}
+
+export interface SlashCommandCatalog {
+  agentId: string;
+  agentRevision: number;
+  partial: boolean;
+  commands: SlashCommandCatalogEntry[];
+}
+
+export type SlashCommandResult =
+  | { kind: "session_accepted" }
+  | { kind: "experimental_accepted"; source: "extension" | "prompt" | "skill" }
+  | { kind: "model"; provider?: string; modelId?: string }
+  | { kind: "effort"; level?: string; availableLevels: string[] }
+  | { kind: "name"; name?: string }
+  | {
+      kind: "context_usage";
+      contextTokens?: number;
+      contextWindow?: number;
+      percent?: number;
+      totalTokens?: number;
+      cost?: number;
+    }
+  | {
+      kind: "heartbeat";
+      status: "none" | "active" | "paused" | "completed" | "cancelled" | "unknown";
+      schedule?: string;
+      deliveryMode?: "steer" | "follow_up";
+      nextRunAt?: string;
+    };
 
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 export const MAX_IMAGE_ATTACHMENTS = 3;
@@ -242,14 +295,19 @@ export const sendMessageRequestSchema = z.object({
   }
 });
 
-export const executeSessionSlashCommandRequestSchema = z.object({
+export const slashCommandNameSchema = z.string().regex(
+  /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/,
+  "Invalid command name",
+);
+
+export const executeSlashCommandRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
-  name: z.enum(SESSION_SLASH_COMMAND_NAMES),
+  name: slashCommandNameSchema,
   args: z.string().trim().max(4_000).refine((value) => !/[\r\n\u2028\u2029]/u.test(value), "Command arguments must be one line"),
 }).strict();
 
-export type ExecuteSessionSlashCommandRequest = z.infer<typeof executeSessionSlashCommandRequestSchema>;
+export type ExecuteSlashCommandRequest = z.infer<typeof executeSlashCommandRequestSchema>;
 
 export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),
@@ -266,6 +324,10 @@ export interface MutationAccepted {
   accepted: true;
   requestId: string;
   revision: number;
+}
+
+export interface SlashCommandAccepted extends MutationAccepted {
+  result: SlashCommandResult;
 }
 
 export interface DirectoryEntry {

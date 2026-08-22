@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -7,11 +8,10 @@ import {
   attentionResponseSchema,
   clientFrameSchema,
   createSessionRequestSchema,
-  executeSessionSlashCommandRequestSchema,
+  executeSlashCommandRequestSchema,
   pairRequestSchema,
   PROTOCOL_VERSION,
   sendMessageRequestSchema,
-  type MutationAccepted,
   type ProblemDetails,
   type ServerFrame,
 } from "../protocol.js";
@@ -26,7 +26,7 @@ import { loadConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
 import { PrimeBackend } from "./prime-backend.js";
-import { MutationCache } from "./mutation-cache.js";
+import { MutationCache, MutationCacheMismatchError } from "./mutation-cache.js";
 import {
   ImageAttachmentValidationError,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
@@ -105,12 +105,21 @@ function allowMutation(req: IncomingMessage, res: ServerResponse, session: Authe
   return true;
 }
 
+function mutationBinding(scope: string, value: unknown): string {
+  const semanticValue = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => key !== "requestId" && key !== "expectedRevision"))
+    : value;
+  return `${scope}:${createHash("sha256").update(JSON.stringify(semanticValue)).digest("base64url")}`;
+}
+
 async function deduplicated<T>(
   session: AuthenticatedSession,
   requestId: string,
+  binding: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return mutationCache.run(session.id, requestId, operation) as Promise<T>;
+  return mutationCache.run(session.id, requestId, binding, operation) as Promise<T>;
 }
 
 function decodeSegment(value: string): string | null {
@@ -186,12 +195,26 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     return true;
   }
 
+  const commandMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/commands$/);
+  if (req.method === "GET" && commandMatch) {
+    const agentId = decodeSegment(commandMatch[1]);
+    const catalog = agentId ? await backend.slashCommandCatalog(agentId) : null;
+    if (!catalog) problem(res, 404, "Agent not found");
+    else json(res, 200, catalog);
+    return true;
+  }
+
   if (!allowMutation(req, res, session)) return true;
 
   if (req.method === "POST" && pathname === "/api/v1/sessions") {
     const parsed = createSessionRequestSchema.safeParse(await readJson(req));
     if (!parsed.success) { problem(res, 400, "Invalid session request"); return true; }
-    const result = await deduplicated(session, parsed.data.requestId, () => backend.createSession(parsed.data));
+    const result = await deduplicated(
+      session,
+      parsed.data.requestId,
+      mutationBinding("create-session", parsed.data),
+      () => backend.createSession(parsed.data),
+    );
     json(res, 202, result);
     return true;
   }
@@ -210,20 +233,25 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
       problem(res, 400, "Invalid image attachment", error.message);
       return true;
     }
-    const result = await deduplicated(session, parsed.data.requestId, () =>
-      backend.sendMessage({ agentId, ...parsed.data, images }),
+    const result = await deduplicated(
+      session,
+      parsed.data.requestId,
+      mutationBinding(`message:${agentId}`, parsed.data),
+      () => backend.sendMessage({ agentId, ...parsed.data, images }),
     );
     json(res, 202, result);
     return true;
   }
 
-  const commandMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/commands$/);
   if (req.method === "POST" && commandMatch) {
     const agentId = decodeSegment(commandMatch[1]);
-    const parsed = executeSessionSlashCommandRequestSchema.safeParse(await readJson(req));
+    const parsed = executeSlashCommandRequestSchema.safeParse(await readJson(req));
     if (!agentId || !parsed.success) { problem(res, 400, "Invalid slash command request"); return true; }
-    const result = await deduplicated(session, parsed.data.requestId, () =>
-      backend.executeSessionSlashCommand({ agentId, ...parsed.data }),
+    const result = await deduplicated(
+      session,
+      parsed.data.requestId,
+      mutationBinding(`command:${agentId}`, parsed.data),
+      () => backend.executeSlashCommand({ agentId, ...parsed.data }),
     );
     json(res, 202, result);
     return true;
@@ -234,7 +262,12 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     const agentId = decodeSegment(abortMatch[1]);
     const parsed = abortRequestSchema.safeParse(await readJson(req));
     if (!agentId || !parsed.success) { problem(res, 400, "Invalid abort request"); return true; }
-    const result = await deduplicated(session, parsed.data.requestId, () => backend.abort({ agentId, ...parsed.data }));
+    const result = await deduplicated(
+      session,
+      parsed.data.requestId,
+      mutationBinding(`abort:${agentId}`, parsed.data),
+      () => backend.abort({ agentId, ...parsed.data }),
+    );
     json(res, 202, result);
     return true;
   }
@@ -244,8 +277,11 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     const attentionId = decodeSegment(attentionMatch[1]);
     const parsed = attentionResponseSchema.safeParse(await readJson(req));
     if (!attentionId || !parsed.success) { problem(res, 400, "Invalid attention response"); return true; }
-    const result = await deduplicated(session, parsed.data.requestId, () =>
-      backend.resolveAttention({ attentionId, ...parsed.data }),
+    const result = await deduplicated(
+      session,
+      parsed.data.requestId,
+      mutationBinding(`attention:${attentionId}`, parsed.data),
+      () => backend.resolveAttention({ attentionId, ...parsed.data }),
     );
     json(res, 202, result);
     return true;
@@ -299,7 +335,9 @@ const server = createServer(async (req, res) => {
     if (error instanceof SyntaxError) return problem(res, 400, "Invalid JSON");
     if (error instanceof Error && error.message === "request_too_large") return problem(res, 413, "Request too large");
     if (error instanceof BackendNotFoundError) return problem(res, 404, error.message);
-    if (error instanceof BackendConflictError) return problem(res, 409, "State conflict", error.message);
+    if (error instanceof BackendConflictError || error instanceof MutationCacheMismatchError) {
+      return problem(res, 409, "State conflict", error.message);
+    }
     if (error instanceof BackendCapabilityError) return problem(res, 403, "Action is not allowed", error.message);
     console.error("Request failed", error);
     problem(res, 500, "Internal server error");

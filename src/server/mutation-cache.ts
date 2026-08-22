@@ -1,18 +1,26 @@
+export class MutationCacheMismatchError extends Error {}
+
 export class MutationCache<T> {
-  private readonly entries = new Map<string, { expiresAt: number; promise: Promise<T> }>();
+  private readonly entries = new Map<string, { binding: string; expiresAt: number; promise: Promise<T> }>();
 
   constructor(
     private readonly ttlMs: number,
     private readonly now: () => number = Date.now,
   ) {}
 
-  run(sessionId: string, requestId: string, operation: () => Promise<T>): Promise<T> {
+  run(sessionId: string, requestId: string, binding: string, operation: () => Promise<T>): Promise<T> {
     this.prune();
     const key = `${sessionId}:${requestId}`;
     const existing = this.entries.get(key);
-    if (existing) return existing.promise;
+    if (existing) {
+      if (existing.binding !== binding) {
+        return Promise.reject(new MutationCacheMismatchError("Request ID was already used for a different mutation"));
+      }
+      return existing.promise;
+    }
 
     const entry = {
+      binding,
       expiresAt: Number.POSITIVE_INFINITY,
       promise: Promise.resolve().then(operation),
     };
