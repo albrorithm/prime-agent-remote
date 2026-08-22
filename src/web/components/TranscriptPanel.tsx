@@ -8,6 +8,7 @@ import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { MessageContent } from "./MessageContent";
 import { SwitchHapticButton } from "./SwitchHapticButton";
+import { agentStatus } from "./agent-status";
 
 interface TranscriptPanelProps {
   onOpenSessions: () => void;
@@ -60,23 +61,60 @@ function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete"
   return <Circle aria-hidden="true" />;
 }
 
-function TranscriptImage({ image, index }: { image: { id: string; src: string }; index: number }) {
+function TranscriptImage({
+  image,
+  index,
+  onLoad,
+}: {
+  image: { id: string; src: string };
+  index: number;
+  onLoad?: () => void;
+}) {
   const [unavailable, setUnavailable] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    setUnavailable(false);
+    setAttempt(0);
+  }, [image.src]);
   if (unavailable) {
-    return <div className="message-image-unavailable" role="img" aria-label={`Attached image ${index + 1} is unavailable`}>Image unavailable</div>;
+    return (
+      <div className="message-image-unavailable">
+        <span role="img" aria-label={`Attached image ${index + 1} is unavailable`}>Image unavailable</span>
+        <button type="button" onClick={() => {
+          setUnavailable(false);
+          setAttempt((value) => value + 1);
+        }}>Retry image</button>
+      </div>
+    );
   }
+  const separator = image.src.includes("?") ? "&" : "?";
+  const src = attempt ? `${image.src}${separator}retry=${attempt}` : image.src;
   return (
     <a href={image.src} target="_blank" rel="noopener noreferrer" aria-label={`View attached image ${index + 1}`}>
-      <img src={image.src} alt={`Attached image ${index + 1}`} loading="lazy" decoding="async" onError={() => setUnavailable(true)} />
+      <img
+        key={attempt}
+        src={src}
+        alt={`Attached image ${index + 1}`}
+        loading="lazy"
+        decoding="async"
+        onLoad={onLoad}
+        onError={() => setUnavailable(true)}
+      />
     </a>
   );
 }
 
-function TranscriptImages({ images }: { images: Array<{ id: string; src: string }> }) {
+function TranscriptImages({
+  images,
+  onLoad,
+}: {
+  images: Array<{ id: string; src: string }>;
+  onLoad?: () => void;
+}) {
   if (!images.length) return null;
   return (
     <div className={`message-images ${images.length === 1 ? "single" : "multiple"}`} aria-label={`${images.length} attached image${images.length === 1 ? "" : "s"}`} data-gesture-exclusion>
-      {images.map((image, index) => <TranscriptImage key={image.id} image={image} index={index} />)}
+      {images.map((image, index) => <TranscriptImage key={image.id} image={image} index={index} onLoad={onLoad} />)}
     </div>
   );
 }
@@ -85,10 +123,12 @@ export function TranscriptEntry({
   message,
   agentName,
   searchTerm,
+  onImageLoad,
 }: {
   message: TranscriptMessage;
   agentName: string;
   searchTerm?: string;
+  onImageLoad?: () => void;
 }) {
   const presentation = message.presentation;
   if (presentation?.kind === "thinking") {
@@ -125,6 +165,7 @@ export function TranscriptEntry({
       </div>
       <div className="message-body">
         <TranscriptImages
+          onLoad={onImageLoad}
           images={(message.attachments ?? []).map((attachment) => ({
             id: attachment.id,
             src: `/api/v1/attachments/${encodeURIComponent(attachment.id)}`,
@@ -147,12 +188,21 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const [unseen, setUnseen] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [replyAnnouncement, setReplyAnnouncement] = useState({ key: 0, text: "" });
   const messageCount = selectedSnapshot?.messages.length ?? 0;
-  const lastText = selectedSnapshot?.messages.at(-1)?.text ?? "";
+  const renderedMessageCount = messageCount + pendingMessages.length;
+  const lastMessage = selectedSnapshot?.messages.at(-1);
+  const lastContentKey = `${lastMessage?.id ?? ""}\0${lastMessage?.text ?? ""}\0${pendingMessages.map((message) => `${message.id}:${message.text}:${message.attachments?.length ?? 0}`).join("|")}`;
   const previousCount = useRef(0);
+  const previousContentKey = useRef("");
   const previousAttention = useRef(0);
   const previousAgentId = useRef<string | null>(null);
   const previousSnapshotAgentId = useRef<string | null>(null);
+  const followingRef = useRef(following);
+  followingRef.current = following;
+  const announcementAgentIdRef = useRef<string | null>(null);
+  const announcementInitializedRef = useRef(false);
+  const announcedMessageStatesRef = useRef(new Map<string, TranscriptMessage["state"]>());
   const lineage = useMemo(
     () => deriveAgentLineage(catalog.agents, selectedAgent?.id ?? null),
     [catalog.agents, selectedAgent?.id],
@@ -160,6 +210,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const childCount = selectedAgent ? catalog.agents.filter((agent) => agent.parentId === selectedAgent.id).length : 0;
   const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
   const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
+  const selectedStatus = selectedAgent ? agentStatus(selectedAgent) : null;
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -168,16 +219,23 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
       element.scrollTop = element.scrollHeight;
       setUnseen(0);
     } else {
-      setUnseen((count) => count + countUnseen(previousCount.current, messageCount));
+      setUnseen((count) => count + countUnseen(previousCount.current, renderedMessageCount));
     }
-    previousCount.current = messageCount;
-  }, [messageCount, following]);
+    previousCount.current = renderedMessageCount;
+  }, [renderedMessageCount, following]);
 
   useEffect(() => {
-    if (!following) return;
+    const changed = previousContentKey.current !== lastContentKey;
+    previousContentKey.current = lastContentKey;
+    if (!changed) return;
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [lastText, following]);
+    if (following) {
+      if (element) element.scrollTop = element.scrollHeight;
+    } else {
+      // A streamed reply can grow without increasing the message count.
+      setUnseen((count) => Math.max(1, count));
+    }
+  }, [lastContentKey, following]);
 
   // Reset scroll-following state when switching agents so a new session's
   // history doesn't register as "unseen" and the view jumps to its bottom.
@@ -193,7 +251,8 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
 
     previousAgentId.current = agentId;
     previousSnapshotAgentId.current = baselineSnapshotAgentId;
-    previousCount.current = messageCount;
+    previousCount.current = renderedMessageCount;
+    previousContentKey.current = lastContentKey;
     previousAttention.current = snapshotAttention;
     if (agentChanged) {
       setFollowing(true);
@@ -201,7 +260,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     }
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [selectedAgent?.id, selectedSnapshot?.agentId, messageCount, snapshotAttention]);
+  }, [selectedAgent?.id, selectedSnapshot?.agentId, renderedMessageCount, lastContentKey, snapshotAttention]);
 
   useEffect(() => {
     if (snapshotAttention > previousAttention.current && typeof navigator.vibrate === "function") {
@@ -209,6 +268,52 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     }
     previousAttention.current = snapshotAttention;
   }, [snapshotAttention]);
+
+  useEffect(() => {
+    const agentId = selectedAgent?.id ?? null;
+    if (announcementAgentIdRef.current !== agentId) {
+      announcementAgentIdRef.current = agentId;
+      announcementInitializedRef.current = false;
+      announcedMessageStatesRef.current.clear();
+      setReplyAnnouncement((current) => current.text ? { key: current.key + 1, text: "" } : current);
+    }
+    if (!agentId || selectedSnapshot?.agentId !== agentId) return;
+
+    const nextStates = new Map<string, TranscriptMessage["state"]>();
+    for (const message of selectedSnapshot.messages) nextStates.set(message.id, message.state);
+    if (!announcementInitializedRef.current) {
+      announcedMessageStatesRef.current = nextStates;
+      announcementInitializedRef.current = true;
+      return;
+    }
+
+    let text = "";
+    const agentName = selectedAgent?.name ?? "Agent";
+    for (const message of selectedSnapshot.messages) {
+      if (message.role !== "assistant" || message.presentation) continue;
+      const previousState = announcedMessageStatesRef.current.get(message.id);
+      if (message.state === "complete" && previousState && previousState !== "complete") {
+        text = `${agentName} finished replying.`;
+      } else if (message.state === "complete" && !previousState) {
+        text = `${agentName} replied.`;
+      } else if (message.state === "failed" && previousState !== "failed") {
+        text = `${agentName}'s reply failed.`;
+      }
+    }
+    announcedMessageStatesRef.current = nextStates;
+    if (text) setReplyAnnouncement((current) => ({ key: current.key + 1, text }));
+  }, [selectedAgent?.id, selectedAgent?.name, selectedSnapshot]);
+
+  function handleTranscriptImageLoad() {
+    const element = scrollRef.current;
+    if (!element) return;
+    if (followingRef.current) {
+      element.scrollTop = element.scrollHeight;
+      setUnseen(0);
+    } else {
+      setUnseen((count) => Math.max(1, count));
+    }
+  }
 
   function updateFollowing() {
     const element = scrollRef.current;
@@ -229,6 +334,9 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
 
   return (
     <section className="panel transcript-panel" aria-labelledby="transcript-heading">
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        <span key={replyAnnouncement.key}>{replyAnnouncement.text}</span>
+      </span>
       <header className="conversation-header">
         <SwitchHapticButton
           className="sessions-trigger"
@@ -262,9 +370,9 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           )}
         </nav>
         <span
-          className={`agent-presence ${selectedAgent?.attention ? "attention" : selectedAgent?.activity ?? "idle"}`}
+          className={`agent-presence ${selectedStatus?.tone ?? "idle"}`}
           role="img"
-          aria-label={selectedAgent?.attention ? `Needs ${selectedAgent.attention}` : selectedAgent?.activity ?? "No agent selected"}
+          aria-label={selectedStatus?.label ?? "No agent selected"}
         />
         <button
           className={`icon-button search-trigger ${searchOpen ? "active" : ""}`}
@@ -309,6 +417,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
             className="transcript-scroll"
             ref={scrollRef}
             onScroll={updateFollowing}
+            style={{ touchAction: "pan-y" }}
             aria-label={`${selectedAgent.name} transcript`}
           >
             <div className="transcript-content">
@@ -318,14 +427,14 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
               ) : searching ? (
                 <div className="message-list">
                   {visibleMessages!.map((message) => (
-                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} searchTerm={normalizedQuery} />
+                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} searchTerm={normalizedQuery} onImageLoad={handleTranscriptImageLoad} />
                   ))}
                   {!visibleMessages!.length && <div className="empty-transcript"><p>No messages match that search.</p></div>}
                 </div>
               ) : (
                 <div className="message-list" role="log" aria-live="off">
                   {selectedSnapshot.messages.map((message) => (
-                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} />
+                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
                   ))}
                   {pendingMessages.map((message) => (
                     <article key={message.id} className="message user pending" aria-label="Sending">
@@ -335,6 +444,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                       </div>
                       <div className="message-body">
                         <TranscriptImages
+                          onLoad={handleTranscriptImageLoad}
                           images={(message.attachments ?? []).flatMap((attachment, index) => attachment.previewUrl
                             ? [{ id: `${message.id}:${index}`, src: attachment.previewUrl }]
                             : [])}

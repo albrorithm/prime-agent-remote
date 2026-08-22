@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
+import { agentStatus } from "./agent-status";
 
 interface Props {
   agents: AgentSummary[];
@@ -10,14 +11,6 @@ interface Props {
   drawerOpen?: boolean;
 }
 
-function stateLabel(agent: AgentSummary): string {
-  if (agent.attention) return `Needs ${agent.attention}`;
-  if (agent.lifecycle === "inactive") return "Inactive";
-  if (agent.activity === "working") return "Working";
-  if (agent.activity === "blocked") return "Blocked";
-  return "Idle";
-}
-
 export function directoryLeaf(cwd: string | undefined): string | null {
   if (!cwd) return null;
   const parts = cwd.split("/").filter(Boolean);
@@ -25,13 +18,20 @@ export function directoryLeaf(cwd: string | undefined): string | null {
 }
 
 function subtitle(agent: AgentSummary): string {
-  return directoryLeaf(agent.cwd) || agent.description || stateLabel(agent);
+  return directoryLeaf(agent.cwd) || agent.description || agentStatus(agent).label;
 }
 
 function StateIcon({ agent }: { agent: AgentSummary }) {
-  if (agent.attention) return <CircleAlert className="agent-state attention" aria-hidden="true" />;
-  if (agent.activity === "working") return <LoaderCircle className="agent-state working spin" aria-hidden="true" />;
-  if (agent.lifecycle === "inactive") return <Moon className="agent-state" aria-hidden="true" />;
+  const status = agentStatus(agent);
+  if (status.tone === "attention" || status.tone === "failed") {
+    return <CircleAlert className="agent-state attention" aria-hidden="true" />;
+  }
+  if (status.tone === "working" || status.tone === "starting") {
+    return <LoaderCircle className="agent-state working spin" aria-hidden="true" />;
+  }
+  if (status.tone === "inactive" || status.tone === "stopped") {
+    return <Moon className="agent-state" aria-hidden="true" />;
+  }
   return <span className="agent-state-dot" aria-hidden="true" />;
 }
 
@@ -97,6 +97,21 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }:
     }
     return result;
   }, [agents]);
+  const rovingFocusId = visible.some((item) => item.id === focusId)
+    ? focusId
+    : visible.find((item) => item.id === selectedId)?.id ?? visible[0]?.id ?? null;
+  const focusedTreeItemWasRemoved = typeof document !== "undefined"
+    && focusId !== null
+    && rovingFocusId !== focusId
+    && itemRefs.current.get(focusId) === document.activeElement;
+
+  useLayoutEffect(() => {
+    if (focusId === rovingFocusId) return;
+    setFocusId(rovingFocusId);
+    if (focusedTreeItemWasRemoved && rovingFocusId) {
+      queueMicrotask(() => itemRefs.current.get(rovingFocusId)?.focus());
+    }
+  }, [focusId, focusedTreeItemWasRemoved, rovingFocusId]);
 
   useEffect(() => {
     if (selectedId) setFocusId(selectedId);
@@ -214,7 +229,7 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }:
             aria-expanded={children.length ? expanded.has(agent.id) : undefined}
             aria-setsize={siblingList.length}
             aria-posinset={Math.max(1, siblingList.findIndex((item) => item.id === agent.id) + 1)}
-            tabIndex={focusId === agent.id || (!focusId && index === 0) ? 0 : -1}
+            tabIndex={rovingFocusId === agent.id || (!rovingFocusId && index === 0) ? 0 : -1}
             className={`agent-row ${selectedId === agent.id ? "selected" : ""}`}
             style={{ "--tree-depth": agent.depth } as React.CSSProperties}
             onFocus={() => setFocusId(agent.id)}
@@ -245,7 +260,7 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }:
                 {agent.unreadCount > 99 ? "99+" : agent.unreadCount}
               </span>
             )}
-            <span className={`state-pill ${agent.attention ? "attention" : ""}`}>{stateLabel(agent)}</span>
+            <span className={`state-pill ${["attention", "failed"].includes(agentStatus(agent).tone) ? "attention" : ""}`}>{agentStatus(agent).label}</span>
             {onAbort && agent.activity !== "idle" && agent.capabilities.abort && (
               <button
                 className="row-stop"

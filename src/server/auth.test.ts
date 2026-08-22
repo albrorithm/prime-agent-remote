@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, it } from "vitest";
-import { AuthService } from "./auth.js";
+import { describe, expect, it, vi } from "vitest";
+import { AuthService, MAX_TRACKED_PAIR_CLIENTS } from "./auth.js";
 import type { GatewayConfig } from "./config.js";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
@@ -65,5 +65,42 @@ describe("AuthService", () => {
       expect(auth.pair(request({}, "100.64.0.2"), response().value, "wrong-token")).toBeNull();
     }
     expect(auth.pair(request({}, "100.64.0.2"), response().value, "correct-token")).toBeNull();
+  });
+
+  it("expires sessions and rejects their CSRF tokens", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
+      const auth = new AuthService(config({ sessionTtlMs: 1_000 }));
+      const session = auth.pair(request({}, "100.64.0.3"), response().value, "correct-token")!;
+      expect(auth.isSessionActive(session)).toBe(true);
+      vi.advanceTimersByTime(1_000);
+      expect(auth.isSessionActive(session)).toBe(false);
+      expect(auth.validateMutation(request({
+        origin: "https://agent.example.test",
+        "x-csrf-token": session.csrfToken,
+      }), session)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps and prunes remote-address rate-limit state", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
+      const auth = new AuthService(config());
+      for (let index = 0; index < MAX_TRACKED_PAIR_CLIENTS + 20; index += 1) {
+        auth.pair(request({}, `100.64.${Math.floor(index / 256)}.${index % 256}`), response().value, "wrong-token");
+      }
+      const attempts = (auth as unknown as { pairAttempts: Map<string, number[]> }).pairAttempts;
+      expect(attempts.size).toBe(MAX_TRACKED_PAIR_CLIENTS);
+
+      vi.advanceTimersByTime(60_001);
+      expect(auth.pair(request({}, "100.65.0.1"), response().value, "correct-token")).not.toBeNull();
+      expect(attempts.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

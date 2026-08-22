@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
 import type { useGateway } from "../gateway-store";
@@ -123,6 +124,31 @@ describe("compact transcript entries", () => {
   });
 });
 
+
+describe("transcript attachment recovery", () => {
+  it("offers a retry after a transient attachment failure", async () => {
+    const user = userEvent.setup();
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          id: "retry-image",
+          role: "user",
+          state: "complete",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          text: "See this",
+          attachments: [{ id: "retry_safe", type: "image", mimeType: "image/jpeg" }],
+        }}
+      />,
+    );
+    fireEvent.error(screen.getByRole("img", { name: "Attached image 1" }));
+    expect(screen.getByRole("img", { name: "Attached image 1 is unavailable" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry image" }));
+    expect(screen.getByRole("img", { name: "Attached image 1" }))
+      .toHaveAttribute("src", "/api/v1/attachments/retry_safe?retry=1");
+  });
+});
+
 describe("agent switching resets scroll state", () => {
   function messages(count: number, prefix: string): TranscriptMessage[] {
     return Array.from({ length: count }, (_, index) => ({
@@ -162,6 +188,13 @@ describe("agent switching resets scroll state", () => {
     Object.defineProperty(element, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(element, "clientHeight", { configurable: true, value: 400 });
   }
+
+  it("reserves horizontal touch gestures on the transcript scroller for the drawer", () => {
+    gatewayState("agent-a", messages(1, "a"));
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(document.querySelector<HTMLElement>(".transcript-scroll")?.style.touchAction).toBe("pan-y");
+  });
 
   it("scrolls to bottom and clears unseen when the selected agent changes", () => {
     gatewayState("agent-a", messages(3, "a"));
@@ -227,4 +260,72 @@ describe("agent switching resets scroll state", () => {
 
     Object.defineProperty(navigator, "vibrate", { configurable: true, value: undefined });
   });
+
+  it("shows Latest when an existing streamed reply grows while scrolled up", () => {
+    const streaming = messages(1, "stream").map((message) => ({ ...message, state: "streaming" as const }));
+    gatewayState("agent-a", streaming);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const scroller = document.querySelector(".transcript-scroll") as HTMLElement;
+    constrainScroll(scroller);
+    scroller.scrollTop = 100;
+    fireEvent.scroll(scroller);
+
+    gatewayState("agent-a", [{ ...streaming[0], text: `${streaming[0].text} more output` }]);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("button", { name: /Latest/ })).toBeInTheDocument();
+  });
+
+  it("announces reply completion without announcing streaming token updates", () => {
+    const streaming = { ...messages(1, "reply")[0], state: "streaming" as const };
+    gatewayState("agent-a", [streaming]);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("");
+
+    gatewayState("agent-a", [{ ...streaming, text: `${streaming.text} token` }]);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(status).toHaveTextContent("");
+
+    gatewayState("agent-a", [{ ...streaming, text: `${streaming.text} done`, state: "complete" }]);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(status).toHaveTextContent("agent-a finished replying.");
+  });
+
+  it("keeps follow mode pinned for pending messages and late image loads", () => {
+    gatewayState("agent-a", []);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const scroller = document.querySelector(".transcript-scroll") as HTMLElement;
+    constrainScroll(scroller);
+    scroller.scrollTop = 600;
+
+    gatewayMock.state = {
+      ...gatewayMock.state!,
+      pendingMessages: [{
+        id: "pending-1",
+        text: "pending",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        knownUserMessageIds: [],
+        attachments: [{ mimeType: "image/jpeg", previewUrl: "blob:pending", ownsPreviewUrl: false }],
+      }],
+    };
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+    fireEvent.load(screen.getByRole("img", { name: "Attached image 1" }));
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+    expect(screen.queryByRole("button", { name: /Latest/ })).not.toBeInTheDocument();
+  });
+
+  it("uses lifecycle-first status labels in the transcript header", () => {
+    const failed = { ...agent("failed", null, 0), lifecycle: "failed" as const };
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [failed] },
+      selectedAgent: failed,
+      selectedSnapshot: { revision: 1, agentId: failed.id, messages: [], activity: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
+  });
+
 });

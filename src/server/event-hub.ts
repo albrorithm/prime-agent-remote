@@ -10,26 +10,43 @@ import type {
 import { PROTOCOL_VERSION } from "../protocol.js";
 
 type StreamSnapshot = CatalogSnapshot | AgentSnapshot;
-type Listener = (frame: ServerFrame) => void;
+type Listener = (frame: ServerFrame) => void | Promise<void>;
+
+interface ListenerRegistration {
+  streamId: string;
+  listener: Listener;
+  active: boolean;
+}
+
+interface StoredEvent {
+  envelope: EventEnvelope;
+  bytes: number;
+}
 
 interface StreamState {
   id: string;
   seq: number;
   snapshot: StreamSnapshot;
-  events: EventEnvelope[];
-  listeners: Set<Listener>;
+  events: StoredEvent[];
+  replayBytes: number;
+  listeners: Set<ListenerRegistration>;
 }
+
+const DEFAULT_REPLAY_BYTE_BUDGET = 1024 * 1024;
 
 export class EventHub {
   readonly epoch = randomUUID();
   private readonly streams = new Map<string, StreamState>();
+  private closed = false;
 
   constructor(
     private readonly ringSize = 256,
     private readonly replayBatchThreshold = 64,
+    private readonly replayByteBudget = DEFAULT_REPLAY_BYTE_BUDGET,
   ) {}
 
   register(streamId: string, snapshot: StreamSnapshot): void {
+    if (this.closed) throw new Error("EventHub is closed");
     const current = this.streams.get(streamId);
     if (current) {
       current.snapshot = structuredClone(snapshot);
@@ -40,8 +57,23 @@ export class EventHub {
       seq: 0,
       snapshot: structuredClone(snapshot),
       events: [],
+      replayBytes: 0,
       listeners: new Set(),
     });
+  }
+
+  unregister(streamId: string): boolean {
+    const stream = this.streams.get(streamId);
+    if (!stream) return false;
+    this.notifyAll(stream, {
+      type: "detached",
+      version: PROTOCOL_VERSION,
+      streamId,
+      reason: "stream_gone",
+    });
+    for (const registration of stream.listeners) registration.active = false;
+    stream.listeners.clear();
+    return this.streams.delete(streamId);
   }
 
   has(streamId: string): boolean {
@@ -54,6 +86,7 @@ export class EventHub {
   }
 
   publish(streamId: string, event: GatewayEvent, snapshot: StreamSnapshot): EventEnvelope {
+    if (this.closed) throw new Error("EventHub is closed");
     const stream = this.streams.get(streamId);
     if (!stream) throw new Error(`Unknown stream: ${streamId}`);
 
@@ -67,13 +100,30 @@ export class EventHub {
       emittedAt: new Date().toISOString(),
       event: structuredClone(event),
     };
-    stream.events.push(envelope);
-    if (stream.events.length > this.ringSize) {
-      stream.events.splice(0, stream.events.length - this.ringSize);
+
+    // A replace event contains the complete current state. Older events add no
+    // replay value and can amplify a large snapshot up to ringSize times.
+    if (event.kind === "agent.replaced" || event.kind === "catalog.replaced") {
+      stream.events = [];
+      stream.replayBytes = 0;
+    }
+    const bytes = this.serializedBytes(envelope);
+    if (bytes <= this.replayByteBudget) {
+      stream.events.push({ envelope, bytes });
+      stream.replayBytes += bytes;
+    } else {
+      // Replay coverage must remain contiguous. Once one sequence cannot be
+      // retained, all older events become unsafe replay starting points.
+      stream.events = [];
+      stream.replayBytes = 0;
+    }
+    while (stream.events.length > this.ringSize || stream.replayBytes > this.replayByteBudget) {
+      const removed = stream.events.shift();
+      stream.replayBytes -= removed?.bytes ?? 0;
     }
 
     const frame: ServerFrame = { type: "event", version: PROTOCOL_VERSION, envelope };
-    for (const listener of stream.listeners) listener(frame);
+    this.notifyAll(stream, frame);
     return envelope;
   }
 
@@ -82,12 +132,14 @@ export class EventHub {
     since: StreamCursor | null | undefined,
     listener: Listener,
   ): { initial: ServerFrame; detach: () => void } | null {
+    if (this.closed) return null;
     const stream = this.streams.get(streamId);
     if (!stream) return null;
 
     // Registration and initial-frame creation are synchronous. This guarantees
     // events emitted after attach are queued after the initial frame.
-    stream.listeners.add(listener);
+    const registration: ListenerRegistration = { streamId, listener, active: true };
+    stream.listeners.add(registration);
     const cursor = { epoch: this.epoch, seq: stream.seq };
     let initial: ServerFrame;
 
@@ -95,7 +147,7 @@ export class EventHub {
       initial = this.snapshotFrame(stream, cursor);
     } else {
       const gap = stream.seq - since.seq;
-      const oldestSeq = stream.events[0]?.seq ?? stream.seq + 1;
+      const oldestSeq = stream.events[0]?.envelope.seq ?? stream.seq + 1;
       const covered = gap === 0 || since.seq + 1 >= oldestSeq;
       if (covered && gap <= this.replayBatchThreshold) {
         initial = {
@@ -103,7 +155,9 @@ export class EventHub {
           version: PROTOCOL_VERSION,
           streamId,
           cursor,
-          events: structuredClone(stream.events.filter((event) => event.seq > since.seq)),
+          events: structuredClone(stream.events
+            .map(({ envelope }) => envelope)
+            .filter((event) => event.seq > since.seq)),
         };
       } else {
         initial = this.snapshotFrame(stream, cursor);
@@ -112,20 +166,53 @@ export class EventHub {
 
     return {
       initial,
-      detach: () => stream.listeners.delete(listener),
+      // Capture only the small registration token. Holding a detach callback
+      // after unregister must not retain the stream snapshot and replay ring.
+      detach: () => this.detachRegistration(registration),
     };
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     for (const stream of this.streams.values()) {
-      const frame: ServerFrame = {
+      this.notifyAll(stream, {
         type: "detached",
         version: PROTOCOL_VERSION,
         streamId: stream.id,
         reason: "server_shutdown",
-      };
-      for (const listener of stream.listeners) listener(frame);
+      });
+      for (const registration of stream.listeners) registration.active = false;
       stream.listeners.clear();
+    }
+    this.streams.clear();
+  }
+
+  private detachRegistration(registration: ListenerRegistration): void {
+    if (!registration.active) return;
+    registration.active = false;
+    this.streams.get(registration.streamId)?.listeners.delete(registration);
+  }
+
+  private notifyAll(stream: StreamState, frame: ServerFrame): void {
+    for (const registration of stream.listeners) {
+      if (!registration.active) continue;
+      try {
+        const result = registration.listener(frame);
+        if (result && typeof result.then === "function") void result.catch(() => {});
+      } catch {
+        // A broken socket/listener must not block delivery to other clients.
+      }
+    }
+  }
+
+  private serializedBytes(envelope: EventEnvelope): number {
+    try {
+      return Buffer.byteLength(JSON.stringify(envelope), "utf8");
+    } catch {
+      // Non-serializable envelopes cannot be replayed, but live delivery still
+      // lets the transport apply its own failure handling.
+      return Number.POSITIVE_INFINITY;
     }
   }
 

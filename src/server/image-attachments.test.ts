@@ -6,7 +6,10 @@ import {
   ImageAttachmentValidationError,
   MAX_IMAGE_ATTACHMENTS,
   MAX_IMAGE_BASE64_CHARS,
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
+  MAX_IMAGE_REQUEST_PIXELS,
   validateImageAttachments,
 } from "./image-attachments.js";
 
@@ -16,14 +19,42 @@ const JPEG_BYTES = Buffer.from([
   0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00,
   0x00, 0xff, 0xd9,
 ]);
-const PNG_BYTES = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x01, 0x49, 0x44, 0x41, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0x00, 0x00, 0x00, 0x00,
-]);
+const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = CRC32_TABLE[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function pngBytes(width = 1, height = 1, data = Buffer.from([0])): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", data),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+const PNG_BYTES = pngBytes();
 const WEBP_BYTES = Buffer.from([
   0x52, 0x49, 0x46, 0x46, 0x12, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
   0x56, 0x50, 0x38, 0x4c, 0x05, 0x00, 0x00, 0x00,
@@ -63,6 +94,51 @@ describe("validateImageAttachments", () => {
     expectInvalid([attachment("image/webp", WEBP_BYTES.subarray(0, 12))]);
   });
 
+  it("rejects invalid PNG checksums and duplicate critical structure", () => {
+    const badChecksum = Buffer.from(PNG_BYTES);
+    badChecksum[badChecksum.length - 1] ^= 0x01;
+    expectInvalid([attachment("image/png", badChecksum)]);
+
+    const duplicateHeader = Buffer.concat([
+      PNG_BYTES.subarray(0, 33),
+      PNG_BYTES.subarray(8, 33),
+      PNG_BYTES.subarray(33),
+    ]);
+    expectInvalid([attachment("image/png", duplicateHeader)]);
+  });
+
+  it("rejects excessive dimensions, per-image pixels, and request pixels", () => {
+    expect(MAX_IMAGE_DIMENSION).toBe(16_384);
+    expect(MAX_IMAGE_PIXELS).toBe(40_000_000);
+    expect(MAX_IMAGE_REQUEST_PIXELS).toBe(80_000_000);
+    expectInvalid([attachment("image/png", pngBytes(MAX_IMAGE_DIMENSION + 1, 1))]);
+
+    const tooManyPixels = Buffer.from(JPEG_BYTES);
+    tooManyPixels.writeUInt16BE(5_000, 7);
+    tooManyPixels.writeUInt16BE(10_000, 9);
+    expectInvalid([attachment("image/jpeg", tooManyPixels)]);
+
+    const thirtyMegapixels = Buffer.from(JPEG_BYTES);
+    thirtyMegapixels.writeUInt16BE(5_000, 7);
+    thirtyMegapixels.writeUInt16BE(6_000, 9);
+    expectInvalid(Array.from({ length: 3 }, () => attachment("image/jpeg", thirtyMegapixels)));
+  });
+
+  it("turns accessor and proxy failures into safe validation errors", () => {
+    let accessed = false;
+    const accessor = { type: "image", mimeType: "image/png" } as Record<string, unknown>;
+    Object.defineProperty(accessor, "data", {
+      enumerable: true,
+      get() { accessed = true; return PNG_BYTES.toString("base64"); },
+    });
+    expectInvalid([accessor]);
+    expect(accessed).toBe(false);
+
+    const { proxy, revoke } = Proxy.revocable([], {});
+    revoke();
+    expectInvalid(proxy);
+  });
+
   it("accepts an empty attachment list", () => {
     expect(validateImageAttachments([])).toEqual([]);
   });
@@ -76,8 +152,7 @@ describe("validateImageAttachments", () => {
     expect(first.id).toBe(`image_${expectedDigest}`);
     expect(second.id).toBe(first.id);
 
-    const changedBytes = Buffer.from(PNG_BYTES);
-    changedBytes[41] ^= 0x01;
+    const changedBytes = pngBytes(1, 1, Buffer.from([1]));
     expect(validateImageAttachments([attachment("image/png", changedBytes)])[0]!.id).not.toBe(first.id);
   });
 

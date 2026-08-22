@@ -23,11 +23,22 @@ import { SwitchHapticButton } from "./SwitchHapticButton";
 
 const DRAFTS_KEY = "prime-web-drafts";
 const SUCCESS_PREVIEW_REVOKE_DELAY_MS = 2_000;
+const MAX_STORED_DRAFTS = 100;
+const MAX_DRAFT_LENGTH = 100_000;
+const MAX_STORED_DRAFT_BYTES = 1_000_000;
 
 function loadDrafts(): Record<string, string> {
   try {
-    const value = JSON.parse(sessionStorage.getItem(DRAFTS_KEY) ?? "{}");
-    return value && typeof value === "object" ? value : {};
+    const stored = sessionStorage.getItem(DRAFTS_KEY) ?? "{}";
+    if (stored.length > MAX_STORED_DRAFT_BYTES) return {};
+    const value: unknown = JSON.parse(stored);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const drafts: Record<string, string> = {};
+    for (const [agentId, draft] of Object.entries(value).slice(0, MAX_STORED_DRAFTS)) {
+      if (!agentId || agentId.length > 256 || agentId === "__proto__" || typeof draft !== "string") continue;
+      drafts[agentId] = draft.slice(0, MAX_DRAFT_LENGTH);
+    }
+    return drafts;
   } catch {
     return {};
   }
@@ -50,6 +61,7 @@ const SAFE_PREPARATION_ERROR_PREFIXES = [
   "The browser returned invalid image data.",
   "This browser cannot",
   "The image has invalid dimensions.",
+  "The image dimensions are too large",
   "Could not decode the image file.",
   "The image could not be compressed",
 ] as const;
@@ -76,11 +88,15 @@ export function Composer() {
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [optionsMenuIndex, setOptionsMenuIndex] = useState(0);
   const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [dismissedSlashDraft, setDismissedSlashDraft] = useState("");
   const [slashCatalog, setSlashCatalog] = useState(FALLBACK_SLASH_COMMAND_CATALOG);
   const [slashCatalogReady, setSlashCatalogReady] = useState(false);
+  const composerRef = useRef<HTMLDivElement>(null);
   const optionsMenuRef = useRef<HTMLDivElement>(null);
+  const optionsRestoreFocusRef = useRef<HTMLElement | null>(null);
+  const focusOptionsOnOpenRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const imagesRef = useRef<PreparedImage[]>([]);
@@ -90,6 +106,7 @@ export function Composer() {
   const submittingRef = useRef(false);
   const retryRequestRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
   const preparationVersionRef = useRef(0);
+  const preparationAbortRef = useRef<AbortController | null>(null);
   const submissionVersionRef = useRef(0);
   const delayedRevocationsRef = useRef(new Map<string, number>());
   const id = selectedAgent?.id ?? "";
@@ -115,6 +132,60 @@ export function Composer() {
   const streaming = selectedSnapshot?.messages.some((message) => message.state === "streaming") ?? false;
   const canAttachImages = Boolean(selectedAgent?.capabilities.send && selectedAgent.capabilities.images);
   const visibleImages = imageOwnerRef.current === id ? images : [];
+
+  function closeOptions(restoreFocus: boolean) {
+    focusOptionsOnOpenRef.current = false;
+    setOptionsOpen(false);
+    const restore = optionsRestoreFocusRef.current;
+    optionsRestoreFocusRef.current = null;
+    if (restoreFocus) queueMicrotask(() => restore?.focus({ preventScroll: true }));
+  }
+
+  function toggleOptions(source?: "button" | "switch") {
+    if (optionsOpen) {
+      closeOptions(true);
+      return;
+    }
+    const trigger = composerRef.current?.querySelector<HTMLElement>(".composer-options-trigger") ?? null;
+    optionsRestoreFocusRef.current = source === "button"
+      ? trigger
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    focusOptionsOnOpenRef.current = source === "button";
+    setOptionsMenuIndex(0);
+    setOptionsOpen(true);
+  }
+
+  function enabledOptionsMenuItems(): HTMLButtonElement[] {
+    return [...(optionsMenuRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)') ?? [])];
+  }
+
+  function onOptionsMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const items = enabledOptionsMenuItems();
+    if (!items.length) return;
+    const current = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = (current + 1) % items.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Escape") {
+      event.preventDefault();
+      closeOptions(true);
+      return;
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const target = event.shiftKey
+        ? composerRef.current?.querySelector<HTMLElement>(".composer-options-trigger")
+        : textareaRef.current;
+      closeOptions(false);
+      queueMicrotask(() => target?.focus({ preventScroll: true }));
+      return;
+    } else return;
+    event.preventDefault();
+    const item = items[next];
+    setOptionsMenuIndex(Number(item.dataset.menuIndex ?? 0));
+    item.focus();
+  }
 
   function setDrafts(update: (current: Record<string, string>) => Record<string, string>) {
     setDraftsState((current) => {
@@ -163,6 +234,8 @@ export function Composer() {
   }
 
   useEffect(() => {
+    preparationAbortRef.current?.abort();
+    preparationAbortRef.current = null;
     preparationVersionRef.current += 1;
     submissionVersionRef.current += 1;
     preparingRef.current = false;
@@ -172,6 +245,7 @@ export function Composer() {
     setSending(false);
     setStopping(false);
     setOptionsOpen(false);
+    setOptionsMenuIndex(0);
     setSlashCommandIndex(0);
     setDismissedSlashDraft("");
     setAttachmentStatus("");
@@ -180,6 +254,8 @@ export function Composer() {
     flushDelayedRevocations();
 
     return () => {
+      preparationAbortRef.current?.abort();
+      preparationAbortRef.current = null;
       preparationVersionRef.current += 1;
       submissionVersionRef.current += 1;
       preparingRef.current = false;
@@ -215,6 +291,8 @@ export function Composer() {
 
   useEffect(() => {
     if (canAttachImages) return;
+    preparationAbortRef.current?.abort();
+    preparationAbortRef.current = null;
     preparationVersionRef.current += 1;
     preparingRef.current = false;
     setPreparing(false);
@@ -228,12 +306,18 @@ export function Composer() {
 
   useEffect(() => {
     if (!optionsOpen) return;
+    if (focusOptionsOnOpenRef.current) {
+      focusOptionsOnOpenRef.current = false;
+      const first = enabledOptionsMenuItems()[0];
+      first?.focus({ preventScroll: true });
+      setOptionsMenuIndex(Number(first?.dataset.menuIndex ?? 0));
+    }
     const close = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (optionsMenuRef.current?.contains(target)) return;
       if (target instanceof Element && target.closest(".composer-options-control")) return;
-      setOptionsOpen(false);
+      closeOptions(false);
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -250,7 +334,7 @@ export function Composer() {
     textarea.style.height = `${Math.min(152, Math.max(44, textarea.scrollHeight))}px`;
   }, [draft]);
 
-  async function prepareSelectedFiles(files: File[]) {
+  async function prepareSelectedFiles(files: File[], ignoredUnsupportedFiles = false) {
     if (!files.length || !canAttachImages) return;
     if (preparingRef.current || submittingRef.current) {
       setAttachmentStatus("Wait for the current images or message to finish.");
@@ -266,6 +350,8 @@ export function Composer() {
     const selected = files.slice(0, available);
     const reachedLimit = files.length > available;
     const version = ++preparationVersionRef.current;
+    const controller = new AbortController();
+    preparationAbortRef.current = controller;
     const agentId = id;
     const prepared: PreparedImage[] = [];
     const errors: string[] = [];
@@ -278,7 +364,7 @@ export function Composer() {
       for (const file of selected) {
         if (version !== preparationVersionRef.current || activeAgentIdRef.current !== agentId) break;
         try {
-          const image = await prepareImageFile(file);
+          const image = await prepareImageFile(file, controller.signal);
           if (version !== preparationVersionRef.current || activeAgentIdRef.current !== agentId) {
             revokePreviewUrl(image.previewUrl);
             break;
@@ -310,10 +396,13 @@ export function Composer() {
           : `${errors.length} images could not be prepared. ${errors.at(-1)}`);
       } else if (reachedLimit) {
         setAttachmentStatus(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
+      } else if (ignoredUnsupportedFiles) {
+        setAttachmentStatus("Unsupported files were ignored. Attach JPEG, PNG, or WebP images only.");
       } else {
         setAttachmentStatus("");
       }
     } finally {
+      if (preparationAbortRef.current === controller) preparationAbortRef.current = null;
       if (inProgressImagesRef.current === prepared) inProgressImagesRef.current = [];
       if (version === preparationVersionRef.current) {
         preparingRef.current = false;
@@ -324,7 +413,7 @@ export function Composer() {
 
   function chooseImages() {
     if (!canAttachImages || preparingRef.current || submittingRef.current) return;
-    setOptionsOpen(false);
+    closeOptions(false);
     if (imageInputRef.current) {
       imageInputRef.current.value = "";
       imageInputRef.current.click();
@@ -349,18 +438,25 @@ export function Composer() {
   }
 
   function onDragOver(event: ReactDragEvent<HTMLDivElement>) {
-    if (canAttachImages && Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+    if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
   }
 
   function onDrop(event: ReactDragEvent<HTMLDivElement>) {
-    const files = Array.from(event.dataTransfer.files).filter((file) => file.type.toLowerCase().startsWith("image/"));
-    if (!files.length) return;
+    const isFileDrop = Array.from(event.dataTransfer.types).includes("Files")
+      || event.dataTransfer.files.length > 0;
+    if (!isFileDrop) return;
     event.preventDefault();
+    const files = Array.from(event.dataTransfer.files);
+    const images = files.filter((file) => ["image/jpeg", "image/png", "image/webp"].includes(file.type.toLowerCase()));
     if (!canAttachImages) {
       setAttachmentStatus("Image attachments are not available for this agent.");
       return;
     }
-    void prepareSelectedFiles(files);
+    if (!images.length) {
+      setAttachmentStatus("Only JPEG, PNG, or WebP image files can be attached.");
+      return;
+    }
+    void prepareSelectedFiles(images, images.length !== files.length);
   }
 
   function removeImage(index: number) {
@@ -474,7 +570,7 @@ export function Composer() {
     }
     if (event.key === "Escape" && optionsOpen) {
       event.preventDefault();
-      setOptionsOpen(false);
+      closeOptions(true);
       return;
     }
     if (event.key === "Escape" && slashMenuOpen) {
@@ -512,14 +608,14 @@ export function Composer() {
 
   function startSlashCommand() {
     setDrafts((current) => ({ ...current, [id]: current[id]?.trim() ? current[id] : "/" }));
-    setOptionsOpen(false);
+    closeOptions(false);
     setDismissedSlashDraft("");
     queueMicrotask(() => textareaRef.current?.focus());
   }
 
   if (!selectedAgent) return null;
   return (
-    <div className="composer" data-gesture-exclusion>
+    <div ref={composerRef} className="composer" data-gesture-exclusion>
       <input
         ref={imageInputRef}
         type="file"
@@ -566,10 +662,17 @@ export function Composer() {
         </div>
       )}
       {optionsOpen && (
-        <div ref={optionsMenuRef} className="composer-menu" id="composer-options" role="menu" aria-label="Composer options">
-          <button role="menuitem" onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
-          <button role="menuitem" onClick={chooseImages} disabled={!canAttachImages || preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
-          <button role="menuitem" disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
+        <div
+          ref={optionsMenuRef}
+          className="composer-menu"
+          id="composer-options"
+          role="menu"
+          aria-label="Composer options"
+          onKeyDown={onOptionsMenuKeyDown}
+        >
+          <button role="menuitem" data-menu-index="0" tabIndex={optionsMenuIndex === 0 ? 0 : -1} onFocus={() => setOptionsMenuIndex(0)} onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
+          <button role="menuitem" data-menu-index="1" tabIndex={optionsMenuIndex === 1 ? 0 : -1} onFocus={() => setOptionsMenuIndex(1)} onClick={chooseImages} disabled={!canAttachImages || preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
+          <button role="menuitem" data-menu-index="2" tabIndex={-1} disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
         </div>
       )}
       <SwitchHapticButton
@@ -579,7 +682,7 @@ export function Composer() {
         ariaExpanded={optionsOpen}
         ariaControls="composer-options"
         disabled={!selectedAgent.capabilities.send}
-        onActivate={() => setOptionsOpen((open) => !open)}
+        onActivate={toggleOptions}
         preserveFocus
       ><Plus aria-hidden="true" /></SwitchHapticButton>
       <div className="composer-input" onDragOver={onDragOver} onDrop={onDrop}>
@@ -614,6 +717,7 @@ export function Composer() {
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={1}
+          maxLength={MAX_DRAFT_LENGTH}
           aria-autocomplete="list"
           aria-expanded={slashMenuOpen}
           aria-controls={slashMenuOpen ? "slash-command-options" : undefined}

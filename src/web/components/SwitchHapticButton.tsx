@@ -8,7 +8,7 @@ interface SwitchHapticButtonProps {
   className?: string;
   disabled?: boolean;
   label: string;
-  onActivate: () => void;
+  onActivate: (source?: "button" | "switch") => void;
   preserveFocus?: boolean;
 }
 
@@ -44,13 +44,13 @@ export function SwitchHapticButton({
   }
 
   function handleButtonClick() {
-    onActivate();
+    onActivate("button");
     if (preserveFocus) restorePreservedFocus();
   }
 
   function handleSwitchClick() {
     if (!preserveFocus) buttonRef.current?.focus({ preventScroll: true });
-    onActivate();
+    onActivate("switch");
     if (preserveFocus) restorePreservedFocus();
   }
 

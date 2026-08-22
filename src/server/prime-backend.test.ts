@@ -1,8 +1,9 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
+import type { ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
@@ -30,6 +31,17 @@ interface FixtureState {
   responses: unknown[];
   creates: Array<Record<string, unknown>>;
   listener: ((event: unknown) => void) | null;
+  createError?: string;
+  listError: boolean;
+  listDelayMs: number;
+  listCalls: number;
+  activeListRequests: number;
+  maxConcurrentListRequests: number;
+  snapshotCalls: number;
+  activeSnapshotRequests: number;
+  maxConcurrentSnapshotRequests: number;
+  disposed: number;
+  responseDelayMs: number;
 }
 
 const fixture: FixtureState = {
@@ -118,6 +130,16 @@ const fixture: FixtureState = {
   responses: [],
   creates: [],
   listener: null,
+  listError: false,
+  listDelayMs: 0,
+  listCalls: 0,
+  activeListRequests: 0,
+  maxConcurrentListRequests: 0,
+  snapshotCalls: 0,
+  activeSnapshotRequests: 0,
+  maxConcurrentSnapshotRequests: 0,
+  disposed: 0,
+  responseDelayMs: 0,
 };
 
 const moduleSource = `
@@ -127,6 +149,7 @@ export class DaemonClient {
   async request(command) {
     if (command.type === "create") {
       state.creates.push(command);
+      if (state.createError) return { success: false, error: state.createError };
       state.createdCount = (state.createdCount ?? 0) + 1;
       if (typeof command.sessionPath === "string") {
         const saved = state.sessions.find((session) => session.sessionFile === command.sessionPath);
@@ -147,15 +170,33 @@ export class DaemonClient {
       return { success: true, data: { activeSessionId, sessionId } };
     }
     if (command.type !== "list" || command.all !== true) return { success: false, error: "unexpected command" };
-    return { success: true, data: { sessions: state.sessions } };
+    state.listCalls += 1;
+    state.activeListRequests += 1;
+    state.maxConcurrentListRequests = Math.max(state.maxConcurrentListRequests, state.activeListRequests);
+    const sessions = structuredClone(state.sessions);
+    try {
+      if (state.listDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.listDelayMs));
+      if (state.listError) throw new Error("private list failure");
+      return { success: true, data: { sessions } };
+    } finally {
+      state.activeListRequests -= 1;
+    }
   }
   close() {}
 }
 const connection = {
   subscribe(listener) { state.listener = listener; return () => { state.listener = null; }; },
   async getInitialSnapshot() {
-    if (state.snapshotDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.snapshotDelayMs));
-    return structuredClone(state.snapshot);
+    state.snapshotCalls += 1;
+    state.activeSnapshotRequests += 1;
+    state.maxConcurrentSnapshotRequests = Math.max(state.maxConcurrentSnapshotRequests, state.activeSnapshotRequests);
+    const snapshot = structuredClone(state.snapshot);
+    try {
+      if (state.snapshotDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.snapshotDelayMs));
+      return snapshot;
+    } finally {
+      state.activeSnapshotRequests -= 1;
+    }
   },
   async getCommands() { return structuredClone(state.commands); },
   async getAvailableModels() { return structuredClone(state.availableModels); },
@@ -203,8 +244,11 @@ const connection = {
     state.prompts.push({ message, options });
   },
   async abort() { state.aborts += 1; },
-  async respondToExtensionUiRequest(id, response) { state.responses.push({ id, response }); },
-  async dispose() {},
+  async respondToExtensionUiRequest(id, response) {
+    if (state.responseDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.responseDelayMs));
+    state.responses.push({ id, response });
+  },
+  async dispose() { state.disposed += 1; },
 };
 export const DaemonAgentConnection = {
   async attach(client, activeSessionId, options) {
@@ -1007,6 +1051,384 @@ describe("PrimeBackend", () => {
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+
+  it("serializes dirty catalog refreshes and applies the newest list", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = originalSessions.map((session) => structuredClone(session));
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      fixture.listCalls = 0;
+      fixture.activeListRequests = 0;
+      fixture.maxConcurrentListRequests = 0;
+      fixture.listDelayMs = 25;
+      const frames: ServerFrame[] = [];
+      const attached = hub.attach("catalog", null, (frame) => frames.push(frame));
+      const refresh = () => Reflect.get(backend, "refreshCatalog").call(backend, true) as Promise<void>;
+      const first = refresh();
+      const second = refresh();
+      fixture.sessions[0].sessionName = "Newest catalog name";
+      await Promise.all([first, second]);
+
+      expect(fixture.listCalls).toBe(2);
+      expect(fixture.maxConcurrentListRequests).toBe(1);
+      expect(backend.catalog().agents[0].name).toBe("Newest catalog name");
+      const catalogEvents = frames.filter((frame) =>
+        frame.type === "event" && frame.envelope.event.kind === "catalog.replaced");
+      expect(catalogEvents).toHaveLength(1);
+      expect(catalogEvents[0]).toMatchObject({
+        type: "event",
+        envelope: {
+          event: {
+            payload: { agents: expect.arrayContaining([expect.objectContaining({ name: "Newest catalog name" })]) },
+          },
+        },
+      });
+      attached?.detach();
+    } finally {
+      fixture.listDelayMs = 0;
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("refreshes during sustained event traffic without overlapping snapshots", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      fixture.snapshotCalls = 0;
+      fixture.activeSnapshotRequests = 0;
+      fixture.maxConcurrentSnapshotRequests = 0;
+      fixture.snapshotDelayMs = 30;
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      for (let index = 0; index < 10; index += 1) {
+        listener({ type: "streaming_update", index });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(fixture.snapshotCalls).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      expect(fixture.maxConcurrentSnapshotRequests).toBe(1);
+      expect(fixture.snapshotCalls).toBeGreaterThanOrEqual(2);
+    } finally {
+      fixture.snapshotDelayMs = 0;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("disposes a connection whose active session changes", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = originalSessions.map((session) => structuredClone(session));
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.disposed = 0;
+    fixture.attachCount = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      fixture.sessions[0].activeSessionId = "private-active-replaced";
+      await (Reflect.get(backend, "refreshCatalog").call(backend, true) as Promise<void>);
+      expect(fixture.disposed).toBe(1);
+
+      await backend.agentSnapshot(agentId);
+      expect(fixture.attachCount).toBe(2);
+      expect(fixture.attachOptions).toMatchObject({ activeSessionId: "private-active-replaced" });
+    } finally {
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("claims an attention response once before awaiting the adapter", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responseDelayMs = 30;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      listener({
+        type: "extension_ui_request",
+        request: { id: "atomic-request", method: "confirm", payload: { title: "Approve?" } },
+      });
+      const attentionCatalogRevision = backend.catalog().revision;
+      await (Reflect.get(backend, "refreshCatalog").call(backend, true) as Promise<void>);
+      expect(backend.catalog().revision).toBe(attentionCatalogRevision);
+      const request = (await backend.agentSnapshot(agentId))!.attention[0];
+      const resolve = () => backend.resolveAttention({
+        attentionId: request.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: request.revision,
+        optionId: "confirm",
+      });
+      const results = await Promise.allSettled([resolve(), resolve()]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect(fixture.responses).toHaveLength(1);
+      expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
+    } finally {
+      fixture.responseDelayMs = 0;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("sanitizes daemon create failures", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.createError = "private daemon create detail";
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      await expect(backend.createSession({ requestId: crypto.randomUUID(), cwd: "/projects/new" }))
+        .rejects.toThrow("The daemon could not create the session");
+    } finally {
+      delete fixture.createError;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("handles a rejected close-event catalog refresh without an unhandled rejection", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      fixture.listError = true;
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      listener({ type: "closed" });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(error).toHaveBeenCalledWith("Prime catalog refresh failed after connection close");
+    } finally {
+      fixture.listError = false;
+      error.mockRestore();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("skips malformed saved rows and keeps missing timestamps stable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prime-mobile-malformed-"));
+    const sessionFile = join(directory, "session.jsonl");
+    try {
+      await writeFile(sessionFile, [
+        "null",
+        "[]",
+        "{not-json",
+        JSON.stringify({ type: "message", message: { role: "user", content: "kept" } }),
+        JSON.stringify({ type: "message", message: null }),
+        JSON.stringify({ type: "message", message: { role: "assistant", content: "also kept" } }),
+      ].join("\n"));
+      const first = await projectSavedSessionTranscript(sessionFile);
+      const second = await projectSavedSessionTranscript(sessionFile);
+      expect(first.map((message) => message.text)).toEqual(["kept", "also kept"]);
+      expect(second.map((message) => message.createdAt)).toEqual(first.map((message) => message.createdAt));
+      expect(first.map((message) => message.createdAt)).toEqual([
+        "1970-01-01T00:00:00.000Z",
+        "1970-01-01T00:00:00.000Z",
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+
+  it("validates and bounds daemon summaries and snapshots", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    const originalSnapshot = fixture.snapshot;
+    fixture.listError = false;
+    fixture.sessions = [
+      {} as Record<string, unknown>,
+      {
+        id: "bounded-row",
+        sessionId: "bounded-session",
+        activeSessionId: "bounded-active",
+        sessionName: "n".repeat(1_000),
+        summary: "s".repeat(10_000),
+        cwd: "/" + "c".repeat(10_000),
+        created: "not-a-date",
+        modified: 9e99,
+        model: { input: ["image", 1, "x".repeat(100)] },
+      },
+    ];
+    fixture.snapshot = {
+      state: {
+        sessionId: "bounded-session",
+        activeSessionId: "bounded-active",
+        isStreaming: "yes",
+        isCompacting: false,
+        isBashRunning: false,
+        recap: "r".repeat(10_000),
+      },
+      messages: Array.from({ length: 1_100 }, (_, index) => ({ role: "user", content: `message-${index}` })),
+      children: Array.from({ length: 300 }, (_, index) => ({ id: `child-${index}`, label: "l".repeat(500), status: "running" })),
+    };
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      expect(backend.catalog().agents).toHaveLength(1);
+      expect(backend.catalog().agents[0]).toMatchObject({
+        createdAt: "1970-01-01T00:00:00.000Z",
+        updatedAt: "1970-01-01T00:00:00.000Z",
+        activity: "idle",
+        capabilities: { images: true },
+      });
+      expect(backend.catalog().agents[0].name.length).toBeLessThanOrEqual(80);
+      expect(backend.catalog().agents[0].cwd?.length).toBe(2_048);
+      const snapshot = await backend.agentSnapshot(backend.catalog().agents[0].id);
+      expect(snapshot?.messages).toHaveLength(1_000);
+      expect(snapshot?.messages[0].createdAt).toBe("1970-01-01T00:00:00.000Z");
+      expect(snapshot?.activity).toHaveLength(251);
+      expect(snapshot?.activity[0]).toMatchObject({ title: "Agent is idle", detail: "r".repeat(4_000) });
+    } finally {
+      fixture.sessions = originalSessions;
+      fixture.snapshot = originalSnapshot;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+
+  it("bounds catalog drain batches without overlapping or abandoning waiters", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 15;
+    fixture.listCalls = 0;
+    fixture.activeListRequests = 0;
+    fixture.maxConcurrentListRequests = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      fixture.listCalls = 0;
+      const refresh = () => Reflect.get(backend, "refreshCatalog").call(backend, true) as Promise<void>;
+      const waiters: Promise<void>[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        waiters.push(refresh());
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      await Promise.all(waiters);
+      expect(fixture.maxConcurrentListRequests).toBe(1);
+      expect(fixture.listCalls).toBeGreaterThan(1);
+      expect(Reflect.get(backend, "catalogRefreshWaiters")).toHaveLength(0);
+    } finally {
+      fixture.listDelayMs = 0;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("keeps a worst-case bounded catalog well below the transport ceiling", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.sessions = Array.from({ length: 500 }, (_, index) => ({
+      id: `bounded-row-${index}`,
+      sessionId: `bounded-session-${index}`,
+      sessionName: `Bounded session ${index}`,
+      summary: "\u0000".repeat(4_000),
+      cwd: `/${"\u0000".repeat(5_000)}`,
+      created: "not-a-date",
+      modified: "not-a-date",
+    }));
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      expect(backend.catalog().agents).toHaveLength(500);
+      const serializedBytes = Buffer.byteLength(JSON.stringify(backend.catalog()), "utf8");
+      expect(serializedBytes).toBeLessThan(12 * 1024 * 1024);
+    } finally {
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("caps pending attention per agent and cancels the oldest requests", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responseDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      for (let index = 0; index < 10; index += 1) {
+        listener({
+          type: "extension_ui_request",
+          request: {
+            id: `bounded-attention-${index}`,
+            method: "select",
+            payload: {
+              title: "t".repeat(1_000),
+              message: "m".repeat(10_000),
+              options: Array.from({ length: 100 }, (_, option) => ({
+                id: `option-${option}`.padEnd(300, "x"),
+                label: "l".repeat(500),
+              })),
+            },
+          },
+        });
+      }
+      const snapshot = (await backend.agentSnapshot(agentId))!;
+      expect(snapshot.attention).toHaveLength(8);
+      expect(snapshot.attention[0]?.id).toBe("bounded-attention-2");
+      expect(snapshot.attention.at(-1)?.id).toBe("bounded-attention-9");
+      expect(snapshot.attention.every((request) =>
+        request.title.length <= 200
+        && (request.detail?.length ?? 0) <= 4_000
+        && request.options.length <= 51)).toBe(true);
+      expect(Reflect.get(backend, "pendingExtensions").size).toBe(8);
+      expect(fixture.responses.slice(0, 2)).toEqual([
+        { id: "bounded-attention-0", response: { cancelled: true } },
+        { id: "bounded-attention-1", response: { cancelled: true } },
+      ]);
+      expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8")).toBeLessThan(4 * 1024 * 1024);
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
     }
   });
 

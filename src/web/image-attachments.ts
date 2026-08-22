@@ -8,6 +8,8 @@ import {
 export const MAX_IMAGE_ATTACHMENTS = SHARED_MAX_IMAGE_ATTACHMENTS;
 export const MAX_IMAGE_DIMENSION = 2000;
 export const MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;
+export const MAX_SOURCE_IMAGE_PIXELS = 32_000_000;
+export const MAX_SOURCE_IMAGE_DIMENSION = 16_384;
 export const MAX_IMAGE_BASE64_CHARS = SHARED_MAX_IMAGE_BASE64_CHARS;
 
 export type PreparedImage = ImageAttachmentInput & {
@@ -26,18 +28,39 @@ const SUPPORTED_IMAGE_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "image
 const JPEG_QUALITIES = [0.9, 0.75, 0.6, 0.45, 0.3, 0.2, 0.12, 0.08] as const;
 const RESIZE_PASSES = [1, 0.75, 0.55, 0.4] as const;
 
-function readAsDataUrl(blob: Blob): Promise<string> {
+function cancelledError(): Error {
+  return new Error("Reading the image file was cancelled.");
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw cancelledError();
+}
+
+function readAsDataUrl(blob: Blob, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Could not read the image file."));
-    reader.onabort = () => reject(new Error("Reading the image file was cancelled."));
-    reader.onload = () => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onSignalAbort);
+      callback();
+    };
+    const onSignalAbort = () => {
+      try { reader.abort(); } catch { /* The reader may already be complete. */ }
+      finish(() => reject(cancelledError()));
+    };
+    reader.onerror = () => finish(() => reject(new Error("Could not read the image file.")));
+    reader.onabort = () => finish(() => reject(cancelledError()));
+    reader.onload = () => finish(() => {
       if (typeof reader.result !== "string") {
         reject(new Error("Could not read the image file."));
         return;
       }
       resolve(reader.result);
-    };
+    });
+    signal?.addEventListener("abort", onSignalAbort, { once: true });
     reader.readAsDataURL(blob);
   });
 }
@@ -63,7 +86,8 @@ function createPreview(blob: Blob): { previewUrl: string; previewBlob: Blob } {
   }
 }
 
-async function loadWithImageElement(file: File): Promise<LoadedImage> {
+async function loadWithImageElement(file: File, signal?: AbortSignal): Promise<LoadedImage> {
+  throwIfAborted(signal);
   if (typeof Image !== "function") {
     throw new Error("This browser cannot decode images.");
   }
@@ -75,21 +99,33 @@ async function loadWithImageElement(file: File): Promise<LoadedImage> {
       objectUrl = URL.createObjectURL(file.slice(0, file.size, file.type));
       sourceUrl = objectUrl;
     } catch {
-      sourceUrl = await readAsDataUrl(file);
+      sourceUrl = await readAsDataUrl(file, signal);
     }
   } else {
-    sourceUrl = await readAsDataUrl(file);
+    sourceUrl = await readAsDataUrl(file, signal);
   }
 
   const image = new Image();
   return new Promise((resolve, reject) => {
+    let settled = false;
     const revoke = () => {
-      if (objectUrl && typeof URL.revokeObjectURL === "function") {
-        URL.revokeObjectURL(objectUrl);
-      }
+      if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      image.onload = null;
+      image.onerror = null;
+      callback();
+    };
+    const onAbort = () => finish(() => {
+      image.src = "";
+      revoke();
+      reject(cancelledError());
+    });
 
-    image.onload = () => {
+    image.onload = () => finish(() => {
       const width = image.naturalWidth || image.width;
       const height = image.naturalHeight || image.height;
       if (!width || !height) {
@@ -98,19 +134,42 @@ async function loadWithImageElement(file: File): Promise<LoadedImage> {
         return;
       }
       resolve({ source: image, width, height, cleanup: revoke });
-    };
-    image.onerror = () => {
+    });
+    image.onerror = () => finish(() => {
       revoke();
       reject(new Error("Could not decode the image file."));
-    };
-    image.src = sourceUrl;
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else image.src = sourceUrl;
   });
 }
 
-async function loadImage(file: File): Promise<LoadedImage> {
+async function loadImage(file: File, signal?: AbortSignal): Promise<LoadedImage> {
+  throwIfAborted(signal);
   if (typeof createImageBitmap === "function") {
+    let bitmapPromise: Promise<ImageBitmap> | null = null;
     try {
-      const bitmap = await createImageBitmap(file);
+      bitmapPromise = createImageBitmap(file);
+      const bitmap = signal
+        ? await new Promise<ImageBitmap>((resolve, reject) => {
+            const onAbort = () => reject(cancelledError());
+            signal.addEventListener("abort", onAbort, { once: true });
+            bitmapPromise!.then(
+              (value) => {
+                signal.removeEventListener("abort", onAbort);
+                if (signal.aborted) {
+                  value.close();
+                  reject(cancelledError());
+                } else resolve(value);
+              },
+              (error) => {
+                signal.removeEventListener("abort", onAbort);
+                reject(error);
+              },
+            );
+          })
+        : await bitmapPromise;
       if (bitmap.width > 0 && bitmap.height > 0) {
         return {
           source: bitmap,
@@ -120,11 +179,12 @@ async function loadImage(file: File): Promise<LoadedImage> {
         };
       }
       bitmap.close();
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw cancelledError();
       // Some browsers expose createImageBitmap but cannot use it for every image.
     }
   }
-  return loadWithImageElement(file);
+  return loadWithImageElement(file, signal);
 }
 
 function drawImage(
@@ -144,9 +204,20 @@ function drawImage(
   context.drawImage(source, 0, 0, width, height);
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
+function canvasToBlob(canvas: HTMLCanvasElement, quality: number, signal?: AbortSignal): Promise<Blob> {
   return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      reject(cancelledError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     canvas.toBlob((blob) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
       if (blob) resolve(blob);
       else reject(new Error("The browser could not encode the image."));
     }, "image/jpeg", quality);
@@ -159,17 +230,18 @@ async function encodeToFit(
   loaded: LoadedImage,
   initialWidth: number,
   initialHeight: number,
-  flattenTransparency: boolean,
+  signal?: AbortSignal,
 ): Promise<{ data: string; blob: Blob }> {
   for (const resize of RESIZE_PASSES) {
+    throwIfAborted(signal);
     const width = Math.max(1, Math.round(initialWidth * resize));
     const height = Math.max(1, Math.round(initialHeight * resize));
-    drawImage(canvas, context, loaded.source, width, height, flattenTransparency);
+    drawImage(canvas, context, loaded.source, width, height, true);
 
     for (const quality of JPEG_QUALITIES) {
-      const blob = await canvasToBlob(canvas, quality);
+      const blob = await canvasToBlob(canvas, quality, signal);
       if (Math.ceil(blob.size / 3) * 4 > MAX_IMAGE_BASE64_CHARS) continue;
-      const data = getBase64(await readAsDataUrl(blob));
+      const data = getBase64(await readAsDataUrl(blob, signal));
       if (data.length <= MAX_IMAGE_BASE64_CHARS) return { data, blob };
     }
   }
@@ -177,7 +249,8 @@ async function encodeToFit(
   throw new Error("The image could not be compressed below the attachment size limit.");
 }
 
-export async function prepareImageFile(file: File): Promise<PreparedImage> {
+export async function prepareImageFile(file: File, signal?: AbortSignal): Promise<PreparedImage> {
+  throwIfAborted(signal);
   const mimeType = file.type.toLowerCase();
   if (!SUPPORTED_IMAGE_TYPES.has(mimeType)) {
     throw new Error("Unsupported image type. Choose a JPEG, PNG, or WebP image.");
@@ -186,22 +259,15 @@ export async function prepareImageFile(file: File): Promise<PreparedImage> {
     throw new Error("The source image is too large. Choose an image smaller than 25 MB.");
   }
 
-  const loaded = await loadImage(file);
+  const loaded = await loadImage(file, signal);
   try {
-    const needsResize = loaded.width > MAX_IMAGE_DIMENSION || loaded.height > MAX_IMAGE_DIMENSION;
-    const estimatedBase64Length = Math.ceil(file.size / 3) * 4;
-
-    if (mimeType === "image/jpeg" && !needsResize && estimatedBase64Length <= MAX_IMAGE_BASE64_CHARS) {
-      const originalDataUrl = await readAsDataUrl(file);
-      const originalData = getBase64(originalDataUrl);
-      if (originalData.length <= MAX_IMAGE_BASE64_CHARS) {
-        return {
-          type: "image",
-          mimeType: mimeType as ImageMimeType,
-          data: originalData,
-          ...createPreview(file),
-        };
-      }
+    throwIfAborted(signal);
+    if (
+      loaded.width > MAX_SOURCE_IMAGE_DIMENSION
+      || loaded.height > MAX_SOURCE_IMAGE_DIMENSION
+      || loaded.width > Math.floor(MAX_SOURCE_IMAGE_PIXELS / loaded.height)
+    ) {
+      throw new Error("The image dimensions are too large to prepare safely.");
     }
 
     const scale = Math.min(1, MAX_IMAGE_DIMENSION / loaded.width, MAX_IMAGE_DIMENSION / loaded.height);
@@ -213,10 +279,13 @@ export async function prepareImageFile(file: File): Promise<PreparedImage> {
       throw new Error("This browser cannot prepare image attachments.");
     }
 
-    const encoded = await encodeToFit(canvas, context, loaded, width, height, mimeType !== "image/jpeg");
+    // Re-encode every supported format, including small JPEGs. Canvas output
+    // contains pixels only and does not retain EXIF or other source metadata.
+    const encoded = await encodeToFit(canvas, context, loaded, width, height, signal);
+    throwIfAborted(signal);
     return {
       type: "image",
-      mimeType: "image/jpeg",
+      mimeType: "image/jpeg" as ImageMimeType,
       data: encoded.data,
       ...createPreview(encoded.blob),
     };

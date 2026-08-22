@@ -33,7 +33,7 @@ A setup token is exchanged for an in-memory gateway session. The browser receive
 - `Secure` when configured for HTTPS;
 - a separate CSRF token returned inside authenticated JSON.
 
-The setup token is never stored by the browser application.
+The setup token is never stored by the browser application. Production requires an explicitly configured setup token of at least 32 characters. Sessions expire in memory after the configured TTL. A WebSocket is bound to the session used during its upgrade and is closed when that session expires.
 
 ## Browser checks
 
@@ -41,7 +41,7 @@ The setup token is never stored by the browser application.
 - Origin and session validation during WebSocket upgrade.
 - CSP, frame denial, no-referrer, and content-type protections.
 - One MiB default HTTP request limit. Image-message requests have a separate bounded limit sized for three validated images.
-- WebSocket message and buffered-output limits.
+- WebSocket limits of 128 KiB per inbound message, 16 MiB per serialized outbound frame, and 32 MiB of aggregate buffered output.
 - Pairing and mutation rate limits.
 - Text rendering for transcript content; no raw HTML injection.
 
@@ -51,9 +51,9 @@ Tailscale provides encrypted transport and tailnet membership. It is not treated
 
 ## Caching
 
-The service worker excludes `/api/` and `/ws`. It precaches only the application shell manifest and icon. Transcripts, prompts, cookies, and API responses are not added to its cache.
+The service worker excludes `/api/` and `/ws`. It precaches the built application-shell index, fingerprinted JavaScript and CSS, manifest, and icons. Transcripts, prompts, cookies, and API responses are not added to its cache.
 
-Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Browser transcript snapshots receive only content-addressed metadata. Attachment responses require authentication, use private no-store headers, and never include local filenames.
+Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Validation checks canonical base64, container structure, checksums where available, dimensions, and per-image and per-request pixel limits before admission. Browser transcript snapshots receive only content-addressed metadata. Attachment responses require authentication, use private no-store headers, and never include local filenames.
 
 ## Remaining production work
 

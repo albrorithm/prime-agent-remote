@@ -37,6 +37,21 @@ describe("applyGatewayEvent", () => {
     const result = applyGatewayEvent(withAttention, { kind: "agent.attention_resolved", payload: { id: "a" } });
     expect(result.attention.map((item) => item.id)).toEqual(["b"]);
   });
+
+  it("does not let a lower-revision replacement erase newer state", () => {
+    const newer = { ...snapshot, revision: 5, messages: [{
+      id: "new",
+      role: "assistant" as const,
+      text: "newer",
+      state: "complete" as const,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }] };
+    const result = applyGatewayEvent(newer, {
+      kind: "agent.replaced",
+      payload: { ...snapshot, revision: 4 },
+    });
+    expect(result).toBe(newer);
+  });
 });
 
 describe("reconcilePending", () => {
@@ -60,6 +75,18 @@ describe("reconcilePending", () => {
       { id: "new", role: "user" as const, text: "same", state: "complete" as const, createdAt: "2026-01-01T00:00:03.000Z" },
     ];
     expect(reconcilePending(repeated, messages).map((item) => item.id)).toEqual(["p2"]);
+  });
+
+  it("does not reuse a consumed echo on the next reconciliation", () => {
+    const repeated = [
+      { id: "p1", text: "same", createdAt: "2026-01-01T00:00:01.000Z", knownUserMessageIds: [] },
+      { id: "p2", text: "same", createdAt: "2026-01-01T00:00:02.000Z", knownUserMessageIds: [] },
+    ];
+    const messages = [{ id: "echo", role: "user" as const, text: "same", state: "complete" as const, createdAt: "2026-01-01T00:00:03.000Z" }];
+    const first = reconcilePending(repeated, messages);
+    expect(first.map((item) => item.id)).toEqual(["p2"]);
+    expect(first[0].knownUserMessageIds).toContain("echo");
+    expect(reconcilePending(first, messages).map((item) => item.id)).toEqual(["p2"]);
   });
 
   it("keeps everything while the server has not echoed", () => {

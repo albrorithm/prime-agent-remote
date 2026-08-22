@@ -244,6 +244,208 @@ export type ServerFrame =
     }
   | { type: "pong"; version: typeof PROTOCOL_VERSION };
 
+const agentCapabilitiesSchema = z.object({
+  send: z.boolean(),
+  abort: z.boolean(),
+  resume: z.boolean(),
+  rename: z.boolean(),
+  stop: z.boolean(),
+  deactivate: z.boolean(),
+  delete: z.boolean(),
+  respond: z.boolean(),
+  images: z.boolean(),
+});
+
+const agentSummarySchema = z.object({
+  id: z.string(),
+  rootId: z.string(),
+  parentId: z.string().nullable(),
+  depth: z.number().int().nonnegative(),
+  name: z.string(),
+  description: z.string().optional(),
+  cwd: z.string().optional(),
+  lifecycle: z.enum(["starting", "live", "inactive", "stopped", "failed"]),
+  activity: z.enum(["working", "idle", "blocked"]),
+  attention: z.enum(["approval", "question", "error"]).nullable(),
+  unreadCount: z.number().int().nonnegative(),
+  childCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  capabilities: agentCapabilitiesSchema,
+});
+
+export const catalogSnapshotSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  agents: z.array(agentSummarySchema),
+});
+
+const transcriptAttachmentSchema = z.object({
+  id: z.string(),
+  type: z.literal("image"),
+  mimeType: z.enum(IMAGE_MIME_TYPES),
+});
+
+const transcriptPresentationSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("thinking") }),
+  z.object({
+    kind: z.literal("tool"),
+    label: z.string(),
+    status: z.enum(["running", "waiting", "complete", "failed", "unknown"]),
+    meta: z.string().optional(),
+  }),
+]);
+
+const transcriptMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant", "system"]),
+  text: z.string(),
+  state: z.enum(["complete", "streaming", "failed"]),
+  createdAt: z.string(),
+  presentation: transcriptPresentationSchema.optional(),
+  attachments: z.array(transcriptAttachmentSchema).optional(),
+});
+
+const activityItemSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["tool", "thinking", "child", "status"]),
+  title: z.string(),
+  detail: z.string().optional(),
+  status: z.enum(["running", "waiting", "complete", "failed"]),
+  createdAt: z.string(),
+  agentId: z.string().optional(),
+});
+
+const attentionRequestSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  kind: z.enum(["approval", "question", "error"]),
+  title: z.string(),
+  detail: z.string().optional(),
+  revision: z.number().int().nonnegative(),
+  options: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    tone: z.enum(["default", "safe", "danger"]),
+  })),
+  createdAt: z.string(),
+});
+
+const agentGoalSchema = z.object({
+  status: z.enum(["active", "paused", "budget_limited", "complete", "error"]),
+  objective: z.string(),
+  tokenBudget: z.number().optional(),
+  tokensUsed: z.number(),
+  timeUsedSeconds: z.number(),
+  continuationsUsed: z.number(),
+  updatedAt: z.string().optional(),
+  lastReason: z.string().optional(),
+  lastError: z.string().optional(),
+});
+
+export const agentSnapshotSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  agentId: z.string().min(1),
+  messages: z.array(transcriptMessageSchema),
+  activity: z.array(activityItemSchema),
+  attention: z.array(attentionRequestSchema),
+  goal: agentGoalSchema.optional(),
+});
+
+export const bootstrapResponseSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  csrfToken: z.string(),
+  backend: z.enum(["demo", "prime"]),
+  catalog: catalogSnapshotSchema,
+});
+
+const gatewayEventSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("catalog.replaced"), payload: catalogSnapshotSchema }),
+  z.object({ kind: z.literal("agent.replaced"), payload: agentSnapshotSchema }),
+  z.object({ kind: z.literal("agent.message_added"), payload: transcriptMessageSchema }),
+  z.object({ kind: z.literal("agent.message_updated"), payload: transcriptMessageSchema }),
+  z.object({ kind: z.literal("agent.activity_added"), payload: activityItemSchema }),
+  z.object({ kind: z.literal("agent.activity_updated"), payload: activityItemSchema }),
+  z.object({ kind: z.literal("agent.attention_added"), payload: attentionRequestSchema }),
+  z.object({
+    kind: z.literal("agent.attention_resolved"),
+    payload: z.object({ id: z.string() }),
+  }),
+]);
+
+const streamCursorSchema = z.object({
+  epoch: z.string().min(1).max(128),
+  seq: z.number().int().nonnegative(),
+});
+
+export const eventEnvelopeSchema = z.object({
+  version: z.literal(PROTOCOL_VERSION),
+  streamId: z.string().min(1).max(160),
+  epoch: z.string().min(1).max(128),
+  seq: z.number().int().nonnegative(),
+  emittedAt: z.string(),
+  event: gatewayEventSchema,
+}).superRefine((value, context) => {
+  const isCatalog = value.streamId === "catalog";
+  if (isCatalog !== (value.event.kind === "catalog.replaced")
+    || (!isCatalog && !value.streamId.startsWith("agent:"))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Event does not match its stream" });
+    return;
+  }
+  const agentId = isCatalog ? null : value.streamId.slice(6);
+  if (value.event.kind === "agent.replaced" && value.event.payload.agentId !== agentId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Agent event does not match its stream" });
+  }
+  if (value.event.kind === "agent.attention_added" && value.event.payload.agentId !== agentId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Attention event does not match its stream" });
+  }
+});
+
+export const serverFrameSchema = z.union([
+  z.object({
+    type: z.literal("snapshot"),
+    version: z.literal(PROTOCOL_VERSION),
+    streamId: z.string().min(1).max(160),
+    cursor: streamCursorSchema,
+    snapshot: z.union([catalogSnapshotSchema, agentSnapshotSchema]),
+  }).superRefine((value, context) => {
+    if (value.streamId === "catalog" && !("agents" in value.snapshot)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Catalog stream requires a catalog snapshot" });
+    }
+    if (value.streamId.startsWith("agent:")
+      && (!("agentId" in value.snapshot) || value.snapshot.agentId !== value.streamId.slice(6))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Agent snapshot does not match its stream" });
+    }
+    if (value.streamId !== "catalog" && !value.streamId.startsWith("agent:")) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Unknown snapshot stream" });
+    }
+  }),
+  z.object({
+    type: z.literal("replay"),
+    version: z.literal(PROTOCOL_VERSION),
+    streamId: z.string().min(1).max(160),
+    cursor: streamCursorSchema,
+    events: z.array(eventEnvelopeSchema),
+  }).superRefine((value, context) => {
+    if (value.events.some((event) => event.streamId !== value.streamId
+      || event.epoch !== value.cursor.epoch
+      || event.seq > value.cursor.seq)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Replay contains an event outside its stream cursor" });
+    }
+  }),
+  z.object({
+    type: z.literal("event"),
+    version: z.literal(PROTOCOL_VERSION),
+    envelope: eventEnvelopeSchema,
+  }),
+  z.object({
+    type: z.literal("detached"),
+    version: z.literal(PROTOCOL_VERSION),
+    streamId: z.string().min(1).max(160),
+    reason: z.enum(["stream_gone", "lagged", "server_shutdown", "invalid_cursor"]),
+  }),
+  z.object({ type: z.literal("pong"), version: z.literal(PROTOCOL_VERSION) }),
+]);
+
 export const attachFrameSchema = z.object({
   type: z.literal("attach"),
   version: z.literal(PROTOCOL_VERSION),

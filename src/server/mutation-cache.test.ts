@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MutationCache, MutationCacheMismatchError } from "./mutation-cache.js";
+import { MutationCache, MutationCacheCapacityError, MutationCacheMismatchError } from "./mutation-cache.js";
 
 describe("MutationCache", () => {
   it("coalesces concurrent retries and caches the accepted result", async () => {
@@ -51,4 +51,28 @@ describe("MutationCache", () => {
       .rejects.toBeInstanceOf(MutationCacheMismatchError);
     expect(operation).toHaveBeenCalledTimes(1);
   });
+
+  it("caps entries and evicts completed results before rejecting live work", async () => {
+    let finish!: (value: number) => void;
+    const pending = new Promise<number>((resolve) => { finish = resolve; });
+    const cache = new MutationCache<number>(1_000, Date.now, 1, 10_000);
+
+    const first = cache.run("session", "one", "binding", () => pending);
+    await expect(cache.run("session", "two", "binding", async () => 2))
+      .rejects.toBeInstanceOf(MutationCacheCapacityError);
+    finish(1);
+    await expect(first).resolves.toBe(1);
+    await expect(cache.run("session", "two", "binding", async () => 2)).resolves.toBe(2);
+  });
+
+  it("expires stuck pending entries", async () => {
+    let now = 0;
+    const never = new Promise<number>(() => {});
+    const cache = new MutationCache<number>(1_000, () => now, 1, 50);
+    void cache.run("session", "stuck", "binding", () => never);
+    now = 51;
+
+    await expect(cache.run("session", "replacement", "binding", async () => 3)).resolves.toBe(3);
+  });
+
 });

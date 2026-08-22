@@ -3,6 +3,7 @@ import {
   MAX_IMAGE_BASE64_CHARS,
   MAX_IMAGE_DIMENSION,
   MAX_SOURCE_IMAGE_BYTES,
+  MAX_SOURCE_IMAGE_PIXELS,
   prepareImageFile,
 } from "./image-attachments";
 
@@ -65,24 +66,29 @@ describe("prepareImageFile", () => {
     expect(createImageBitmapMock).not.toHaveBeenCalled();
   });
 
-  it("keeps an under-limit image without using canvas", async () => {
+  it("re-encodes an under-limit JPEG so source metadata is not transmitted", async () => {
     const close = mockBitmap(640, 480);
-    const createElement = vi.spyOn(document, "createElement");
+    const encodedBlob = new Blob(["pixels only"], { type: "image/jpeg" });
+    const { canvas, drawImage, fillRect } = mockCanvas(() => encodedBlob);
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
-    const file = new File(["small jpeg"], "private-name.jpg", { type: "image/jpeg" });
+    const file = new File(["jpeg with private metadata"], "private-name.jpg", { type: "image/jpeg" });
 
     const result = await prepareImageFile(file);
 
     expect(result).toMatchObject({
       type: "image",
       mimeType: "image/jpeg",
-      data: btoa("small jpeg"),
+      data: btoa("pixels only"),
       previewUrl: "blob:preview",
     });
+    expect(result.data).not.toBe(btoa("jpeg with private metadata"));
+    expect(canvas.width).toBe(640);
+    expect(canvas.height).toBe(480);
+    expect(drawImage).toHaveBeenCalled();
+    expect(fillRect).toHaveBeenCalledWith(0, 0, 640, 480);
     expect(result.previewBlob).toBeInstanceOf(Blob);
     expect(result.previewBlob.type).toBe("image/jpeg");
     expect(JSON.stringify(result)).not.toContain("private-name.jpg");
-    expect(createElement).not.toHaveBeenCalledWith("canvas");
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -125,4 +131,33 @@ describe("prepareImageFile", () => {
     expect(canvas.toBlob).toHaveBeenCalledTimes(32);
     expect(close).toHaveBeenCalledOnce();
   });
+
+  it("rejects decoded images with unsafe pixel counts before creating a canvas", async () => {
+    const width = 10_000;
+    const height = Math.floor(MAX_SOURCE_IMAGE_PIXELS / width) + 1;
+    const close = mockBitmap(width, height);
+    const createElement = vi.spyOn(document, "createElement");
+    await expect(
+      prepareImageFile(new File(["compressed"], "large.jpg", { type: "image/jpeg" })),
+    ).rejects.toThrow(/dimensions are too large/i);
+    expect(createElement).not.toHaveBeenCalledWith("canvas");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("cancels decoding and closes a bitmap that resolves after cancellation", async () => {
+    let resolveBitmap!: (bitmap: ImageBitmap) => void;
+    const close = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(() => new Promise<ImageBitmap>((resolve) => { resolveBitmap = resolve; })));
+    const controller = new AbortController();
+    const preparation = prepareImageFile(
+      new File(["image"], "cancel.jpg", { type: "image/jpeg" }),
+      controller.signal,
+    );
+    controller.abort();
+    await expect(preparation).rejects.toThrow(/cancelled/i);
+    resolveBitmap({ width: 10, height: 10, close } as unknown as ImageBitmap);
+    await Promise.resolve();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
 });

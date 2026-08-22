@@ -117,4 +117,30 @@ describe("AgentTree", () => {
     expect(directoryLeaf("/")).toBeNull();
     expect(directoryLeaf(undefined)).toBeNull();
   });
+  it("always leaves one visible result in the roving tab order after filtering", () => {
+    const { rerender } = render(<AgentTree agents={agents} selectedId="root" onSelect={vi.fn()} />);
+    rerender(<AgentTree agents={[agents[2], agents[3]]} selectedId="root" onSelect={vi.fn()} />);
+    const visible = screen.getAllByRole("treeitem");
+    expect(visible.filter((item) => item.tabIndex === 0)).toHaveLength(1);
+    expect(visible.find((item) => item.tabIndex === 0)).toHaveTextContent("grandchild");
+  });
+
+  it("moves focus when a live catalog update removes the focused row", async () => {
+    const { rerender } = render(<AgentTree agents={agents} selectedId={null} onSelect={vi.fn()} />);
+    const child = screen.getByRole("treeitem", { name: /^child/i });
+    child.focus();
+    expect(child).toHaveFocus();
+    rerender(<AgentTree agents={[agents[0], agents[2]]} selectedId={null} onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("treeitem", { name: /^root/i })).toHaveFocus());
+    expect(screen.getAllByRole("treeitem").filter((item) => item.tabIndex === 0)).toHaveLength(1);
+  });
+
+  it("labels lifecycle states before idle activity", () => {
+    const failed = { ...makeAgent("failed", null, 0), lifecycle: "failed" as const };
+    const starting = { ...makeAgent("starting", null, 0), lifecycle: "starting" as const };
+    render(<AgentTree agents={[failed, starting]} selectedId={null} onSelect={vi.fn()} />);
+    expect(screen.getByRole("treeitem", { name: /failed.*Failed/i })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: /starting.*Starting/i })).toBeInTheDocument();
+  });
+
 });

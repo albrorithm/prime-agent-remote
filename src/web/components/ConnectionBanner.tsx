@@ -9,7 +9,7 @@ export function ConnectionBanner() {
     <div className={`connection-banner ${connection}`} role="status">
       {connection === "offline" ? <WifiOff aria-hidden="true" /> : busy ? <RotateCw className="spin" aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
       <span>{error || (connection === "replaying" ? "Catching up…" : connection === "offline" ? "Connection lost" : "Connecting…")}</span>
-      {connection === "offline" && <button onClick={reconnect}>Reconnect</button>}
+      {(connection === "offline" || error) && <button onClick={reconnect}>{error ? "Retry" : "Reconnect"}</button>}
     </div>
   );
 }

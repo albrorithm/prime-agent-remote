@@ -1,5 +1,5 @@
 import { ChevronRight, Eye, EyeOff, Folder, FolderPlus, Home, LoaderCircle, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DirectoryListing } from "../../protocol";
 import * as api from "../api";
 import { useGateway } from "../gateway-store";
@@ -17,35 +17,49 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
   const [showHidden, setShowHidden] = useState(false);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const mountedRef = useRef(true);
+  const loadVersionRef = useRef(0);
+  const createVersionRef = useRef(0);
 
   const load = useCallback(async (path?: string) => {
+    const version = ++loadVersionRef.current;
     setLoading(true);
     setError(null);
     try {
-      setListing(await api.listDirectories(path));
+      const nextListing = await api.listDirectories(path);
+      if (mountedRef.current && version === loadVersionRef.current) setListing(nextListing);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not list that directory");
+      if (mountedRef.current && version === loadVersionRef.current) {
+        setError(cause instanceof Error ? cause.message : "Could not list that directory");
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current && version === loadVersionRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     void load(selectedAgent?.cwd || undefined);
     // The starting directory is fixed when the panel opens; later selection
     // changes should not yank the browser to a different tree.
+    return () => {
+      mountedRef.current = false;
+      loadVersionRef.current += 1;
+      createVersionRef.current += 1;
+    };
   }, [load]);
 
   async function submit() {
-    if (!listing || creating) return;
+    if (!listing || loading || error || creating) return;
+    const version = ++createVersionRef.current;
     setCreating(true);
     try {
       await createSession(listing.path, name.trim() || undefined);
-      onCreated();
+      if (mountedRef.current && version === createVersionRef.current) onCreated();
     } catch {
       // The gateway store exposes the error.
     } finally {
-      setCreating(false);
+      if (mountedRef.current && version === createVersionRef.current) setCreating(false);
     }
   }
 
@@ -115,7 +129,7 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
           aria-label="Session name"
           maxLength={200}
         />
-        <button className="primary-button" disabled={!listing || creating} onClick={() => void submit()}>
+        <button className="primary-button" disabled={!listing || loading || Boolean(error) || creating} onClick={() => void submit()}>
           {creating && <LoaderCircle className="spin" aria-hidden="true" />}
           Start session here
         </button>

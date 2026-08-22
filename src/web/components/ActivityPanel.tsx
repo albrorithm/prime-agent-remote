@@ -1,5 +1,6 @@
 import { CheckCircle2, CircleAlert, GitBranch, LoaderCircle, Wrench, X } from "lucide-react";
 import { useGateway } from "../gateway-store";
+import { agentStatus } from "./agent-status";
 
 function Icon({ kind, status }: { kind: string; status: string }) {
   if (status === "failed" || status === "waiting") return <CircleAlert aria-hidden="true" />;
@@ -37,7 +38,7 @@ export function ActivityPanel({ onClose, onNavigate }: ActivityPanelProps) {
             {children.map((child) => (
               <button key={child.id} onClick={() => navigate(child.id)}>
                 <GitBranch aria-hidden="true" />
-                <span><strong>{child.name}</strong><small>{child.attention ? `Needs ${child.attention}` : child.activity}</small></span>
+                <span><strong>{child.name}</strong><small>{agentStatus(child).label}</small></span>
               </button>
             ))}
           </section>

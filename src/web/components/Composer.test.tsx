@@ -425,7 +425,7 @@ describe("Composer", () => {
 
     fireEvent.paste(input, { clipboardData: { files: [pasted] } });
 
-    await waitFor(() => expect(imageAttachmentMock.prepareImageFile).toHaveBeenCalledWith(pasted));
+    await waitFor(() => expect(imageAttachmentMock.prepareImageFile).toHaveBeenCalledWith(pasted, expect.any(AbortSignal)));
     expect(await screen.findByRole("img", { name: "Image attachment 1 preview" })).toHaveAttribute("src", "blob:preview-1");
     expect(document.body).not.toHaveTextContent("clipboard-name.webp");
   });
@@ -437,7 +437,7 @@ describe("Composer", () => {
 
     fireEvent.drop(input.parentElement!, { dataTransfer: { files: [dropped], types: ["Files"] } });
 
-    await waitFor(() => expect(imageAttachmentMock.prepareImageFile).toHaveBeenCalledWith(dropped));
+    await waitFor(() => expect(imageAttachmentMock.prepareImageFile).toHaveBeenCalledWith(dropped, expect.any(AbortSignal)));
   });
 
   it("preserves text and images after a failed send for a successful retry", async () => {
@@ -505,4 +505,60 @@ describe("Composer", () => {
     await user.type(screen.getByRole("textbox", { name: "Message Agent" }), "survives reload");
     expect(sessionStorage.getItem("prime-web-drafts")).toContain("survives reload");
   });
+  it("prevents unsupported file drops and announces the validation error", () => {
+    render(<Composer />);
+    const input = screen.getByLabelText("Message Agent");
+    const pdf = new File(["document"], "private.pdf", { type: "application/pdf" });
+    const accepted = fireEvent.drop(input.parentElement!, {
+      dataTransfer: { files: [pdf], types: ["Files"] },
+    });
+    expect(accepted).toBe(false);
+    expect(screen.getByRole("status")).toHaveTextContent("Only JPEG, PNG, or WebP image files");
+    expect(imageAttachmentMock.prepareImageFile).not.toHaveBeenCalled();
+  });
+
+  it("supports menu arrow keys and restores focus with Escape", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const trigger = screen.getByRole("button", { name: "Composer options" });
+    await user.click(trigger);
+    const slash = screen.getByRole("menuitem", { name: /^Slash command/ });
+    const image = screen.getByRole("menuitem", { name: /^Image/ });
+    await waitFor(() => expect(slash).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    expect(image).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(slash).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "Composer options" })).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("validates stored draft values before using them", () => {
+    sessionStorage.setItem("prime-web-drafts", JSON.stringify({
+      "agent-1": 42,
+      "other-agent": "valid draft",
+      "__proto__": "ignored",
+    }));
+    const view = render(<Composer />);
+    expect(screen.getByRole("textbox", { name: "Message Agent" })).toHaveValue("");
+
+    gatewayMock.current.selectedAgent = { ...agent, id: "other-agent", name: "Other" };
+    gatewayMock.current.selectedSnapshot = { ...snapshot, agentId: "other-agent" };
+    view.rerender(<Composer />);
+    expect(screen.getByRole("textbox", { name: "Message Other" })).toHaveValue("valid draft");
+  });
+
+  it("cancels in-progress image preparation on unmount", async () => {
+    imageAttachmentMock.prepareImageFile.mockImplementationOnce(() => new Promise(() => {}));
+    const view = render(<Composer />);
+    const file = new File(["image"], "image.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Add image attachments"), { target: { files: [file] } });
+    await waitFor(() => expect(imageAttachmentMock.prepareImageFile).toHaveBeenCalled());
+    const signal = imageAttachmentMock.prepareImageFile.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+  });
+
 });

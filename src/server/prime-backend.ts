@@ -46,6 +46,7 @@ import {
 import {
   absoluteDirectoryPath,
   directoryCrumbs,
+  DIRECTORY_SCAN_BOUND,
   selectDirectoryEntries,
   type ListedChild,
 } from "./directories.js";
@@ -210,9 +211,13 @@ interface PrimeModule {
 
 interface ConnectionRecord {
   publicId: string;
+  activeSessionId: string;
   connection: PrimeConnection;
   unsubscribe: () => void;
   refreshTimer?: NodeJS.Timeout;
+  refreshPromise?: Promise<void>;
+  refreshDirty: boolean;
+  disposed: boolean;
   revision: number;
 }
 
@@ -222,10 +227,30 @@ interface PendingExtension {
   method: "confirm" | "select";
   payload: Record<string, unknown>;
   revision: number;
+  createdAt: string;
   timer?: NodeJS.Timeout;
 }
 
+interface CatalogRefreshWaiter {
+  generation: number;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 const ATTACHMENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const MAX_CATALOG_SESSIONS = 500;
+const MAX_CATALOG_DESCRIPTION_CHARS = 1_000;
+const MAX_CATALOG_CWD_CHARS = 2_048;
+const MAX_CATALOG_REFRESH_BATCH = 4;
+const MAX_SNAPSHOT_MESSAGES = 1_000;
+const MAX_SNAPSHOT_CHILDREN = 250;
+const MAX_MESSAGE_PARTS = 250;
+const MAX_PROJECTED_ATTACHMENTS = 8;
+const MAX_PENDING_EXTENSIONS_PER_AGENT = 8;
+const MAX_PENDING_EXTENSIONS_GLOBAL = 128;
+const MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
+const MAX_TRANSCRIPT_MESSAGE_CHARS = 120_000;
+const STABLE_DATE_FALLBACK = "1970-01-01T00:00:00.000Z";
 const DIRECT_SLASH_COMMAND_NAME_SET = new Set<string>(DIRECT_SLASH_COMMAND_NAMES);
 const EXPLICIT_SLASH_COMMAND_NAMES = new Set<string>([
   ...SESSION_SLASH_COMMAND_NAMES,
@@ -307,10 +332,21 @@ function opaqueId(value: string): string {
   return `agent_${createHash("sha256").update(value).digest("base64url").slice(0, 18)}`;
 }
 
-function toIso(value: unknown, fallback = new Date().toISOString()): string {
-  if (typeof value === "string" && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
-  if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
-  return fallback;
+function toIso(value: unknown, fallback = STABLE_DATE_FALLBACK): string {
+  if (typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value))) return fallback;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : fallback;
+}
+
+function boundedString(value: unknown, maxChars: number, allowEmpty = false): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const bounded = value.slice(0, maxChars);
+  return allowEmpty || bounded.length > 0 ? bounded : undefined;
+}
+
+function boundedId(value: unknown): string | undefined {
+  const id = boundedString(value, 512);
+  return id && !/[\u0000-\u001f\u007f]/u.test(id) ? id : undefined;
 }
 
 function isEmptyStub(summary: PrimeSessionSummary): boolean {
@@ -321,21 +357,25 @@ function isEmptyStub(summary: PrimeSessionSummary): boolean {
 }
 
 function messageText(message: unknown): string {
-  if (!message || typeof message !== "object") return String(message ?? "");
+  if (!message || typeof message !== "object") return String(message ?? "").slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
   const record = message as Record<string, unknown>;
-  if (typeof record.content === "string") return record.content;
+  if (typeof record.content === "string") return record.content.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
   if (Array.isArray(record.content)) {
-    return record.content
-      .flatMap((part) => {
-        if (typeof part === "string") return [part];
-        if (!part || typeof part !== "object") return [];
-        const value = part as Record<string, unknown>;
-        return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
-      })
-      .join("");
+    let text = "";
+    for (const part of record.content.slice(0, MAX_MESSAGE_PARTS)) {
+      const block = primeRecord(part);
+      const value = typeof part === "string"
+        ? part
+        : block?.type === "text" && typeof block.text === "string"
+          ? block.text
+          : "";
+      text += value.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS - text.length);
+      if (text.length >= MAX_TRANSCRIPT_MESSAGE_CHARS) break;
+    }
+    return text;
   }
-  if (typeof record.text === "string") return record.text;
-  if (typeof record.summary === "string") return record.summary;
+  if (typeof record.text === "string") return record.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
+  if (typeof record.summary === "string") return record.summary.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
   return "";
 }
 
@@ -347,14 +387,107 @@ function sessionSlashCommand(record: PrimeRecord): { name: string; text: string 
   const details = primeRecord(record.details);
   const command = primeRecord(details?.command);
   const name = command?.name;
-  const text = command?.text;
-  if (typeof name !== "string" || !SESSION_SLASH_COMMAND_NAME_SET.has(name) || typeof text !== "string") return undefined;
+  const text = boundedString(command?.text, 4_100, true);
+  if (typeof name !== "string" || !SESSION_SLASH_COMMAND_NAME_SET.has(name) || text === undefined) return undefined;
   if ((text !== `/${name}` && !text.startsWith(`/${name} `)) || /[\r\n\u2028\u2029]/u.test(text)) return undefined;
-  return { name, text: text.slice(0, 4_100) };
+  return { name, text };
 }
 
 function primeRecord(value: unknown): PrimeRecord | undefined {
-  return value && typeof value === "object" ? value as PrimeRecord : undefined;
+  return value && typeof value === "object" && !Array.isArray(value) ? value as PrimeRecord : undefined;
+}
+
+function validatePrimeSummary(value: unknown): PrimeSessionSummary | undefined {
+  const record = primeRecord(value);
+  if (!record) return undefined;
+  const id = boundedId(record.id);
+  const sessionId = boundedId(record.sessionId);
+  if (!id || !sessionId) return undefined;
+  const modelRecord = primeRecord(record.model);
+  const modelInputs = Array.isArray(modelRecord?.input)
+    ? modelRecord.input.slice(0, 20).filter((input): input is string => typeof input === "string" && input.length <= 40)
+    : undefined;
+  const integer = (input: unknown, maximum: number) => typeof input === "number" && Number.isFinite(input)
+    ? Math.min(maximum, Math.max(0, Math.trunc(input)))
+    : undefined;
+  return {
+    id,
+    sessionId,
+    activeSessionId: boundedId(record.activeSessionId),
+    sessionFile: boundedString(record.sessionFile, 4_096),
+    sessionName: boundedString(record.sessionName, 200, true),
+    lifecycle: boundedString(record.lifecycle, 40),
+    activity: boundedString(record.activity, 40),
+    runtimeKind: boundedString(record.runtimeKind, 80),
+    rlmDepth: integer(record.rlmDepth, 100),
+    parentActiveSessionId: boundedId(record.parentActiveSessionId),
+    parentSessionId: boundedId(record.parentSessionId),
+    isSessionActive: record.isSessionActive === true,
+    isStreaming: record.isStreaming === true,
+    isCompacting: record.isCompacting === true,
+    isBashRunning: record.isBashRunning === true,
+    hasRunningRlmChildren: record.hasRunningRlmChildren === true,
+    workerState: boundedString(record.workerState, 40),
+    taskState: boundedString(record.taskState, 40),
+    unfinishedActionCount: integer(record.unfinishedActionCount, 1_000),
+    lastActivityAt: boundedString(record.lastActivityAt, 80),
+    created: boundedString(record.created, 80),
+    modified: boundedString(record.modified, 80),
+    summary: boundedString(record.summary, MAX_CATALOG_DESCRIPTION_CHARS, true),
+    firstMessage: boundedString(record.firstMessage, 4_000, true),
+    cwd: boundedString(record.cwd, MAX_CATALOG_CWD_CHARS),
+    ...(modelInputs ? { model: { input: modelInputs } } : {}),
+  };
+}
+
+function validatePrimeSnapshot(value: unknown): PrimeSnapshot {
+  const record = primeRecord(value);
+  const state = primeRecord(record?.state);
+  const sessionId = boundedId(state?.sessionId);
+  if (!record || !state || !sessionId) throw new Error("Prime daemon returned an invalid session snapshot");
+  const goalRecord = primeRecord(state.goal);
+  const goal = goalRecord ? {
+    active: goalRecord.active === true,
+    status: boundedString(goalRecord.status, 40),
+    objective: boundedString(goalRecord.objective, 4_000, true),
+    tokenBudget: numeric(goalRecord.tokenBudget),
+    tokensUsed: numeric(goalRecord.tokensUsed),
+    timeUsedSeconds: numeric(goalRecord.timeUsedSeconds),
+    continuationsUsed: numeric(goalRecord.continuationsUsed),
+    updatedAt: numeric(goalRecord.updatedAt),
+    lastReason: boundedString(goalRecord.lastReason, 1_000, true),
+    lastError: boundedString(goalRecord.lastError, 1_000, true),
+  } : undefined;
+  const children = Array.isArray(record.children) ? record.children.slice(0, MAX_SNAPSHOT_CHILDREN).flatMap((value) => {
+    const child = primeRecord(value);
+    const id = boundedId(child?.id);
+    if (!child || !id) return [];
+    const activity = primeRecord(child.activity);
+    const kind = boundedString(activity?.kind, 40);
+    return [{
+      id,
+      activeSessionId: boundedId(child.activeSessionId),
+      label: safeLabel(child.label, "Subagent", 120),
+      status: boundedString(child.status, 40) ?? "unknown",
+      ...(kind ? { activity: { kind, toolName: boundedString(activity?.toolName, 120) } } : {}),
+      error: boundedString(child.error, 1_000),
+    }];
+  }) : [];
+  return {
+    state: {
+      sessionId,
+      activeSessionId: boundedId(state.activeSessionId),
+      sessionName: boundedString(state.sessionName, 200, true),
+      isStreaming: state.isStreaming === true,
+      isCompacting: state.isCompacting === true,
+      isBashRunning: state.isBashRunning === true,
+      recap: boundedString(state.recap, 4_000, true),
+      goal,
+    },
+    messages: Array.isArray(record.messages) ? record.messages : [],
+    streamingMessage: primeRecord(record.streamingMessage),
+    children,
+  };
 }
 
 type ImageAttachmentSink = (attachment: ValidatedImageAttachment) => void;
@@ -362,7 +495,8 @@ type ImageAttachmentSink = (attachment: ValidatedImageAttachment) => void;
 function projectImageAttachments(content: unknown, sink?: ImageAttachmentSink): TranscriptAttachment[] {
   if (!Array.isArray(content)) return [];
   const projected: TranscriptAttachment[] = [];
-  for (const part of content) {
+  for (const part of content.slice(0, MAX_MESSAGE_PARTS)) {
+    if (projected.length >= MAX_PROJECTED_ATTACHMENTS) break;
     const record = primeRecord(part);
     if (record?.type !== "image") continue;
     try {
@@ -416,6 +550,55 @@ function plainMessage(
   };
 }
 
+function boundedToolCall(call: PrimeRecord): PrimeRecord {
+  const argumentsRecord = primeRecord(call.arguments);
+  let boundedArguments: PrimeRecord | undefined;
+  if (argumentsRecord) {
+    for (const key of ["code", "command", "query", "path"] as const) {
+      const value = boundedString(argumentsRecord[key], MAX_TRANSCRIPT_MESSAGE_CHARS, true);
+      if (value !== undefined) {
+        boundedArguments = { [key]: value };
+        break;
+      }
+    }
+  }
+  return {
+    name: boundedString(call.name, 120, true) ?? "tool",
+    ...(boundedArguments ? { arguments: boundedArguments } : {}),
+  };
+}
+
+function boundedToolResult(result: PrimeRecord): PrimeRecord {
+  const details = primeRecord(result.details);
+  const error = primeRecord(details?.error);
+  const boundedDetails: PrimeRecord = {
+    status: boundedString(details?.status, 40),
+    durationMs: numeric(details?.durationMs),
+    stdout: boundedString(details?.stdout, 40_000, true),
+    stderr: boundedString(details?.stderr, 40_000, true),
+    result: boundedString(details?.result, 40_000, true),
+    errorEname: boundedString(details?.errorEname, 80, true),
+    ...(error ? { error: { ename: boundedString(error.ename, 80, true) } } : {}),
+    ...(Array.isArray(details?.diffs) && details.diffs.length > 0 ? { diffs: [{}] } : {}),
+  };
+  const content: PrimeRecord[] = [];
+  let remaining = MAX_TRANSCRIPT_MESSAGE_CHARS;
+  if (Array.isArray(result.content)) {
+    for (const rawPart of result.content.slice(0, MAX_MESSAGE_PARTS)) {
+      const part = primeRecord(rawPart);
+      if (part?.type !== "text" || typeof part.text !== "string" || remaining <= 0) continue;
+      const text = part.text.slice(0, remaining);
+      content.push({ type: "text", text });
+      remaining -= text.length;
+    }
+  }
+  return {
+    isError: result.isError === true,
+    details: boundedDetails,
+    content,
+  };
+}
+
 function projectMessage(
   message: unknown,
   index: number,
@@ -429,7 +612,12 @@ function projectMessage(
 
   if (rawRole === "toolResult") return [];
   if (rawRole === "bashExecution") {
-    const summary = summarizeBashExecution(record);
+    const summary = summarizeBashExecution({
+      command: boundedString(record.command, MAX_TRANSCRIPT_MESSAGE_CHARS, true) ?? "",
+      output: boundedString(record.output, MAX_TRANSCRIPT_MESSAGE_CHARS, true) ?? "",
+      exitCode: record.exitCode,
+      cancelled: record.cancelled,
+    });
     return [{
       id: messageIdentity(record, index, "bash"),
       role: "system",
@@ -465,16 +653,30 @@ function projectMessage(
 
   if (rawRole === "assistant" && Array.isArray(record.content)) {
     const entries: TranscriptMessage[] = [];
-    record.content.forEach((rawPart, partIndex) => {
+    record.content.slice(0, MAX_MESSAGE_PARTS).forEach((rawPart, partIndex) => {
       if (typeof rawPart === "string") {
-        const item = plainMessage(record, index, "assistant", rawPart, streaming, `text:${partIndex}`);
+        const item = plainMessage(
+          record,
+          index,
+          "assistant",
+          rawPart.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS),
+          streaming,
+          `text:${partIndex}`,
+        );
         if (item) entries.push(item);
         return;
       }
       const part = primeRecord(rawPart);
       if (!part) return;
       if (part.type === "text" && typeof part.text === "string") {
-        const item = plainMessage(record, index, "assistant", part.text, streaming, `text:${partIndex}`);
+        const item = plainMessage(
+          record,
+          index,
+          "assistant",
+          part.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS),
+          streaming,
+          `text:${partIndex}`,
+        );
         if (item) entries.push(item);
       } else if (part.type === "image") {
         const attachments = projectImageAttachments([part], imageSink);
@@ -484,7 +686,7 @@ function projectMessage(
         entries.push({
           id: messageIdentity(record, index, `thinking:${partIndex}`),
           role: "assistant",
-          text: thinkingRecap(part.thinking),
+          text: thinkingRecap(part.thinking.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)),
           state: streaming ? "streaming" : "complete",
           createdAt: messageCreatedAt(record),
           presentation: { kind: "thinking" },
@@ -492,7 +694,11 @@ function projectMessage(
       } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
         const result = callId ? toolResults.get(callId) : undefined;
-        const summary = summarizeToolCall(part, result, streaming && !result);
+        const summary = summarizeToolCall(
+          boundedToolCall(part),
+          result ? boundedToolResult(result) : undefined,
+          streaming && !result,
+        );
         entries.push({
           id: callId ? opaqueId(callId) : messageIdentity(record, index, `tool:${partIndex}`),
           role: "assistant",
@@ -539,8 +745,11 @@ export function projectPrimeTranscript(
   streamingMessage?: unknown,
   imageSink?: ImageAttachmentSink,
 ): TranscriptMessage[] {
-  const toolResults = collectToolResults(messages);
-  const projected = messages.flatMap((message, index) => projectMessage(message, index, false, toolResults, imageSink));
+  const boundedSource = messages.slice(-MAX_SNAPSHOT_MESSAGES);
+  const sourceOffset = messages.length - boundedSource.length;
+  const toolResults = collectToolResults(boundedSource);
+  const projected = boundedSource.flatMap((message, index) =>
+    projectMessage(message, sourceOffset + index, false, toolResults, imageSink));
   if (streamingMessage) {
     const streaming = projectMessage(streamingMessage, messages.length, true, toolResults, imageSink);
     if (streaming.length) projected.push(...streaming);
@@ -549,6 +758,14 @@ export function projectPrimeTranscript(
       const placeholder = plainMessage(record, messages.length, "assistant", "", true, "placeholder");
       if (placeholder) projected.push(placeholder);
     }
+  }
+  let totalTextChars = 0;
+  for (const message of projected) {
+    message.text = message.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
+    totalTextChars += message.text.length;
+  }
+  while (projected.length > MAX_SNAPSHOT_MESSAGES || totalTextChars > MAX_TRANSCRIPT_TEXT_CHARS) {
+    totalTextChars -= projected.shift()?.text.length ?? 0;
   }
   return ensureUniqueMessageIds(projected);
 }
@@ -582,6 +799,7 @@ export async function projectSavedSessionTranscript(
     let totalTextChars = 0;
     let currentLine = "";
     let droppingLine = false;
+    let skipPartialFirstLine = start > 0;
     let index = 0;
 
     const appendProjected = (projected: TranscriptMessage) => {
@@ -594,12 +812,13 @@ export async function projectSavedSessionTranscript(
     };
 
     const consumeLine = (line: string) => {
-      let entry: PrimeRecord;
+      let entry: PrimeRecord | undefined;
       try {
-        entry = JSON.parse(line) as PrimeRecord;
+        entry = primeRecord(JSON.parse(line));
       } catch {
         return;
       }
+      if (!entry) return;
       const parsedTimestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : entry.timestamp;
       const source = entry.type === "message"
         ? primeRecord(entry.message)
@@ -627,7 +846,11 @@ export async function projectSavedSessionTranscript(
         const pending = savedTools.get(hydrated.toolCallId);
         if (pending) {
           const previousLength = pending.message.text.length;
-          const summary = summarizeToolCall(pending.call, hydrated, false);
+          const summary = summarizeToolCall(
+            boundedToolCall(pending.call),
+            boundedToolResult(hydrated),
+            false,
+          );
           pending.message.text = summary.text;
           pending.message.state = summary.status === "failed" ? "failed" : "complete";
           pending.message.presentation = { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta };
@@ -641,7 +864,7 @@ export async function projectSavedSessionTranscript(
       const projected = projectMessage(hydrated, index, false, new Map(), imageSink);
       for (const item of projected) appendProjected(item);
       if (hydrated.role === "assistant" && Array.isArray(hydrated.content)) {
-        for (const rawPart of hydrated.content) {
+        for (const rawPart of hydrated.content.slice(0, MAX_MESSAGE_PARTS)) {
           const part = primeRecord(rawPart);
           if (part?.type !== "toolCall" || typeof part.id !== "string") continue;
           const callId = part.id;
@@ -665,7 +888,8 @@ export async function projectSavedSessionTranscript(
           }
         }
         if (terminated) {
-          if (!droppingLine && currentLine.trim()) consumeLine(currentLine);
+          if (skipPartialFirstLine) skipPartialFirstLine = false;
+          else if (!droppingLine && currentLine.trim()) consumeLine(currentLine);
           currentLine = "";
           droppingLine = false;
         }
@@ -736,7 +960,15 @@ export class PrimeBackend implements AgentBackend {
   private readonly attachmentCache = new Map<string, AttachmentData>();
   private attachmentCacheBytes = 0;
   private pollTimer?: NodeJS.Timeout;
+  private catalogRefreshPromise?: Promise<void>;
+  private catalogRefreshTimer?: NodeJS.Timeout;
+  private readonly catalogRefreshWaiters: CatalogRefreshWaiter[] = [];
+  private catalogRequestedGeneration = 0;
+  private catalogProcessedGeneration = 0;
+  private catalogPublishGeneration = 0;
   private catalogFingerprint = "";
+  private catalogPublishedFingerprint = "";
+  private closed = false;
 
   constructor(
     private readonly moduleSpecifier: string,
@@ -756,7 +988,10 @@ export class PrimeBackend implements AgentBackend {
     await this.client.connect(5_000);
     await this.refreshCatalog(false);
     this.hub.register("catalog", this.catalogState);
-    this.pollTimer = setInterval(() => void this.refreshCatalog(true).catch((error) => console.error("Prime catalog refresh failed", error)), 2_000);
+    this.catalogPublishedFingerprint = this.catalogFingerprint;
+    this.pollTimer = setInterval(() => {
+      void this.refreshCatalog(true).catch(() => console.error("Prime catalog refresh failed"));
+    }, 2_000);
   }
 
   catalog(): CatalogSnapshot {
@@ -1068,10 +1303,19 @@ export class PrimeBackend implements AgentBackend {
     if (pending.method === "confirm") response = { confirmed: input.optionId === "confirm" };
     else if (input.optionId === "__prime_cancel__") response = { cancelled: true };
     else response = { value: input.optionId };
-    await pending.connection.respondToExtensionUiRequest(input.attentionId, response);
-    if (pending.timer) clearTimeout(pending.timer);
-    this.pendingExtensions.delete(input.attentionId);
-    await this.refreshConnection(pending.publicAgentId);
+
+    // Claim synchronously before the daemon call. A concurrent retry now sees
+    // not-found instead of sending a second response.
+    if (!this.removePendingAttention(input.attentionId, pending, true)) {
+      throw new BackendNotFoundError("Attention request not found");
+    }
+    try {
+      await pending.connection.respondToExtensionUiRequest(input.attentionId, response);
+    } catch {
+      throw new Error("Prime attention response failed");
+    } finally {
+      await this.refreshConnection(pending.publicAgentId);
+    }
     const revision = this.requiredSnapshot(pending.publicAgentId).revision;
     return { accepted: true, requestId: input.requestId, revision };
   }
@@ -1081,9 +1325,15 @@ export class PrimeBackend implements AgentBackend {
     const target = absoluteDirectoryPath(requestedPath, home);
     const children: ListedChild[] = [];
     let handle;
+    let scannedEntries = 0;
+    let scanTruncated = false;
     try {
       handle = await opendir(target);
       for (;;) {
+        if (scannedEntries >= DIRECTORY_SCAN_BOUND) {
+          scanTruncated = true;
+          break;
+        }
         let entry;
         try {
           entry = await handle.read();
@@ -1091,6 +1341,7 @@ export class PrimeBackend implements AgentBackend {
           break;
         }
         if (!entry) break;
+        scannedEntries += 1;
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
         const childPath = path.join(target, entry.name);
         let directory = entry.isDirectory();
@@ -1112,7 +1363,7 @@ export class PrimeBackend implements AgentBackend {
     } finally {
       await handle?.close().catch(() => {});
     }
-    const { entries, truncated } = selectDirectoryEntries(children);
+    const { entries, truncated } = selectDirectoryEntries(children, scanTruncated);
     return { path: target, home, crumbs: directoryCrumbs(target), entries, truncated };
   }
 
@@ -1120,15 +1371,20 @@ export class PrimeBackend implements AgentBackend {
     if (!path.isAbsolute(input.cwd)) throw new BackendCapabilityError("Working directory must be an absolute path");
     const baseName = input.name?.trim() || path.basename(input.cwd) || "New session";
     const name = uniqueSessionName(baseName, this.catalogState.agents.map((agent) => agent.name));
-    const response = await this.client.request({
-      type: "create",
-      name,
-      config: { cwd: input.cwd },
-    });
-    if (!response.success) throw new BackendNotFoundError(response.error || "The daemon could not create the session");
-    const data = (response.data ?? {}) as { activeSessionId?: string; sessionId?: string };
-    const activeSessionId = typeof data.activeSessionId === "string" ? data.activeSessionId : null;
-    const sessionId = typeof data.sessionId === "string" ? data.sessionId : null;
+    let response: PrimeResponse;
+    try {
+      response = await this.client.request({
+        type: "create",
+        name,
+        config: { cwd: input.cwd },
+      });
+    } catch {
+      throw new BackendNotFoundError("The daemon could not create the session");
+    }
+    if (!response.success) throw new BackendNotFoundError("The daemon could not create the session");
+    const data = primeRecord(response.data);
+    const activeSessionId = boundedId(data?.activeSessionId) ?? null;
+    const sessionId = boundedId(data?.sessionId) ?? null;
     await this.refreshCatalog(true);
     const publicId = (activeSessionId && this.publicByActive.get(activeSessionId))
       ?? (sessionId && this.publicBySession.get(sessionId))
@@ -1139,16 +1395,19 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.catalogRefreshTimer) clearTimeout(this.catalogRefreshTimer);
+    this.catalogRefreshTimer = undefined;
+    await Promise.allSettled([
+      ...(this.catalogRefreshPromise ? [this.catalogRefreshPromise] : []),
+      ...this.connectionPromises.values(),
+    ]);
+    this.settleCatalogWaiters(Number.POSITIVE_INFINITY);
+    this.connectionPromises.clear();
     for (const pending of this.pendingExtensions.values()) if (pending.timer) clearTimeout(pending.timer);
     this.pendingExtensions.clear();
-    await Promise.allSettled(this.connectionPromises.values());
-    this.connectionPromises.clear();
-    for (const record of this.connections.values()) {
-      if (record.refreshTimer) clearTimeout(record.refreshTimer);
-      record.unsubscribe();
-      await record.connection.dispose();
-    }
+    await Promise.allSettled([...this.connections.values()].map((record) => this.disposeConnection(record)));
     this.connections.clear();
     this.commandLocks.clear();
     this.attachmentCache.clear();
@@ -1156,24 +1415,100 @@ export class PrimeBackend implements AgentBackend {
     this.client?.close();
   }
 
-  private async refreshCatalog(publish: boolean): Promise<void> {
-    const response = await this.client.request({ type: "list", all: true });
-    if (!response.success) throw new Error(response.error || "Prime daemon list failed");
-    const sessions = (response.data as { sessions?: unknown } | undefined)?.sessions;
-    if (!Array.isArray(sessions)) throw new Error("Prime daemon returned an invalid session list");
-    const summaries = sessions.filter((value): value is PrimeSessionSummary => {
-      if (!value || typeof value !== "object") return false;
-      const record = value as Record<string, unknown>;
-      return typeof record.id === "string" && typeof record.sessionId === "string";
+  private refreshCatalog(publish: boolean): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const generation = ++this.catalogRequestedGeneration;
+    if (publish) this.catalogPublishGeneration = Math.max(this.catalogPublishGeneration, generation);
+    const result = new Promise<void>((resolve, reject) => {
+      this.catalogRefreshWaiters.push({ generation, resolve, reject });
     });
+    this.startCatalogRefreshBatch();
+    return result;
+  }
 
-    this.publicBySession.clear();
-    this.publicByActive.clear();
+  private startCatalogRefreshBatch(): void {
+    if (this.closed || this.catalogRefreshPromise || this.catalogRefreshTimer
+      || this.catalogProcessedGeneration >= this.catalogRequestedGeneration) return;
+    const batch = this.drainCatalogRefreshBatch();
+    this.catalogRefreshPromise = batch;
+    void batch.then(() => {
+      if (this.catalogRefreshPromise !== batch) return;
+      this.catalogRefreshPromise = undefined;
+      if (this.closed || this.catalogProcessedGeneration >= this.catalogRequestedGeneration) return;
+      this.catalogRefreshTimer = setTimeout(() => {
+        this.catalogRefreshTimer = undefined;
+        this.startCatalogRefreshBatch();
+      }, 0);
+    });
+  }
+
+  private async drainCatalogRefreshBatch(): Promise<void> {
+    for (let count = 0; count < MAX_CATALOG_REFRESH_BATCH && !this.closed
+      && this.catalogProcessedGeneration < this.catalogRequestedGeneration; count += 1) {
+      const generation = this.catalogRequestedGeneration;
+      try {
+        await this.loadCatalogOnce();
+        this.catalogProcessedGeneration = generation;
+        this.publishCatalogThrough(generation);
+        this.settleCatalogWaiters(generation);
+      } catch (error) {
+        this.catalogProcessedGeneration = generation;
+        this.settleCatalogWaiters(
+          generation,
+          error instanceof Error ? error : new Error("Prime daemon list failed"),
+        );
+      }
+    }
+  }
+
+  private publishCatalogThrough(generation: number): void {
+    if (this.catalogPublishGeneration === 0 || this.catalogPublishGeneration > generation) return;
+    if (!this.hub.has("catalog")) return;
+    if (this.catalogPublishedFingerprint !== this.catalogFingerprint) {
+      this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+      this.catalogPublishedFingerprint = this.catalogFingerprint;
+    }
+    if (this.catalogPublishGeneration <= generation) this.catalogPublishGeneration = 0;
+  }
+
+  private settleCatalogWaiters(generation: number, error?: Error): void {
+    for (let index = this.catalogRefreshWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = this.catalogRefreshWaiters[index];
+      if (!waiter || waiter.generation > generation) continue;
+      this.catalogRefreshWaiters.splice(index, 1);
+      if (error) waiter.reject(error);
+      else waiter.resolve();
+    }
+  }
+
+  private async loadCatalogOnce(): Promise<void> {
+    let response: PrimeResponse;
+    try {
+      response = await this.client.request({ type: "list", all: true });
+    } catch {
+      throw new Error("Prime daemon list failed");
+    }
+    if (!response.success) throw new Error("Prime daemon list failed");
+    const sessions = primeRecord(response.data)?.sessions;
+    if (!Array.isArray(sessions)) throw new Error("Prime daemon returned an invalid session list");
+    const summaries: PrimeSessionSummary[] = [];
+    const seenSessionIds = new Set<string>();
+    for (const value of sessions.slice(0, MAX_CATALOG_SESSIONS)) {
+      const summary = validatePrimeSummary(value);
+      if (!summary || seenSessionIds.has(summary.sessionId)) continue;
+      seenSessionIds.add(summary.sessionId);
+      summaries.push(summary);
+    }
+
+    const nextPublicBySession = new Map<string, string>();
+    const nextPublicByActive = new Map<string, string>();
     for (const summary of summaries) {
       const publicId = opaqueId(summary.sessionId);
-      this.publicBySession.set(summary.sessionId, publicId);
-      if (summary.activeSessionId) this.publicByActive.set(summary.activeSessionId, publicId);
+      nextPublicBySession.set(summary.sessionId, publicId);
+      if (summary.activeSessionId) nextPublicByActive.set(summary.activeSessionId, publicId);
     }
+    this.publicBySession = nextPublicBySession;
+    this.publicByActive = nextPublicByActive;
     const projected = summaries
       .filter((summary) => !isEmptyStub(summary))
       .map((summary) => this.projectSummary(summary));
@@ -1187,16 +1522,32 @@ export class PrimeBackend implements AgentBackend {
       }
       item.rootId = current.id;
     }
-    for (const item of projected) item.childCount = projected.filter((candidate) => candidate.parentId === item.id).length;
+    const childCounts = new Map<string, number>();
+    for (const item of projected) {
+      if (item.parentId) childCounts.set(item.parentId, (childCounts.get(item.parentId) ?? 0) + 1);
+    }
+    for (const item of projected) item.childCount = childCounts.get(item.id) ?? 0;
+
+    const previousSummaries = this.rawSummaries;
+    const nextSummaries = new Map(summaries.map((summary) => [opaqueId(summary.sessionId), summary]));
+    this.rawSummaries = nextSummaries;
+    await this.reconcileConnections(nextSummaries);
+
+    const visibleIds = new Set(projected.map((summary) => summary.id));
+    const hiddenConnections = [...this.connections.values()].filter((record) => !visibleIds.has(record.publicId));
+    await Promise.allSettled(hiddenConnections.map((record) => this.disposeConnection(record)));
+    const previousVisibleIds = new Set(this.catalogState.agents.map((agent) => agent.id));
+    for (const previousId of new Set([...previousSummaries.keys(), ...previousVisibleIds])) {
+      if (nextSummaries.has(previousId) && visibleIds.has(previousId)) continue;
+      this.snapshots.delete(previousId);
+      this.clearPendingExtensions(previousId, false);
+      if (this.hub.has(`agent:${previousId}`)) this.hub.unregister(`agent:${previousId}`);
+    }
 
     const nextFingerprint = JSON.stringify(projected);
-    this.rawSummaries = new Map(summaries.map((summary) => [opaqueId(summary.sessionId), summary]));
     if (nextFingerprint === this.catalogFingerprint) return;
     this.catalogFingerprint = nextFingerprint;
-    this.catalogState = { revision: this.catalogState.revision + 1, agents: projected };
-    if (publish && this.hub.has("catalog")) {
-      this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
-    }
+    this.catalogState = { revision: this.catalogState.revision + 1, agents: projected.filter((agent) => visibleIds.has(agent.id)) };
   }
 
   private projectSummary(summary: PrimeSessionSummary): AgentSummary {
@@ -1252,17 +1603,39 @@ export class PrimeBackend implements AgentBackend {
     };
   }
 
+  private async reconcileConnections(next: ReadonlyMap<string, PrimeSessionSummary>): Promise<void> {
+    const stale = [...this.connections.values()].filter((record) =>
+      next.get(record.publicId)?.activeSessionId !== record.activeSessionId);
+    await Promise.allSettled(stale.map((record) => this.disposeConnection(record)));
+  }
+
   private async ensureConnection(publicId: string, activeSessionId: string): Promise<ConnectionRecord> {
-    const pending = this.connectionPromises.get(publicId);
-    if (pending) return pending;
-    const existing = this.connections.get(publicId);
-    if (existing) return existing;
-    const created = this.createConnection(publicId, activeSessionId);
-    this.connectionPromises.set(publicId, created);
-    try {
-      return await created;
-    } finally {
-      if (this.connectionPromises.get(publicId) === created) this.connectionPromises.delete(publicId);
+    for (;;) {
+      const latestActive = this.rawSummaries.get(publicId)?.activeSessionId;
+      if (!latestActive) throw new BackendNotFoundError("Active agent session not found");
+      activeSessionId = latestActive;
+
+      const pending = this.connectionPromises.get(publicId);
+      if (pending) {
+        const resolved = await pending;
+        if (!resolved.disposed && resolved.activeSessionId === activeSessionId) return resolved;
+        await this.disposeConnection(resolved);
+        continue;
+      }
+      const existing = this.connections.get(publicId);
+      if (existing && !existing.disposed && existing.activeSessionId === activeSessionId) return existing;
+      if (existing) await this.disposeConnection(existing);
+
+      const created = this.createConnection(publicId, activeSessionId);
+      this.connectionPromises.set(publicId, created);
+      try {
+        const resolved = await created;
+        const currentActive = this.rawSummaries.get(publicId)?.activeSessionId;
+        if (currentActive === resolved.activeSessionId && !resolved.disposed) return resolved;
+        await this.disposeConnection(resolved);
+      } finally {
+        if (this.connectionPromises.get(publicId) === created) this.connectionPromises.delete(publicId);
+      }
     }
   }
 
@@ -1275,76 +1648,126 @@ export class PrimeBackend implements AgentBackend {
     let ready = false;
     const record: ConnectionRecord = {
       publicId,
+      activeSessionId,
       connection,
       revision: this.snapshots.get(publicId)?.revision ?? 0,
+      refreshDirty: false,
+      disposed: false,
       unsubscribe: () => {},
     };
     try {
       record.unsubscribe = connection.subscribe((event) => {
+        if (record.disposed) return;
         if (!ready) buffered.push(event);
         else this.handleConnectionEvent(record, event);
       });
       this.connections.set(publicId, record);
-      const snapshot = await connection.getInitialSnapshot();
+      const snapshot = validatePrimeSnapshot(await connection.getInitialSnapshot());
       this.applyPrimeSnapshot(record, snapshot, this.hub.has(`agent:${publicId}`));
       ready = true;
       for (const event of buffered) this.handleConnectionEvent(record, event);
       return record;
     } catch (error) {
-      record.unsubscribe();
-      if (this.connections.get(publicId) === record) this.connections.delete(publicId);
-      try { await connection.dispose(); } catch { /* Best-effort cleanup after initialization failure. */ }
+      await this.disposeConnection(record);
       throw error;
     }
   }
 
   private handleConnectionEvent(record: ConnectionRecord, event: PrimeConnectionEvent): void {
-    if (event.type === "extension_ui_request" && event.request) {
-      const request = event.request;
-      if (request.method === "input" || request.method === "editor") {
-        void record.connection.respondToExtensionUiRequest(request.id, { cancelled: true }).catch((error) =>
-          console.error("Could not cancel unsupported Prime text dialog", error),
+    if (record.disposed || this.connections.get(record.publicId) !== record) return;
+    if (event.type === "extension_ui_request") {
+      const request = primeRecord(event.request);
+      const requestId = boundedId(request?.id);
+      const method = request?.method;
+      const rawPayload = primeRecord(request?.payload) ?? {};
+      if (requestId && (method === "input" || method === "editor")) {
+        void record.connection.respondToExtensionUiRequest(requestId, { cancelled: true }).catch(() =>
+          console.error("Could not cancel unsupported Prime text dialog"),
         );
-      } else if (request.method === "confirm" || request.method === "select") {
+      } else if (requestId && (method === "confirm" || method === "select")) {
+        const previous = this.pendingExtensions.get(requestId);
+        if (previous) this.cancelPendingAttention(requestId, previous);
+        this.makePendingAttentionRoom(record.publicId);
+        const payload = this.sanitizeExtensionPayload(rawPayload);
         const revision = (this.snapshots.get(record.publicId)?.revision ?? 0) + 1;
         const pending: PendingExtension = {
           publicAgentId: record.publicId,
           connection: record.connection,
-          method: request.method,
-          payload: request.payload,
+          method,
+          payload,
           revision,
+          createdAt: new Date().toISOString(),
         };
-        const timeout = Number(request.payload.timeout);
+        const timeout = Number(payload.timeout);
         if (Number.isFinite(timeout) && timeout > 0) {
           pending.timer = setTimeout(() => {
-            if (this.pendingExtensions.get(request.id) !== pending) return;
-            this.pendingExtensions.delete(request.id);
-            void this.refreshConnection(record.publicId);
-          }, timeout);
+            if (this.pendingExtensions.get(requestId) !== pending) return;
+            this.removePendingAttention(requestId, pending, true);
+            this.queueConnectionRefresh(record);
+          }, Math.min(timeout, 24 * 60 * 60 * 1_000));
         }
-        this.pendingExtensions.set(request.id, pending);
+        this.pendingExtensions.set(requestId, pending);
+        this.publishAttentionAdded(requestId, pending);
       }
     }
     if (event.type === "closed") {
-      record.unsubscribe();
-      this.clearPendingExtensions(record.publicId);
-      this.connections.delete(record.publicId);
-      void this.refreshCatalog(true);
+      this.clearPendingExtensions(record.publicId, true);
+      void this.disposeConnection(record).then(
+        () => this.refreshCatalog(true).catch(() => console.error("Prime catalog refresh failed after connection close")),
+        () => this.refreshCatalog(true).catch(() => console.error("Prime connection cleanup and catalog refresh failed")),
+      );
       return;
     }
-    if (record.refreshTimer) clearTimeout(record.refreshTimer);
-    record.refreshTimer = setTimeout(() => void this.refreshConnection(record.publicId), 40);
+    this.queueConnectionRefresh(record);
   }
 
-  private async refreshConnection(publicId: string): Promise<void> {
+  private queueConnectionRefresh(record: ConnectionRecord): void {
+    if (record.disposed || this.connections.get(record.publicId) !== record) return;
+    record.refreshDirty = true;
+    if (record.refreshPromise || record.refreshTimer) return;
+    record.refreshTimer = setTimeout(() => {
+      record.refreshTimer = undefined;
+      void this.startConnectionRefresh(record);
+    }, 40);
+  }
+
+  private refreshConnection(publicId: string): Promise<void> {
     const record = this.connections.get(publicId);
-    if (!record) return;
-    try {
-      const snapshot = await record.connection.getInitialSnapshot();
-      this.applyPrimeSnapshot(record, snapshot, true);
-      await this.refreshCatalog(true);
-    } catch (error) {
-      console.error("Prime agent refresh failed", error);
+    if (!record || record.disposed) return Promise.resolve();
+    record.refreshDirty = true;
+    if (record.refreshTimer) {
+      clearTimeout(record.refreshTimer);
+      record.refreshTimer = undefined;
+    }
+    return this.startConnectionRefresh(record);
+  }
+
+  private startConnectionRefresh(record: ConnectionRecord): Promise<void> {
+    if (record.refreshPromise) return record.refreshPromise;
+    const refresh = this.drainConnectionRefreshes(record);
+    record.refreshPromise = refresh;
+    void refresh.then(() => {
+      if (record.refreshPromise !== refresh) return;
+      record.refreshPromise = undefined;
+      if (record.refreshDirty) this.queueConnectionRefresh(record);
+    });
+    return refresh;
+  }
+
+  private async drainConnectionRefreshes(record: ConnectionRecord): Promise<void> {
+    const maximumBatch = 4;
+    for (let count = 0; count < maximumBatch && record.refreshDirty; count += 1) {
+      record.refreshDirty = false;
+      if (record.disposed || this.connections.get(record.publicId) !== record) return;
+      try {
+        const snapshot = validatePrimeSnapshot(await record.connection.getInitialSnapshot());
+        if (record.disposed || this.connections.get(record.publicId) !== record) return;
+        this.applyPrimeSnapshot(record, snapshot, true);
+        await this.refreshCatalog(true);
+      } catch {
+        console.error("Prime agent refresh failed");
+        return;
+      }
     }
   }
 
@@ -1399,6 +1822,20 @@ export class PrimeBackend implements AgentBackend {
     else if (publish) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
   }
 
+  private async disposeConnection(record: ConnectionRecord): Promise<void> {
+    if (record.disposed) return;
+    record.disposed = true;
+    record.refreshDirty = false;
+    if (record.refreshTimer) {
+      clearTimeout(record.refreshTimer);
+      record.refreshTimer = undefined;
+    }
+    if (this.connections.get(record.publicId) === record) this.connections.delete(record.publicId);
+    this.clearPendingExtensions(record.publicId, true);
+    try { record.unsubscribe(); } catch { /* Best-effort listener cleanup. */ }
+    try { await record.connection.dispose(); } catch { /* Best-effort adapter cleanup. */ }
+  }
+
   private cacheImage(image: ValidatedImageAttachment): void {
     if (image.bytes.byteLength > ATTACHMENT_CACHE_MAX_BYTES) return;
     const existing = this.attachmentCache.get(image.id);
@@ -1417,11 +1854,112 @@ export class PrimeBackend implements AgentBackend {
     }
   }
 
-  private clearPendingExtensions(publicId: string): void {
-    for (const [id, pending] of this.pendingExtensions) {
+  private sanitizeExtensionPayload(payload: PrimeRecord): PrimeRecord {
+    const projected: PrimeRecord = {
+      title: boundedString(payload.title, 200, true),
+      message: boundedString(payload.message, 4_000, true),
+    };
+    const timeout = numeric(payload.timeout);
+    if (timeout !== undefined) projected.timeout = Math.min(timeout, 24 * 60 * 60 * 1_000);
+    if (Array.isArray(payload.options)) {
+      const options: unknown[] = [];
+      for (const value of payload.options.slice(0, 50)) {
+        if (typeof value === "string") {
+          options.push(value.slice(0, 160));
+          continue;
+        }
+        const option = primeRecord(value);
+        if (!option) continue;
+        options.push({
+          value: boundedString(option.value, 160, true),
+          id: boundedString(option.id, 160, true),
+          label: boundedString(option.label, 200, true),
+        });
+      }
+      projected.options = options;
+    }
+    return projected;
+  }
+
+  private makePendingAttentionRoom(publicId: string): void {
+    for (;;) {
+      const perAgent = [...this.pendingExtensions].filter(([, pending]) => pending.publicAgentId === publicId);
+      const candidate = perAgent.length >= MAX_PENDING_EXTENSIONS_PER_AGENT
+        ? perAgent[0]
+        : this.pendingExtensions.size >= MAX_PENDING_EXTENSIONS_GLOBAL
+          ? this.pendingExtensions.entries().next().value as [string, PendingExtension] | undefined
+          : undefined;
+      if (!candidate) return;
+      this.cancelPendingAttention(candidate[0], candidate[1]);
+    }
+  }
+
+  private cancelPendingAttention(id: string, pending: PendingExtension): void {
+    if (!this.removePendingAttention(id, pending, true)) return;
+    void pending.connection.respondToExtensionUiRequest(id, { cancelled: true }).catch(() =>
+      console.error("Could not cancel superseded Prime attention request"),
+    );
+  }
+
+  private publishAttentionAdded(id: string, pending: PendingExtension): void {
+    const snapshot = this.snapshots.get(pending.publicAgentId);
+    if (snapshot) {
+      const attention = this.projectAttention(id, pending);
+      snapshot.attention = [...snapshot.attention.filter((item) => item.id !== id), attention];
+      snapshot.revision = Math.max(snapshot.revision + 1, pending.revision);
+      pending.revision = snapshot.revision;
+      const record = this.connections.get(pending.publicAgentId);
+      if (record) record.revision = Math.max(record.revision, snapshot.revision);
+      const streamId = `agent:${pending.publicAgentId}`;
+      if (this.hub.has(streamId)) {
+        this.hub.publish(streamId, { kind: "agent.attention_added", payload: attention }, snapshot);
+      }
+    }
+    this.publishCatalogAttention(pending.publicAgentId);
+  }
+
+  private removePendingAttention(id: string, pending: PendingExtension, publish: boolean): boolean {
+    if (this.pendingExtensions.get(id) !== pending) return false;
+    this.pendingExtensions.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    const snapshot = this.snapshots.get(pending.publicAgentId);
+    const contained = snapshot?.attention.some((item) => item.id === id) === true;
+    if (snapshot && contained) {
+      snapshot.attention = snapshot.attention.filter((item) => item.id !== id);
+      snapshot.revision += 1;
+      const record = this.connections.get(pending.publicAgentId);
+      if (record) record.revision = Math.max(record.revision, snapshot.revision);
+      const streamId = `agent:${pending.publicAgentId}`;
+      if (publish && this.hub.has(streamId)) {
+        this.hub.publish(streamId, { kind: "agent.attention_resolved", payload: { id } }, snapshot);
+      }
+    }
+    if (publish) this.publishCatalogAttention(pending.publicAgentId);
+    return true;
+  }
+
+  private publishCatalogAttention(publicId: string): void {
+    const current = this.catalogState.agents.find((agent) => agent.id === publicId);
+    const raw = this.rawSummaries.get(publicId);
+    if (!current || !raw || !this.hub.has("catalog")) return;
+    const projected = this.projectSummary(raw);
+    if (current.attention === projected.attention
+      && current.activity === projected.activity
+      && current.unreadCount === projected.unreadCount) return;
+    current.attention = projected.attention;
+    current.activity = projected.activity;
+    current.unreadCount = projected.unreadCount;
+    this.catalogState.revision += 1;
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    const fingerprint = JSON.stringify(this.catalogState.agents);
+    this.catalogFingerprint = fingerprint;
+    this.catalogPublishedFingerprint = fingerprint;
+  }
+
+  private clearPendingExtensions(publicId: string, publish = true): void {
+    for (const [id, pending] of [...this.pendingExtensions]) {
       if (pending.publicAgentId !== publicId) continue;
-      if (pending.timer) clearTimeout(pending.timer);
-      this.pendingExtensions.delete(id);
+      this.removePendingAttention(id, pending, publish);
     }
   }
 
@@ -1453,11 +1991,15 @@ export class PrimeBackend implements AgentBackend {
       id,
       agentId: pending.publicAgentId,
       kind: pending.method === "confirm" ? "approval" : "question",
-      title: typeof pending.payload.title === "string" ? pending.payload.title : pending.method === "confirm" ? "Approval required" : "Input required",
-      detail: typeof pending.payload.message === "string" ? pending.payload.message : undefined,
+      title: safeLabel(
+        pending.payload.title,
+        pending.method === "confirm" ? "Approval required" : "Input required",
+        200,
+      ),
+      detail: boundedString(pending.payload.message, 4_000, true),
       revision: pending.revision,
       options,
-      createdAt: new Date().toISOString(),
+      createdAt: pending.createdAt,
     };
   }
 

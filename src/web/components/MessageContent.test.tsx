@@ -327,4 +327,42 @@ describe("MessageContent", () => {
     expect(screen.queryByRole("button", { name: /copy/i })).toBeNull();
     expect(screen.getByText("writing…")).toBeDefined();
   });
+  it("keeps fenced code inside its ordered list container", () => {
+    const { container } = render(
+      <MessageContent text={"1. Do this:\n\n   ```js\n   work()\n   ```\n\n2. Continue"} />,
+    );
+    expect(container.querySelectorAll("ol")).toHaveLength(1);
+    expect(container.querySelectorAll("ol > li")).toHaveLength(2);
+    expect(container.querySelector("ol > li:first-child figure.code-block")?.textContent).toContain("work()");
+    expect(container.querySelector("ol > li:last-child")?.textContent).toContain("Continue");
+  });
+
+  it("marks unterminated fenced code as streaming inside lists and blockquotes", () => {
+    const list = render(<MessageContent text={"- Work:\n\n  ```ts\n  const value = 1;"} />);
+    expect(list.container.querySelector("ul > li figure.code-block")?.textContent).toContain("writing…");
+    expect(list.container.querySelector("ul > li figure button")).toBeNull();
+    list.unmount();
+
+    const quote = render(<MessageContent text={"> ```sh\n> npm test"} />);
+    expect(quote.container.querySelector("blockquote figure.code-block")?.textContent).toContain("writing…");
+    expect(quote.container.querySelector("blockquote figure button")).toBeNull();
+  });
+
+  it("renders accessible GFM task checkboxes", () => {
+    render(<MessageContent text={"- [x] done\n- [ ] todo"} />);
+    const completed = screen.getByRole("checkbox", { name: "Completed task" });
+    const incomplete = screen.getByRole("checkbox", { name: "Incomplete task" });
+    expect(completed).toBeChecked();
+    expect(incomplete).not.toBeChecked();
+    expect(completed).toBeDisabled();
+    expect(incomplete).toBeDisabled();
+  });
+
+  it("classifies noncanonical absolute web URLs by parsed origin", () => {
+    render(<MessageContent text={"[external](https:evil.example/path) [local](/help)"} />);
+    expect(screen.getByRole("link", { name: "external" })).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("link", { name: "external" })).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByRole("link", { name: "local" })).not.toHaveAttribute("target");
+  });
+
 });

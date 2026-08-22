@@ -73,9 +73,14 @@ describe("PWA assets", () => {
     expect(styles).toContain("padding: 9px 10px max(9px, var(--composer-safe-bottom))");
   });
 
-  it("keeps API data out of the offline shell cache", async () => {
+  it("precaches the built Vite shell without touching unrelated or private caches", async () => {
     const worker = await readFile(join(projectRoot, "public/sw.js"), "utf8");
     expect(worker).toContain('url.pathname.startsWith("/api/")');
     expect(worker).toContain('url.pathname.startsWith("/ws")');
+    expect(worker).toContain("matchAll");
+    expect(worker).toContain("builtAssets");
+    expect(worker).toContain('key.startsWith(CACHE_PREFIX)');
+    expect(worker).toContain('caches.match("/")');
+    expect(worker).not.toContain("keys.filter((key) => key !== CACHE_NAME)");
   });
 });

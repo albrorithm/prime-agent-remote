@@ -20,7 +20,10 @@ export type MessageBlock = TextBlock | CodeBlockModel;
 type Segment = (TextBlock | CodeBlockModel) & { start: number };
 
 const FENCE_OPENER = /^( {0,3})(`{3,}|~{3,})(.*)\r?$/;
-const MARKDOWN_PARSE_MAX_CHARS = 250_000;
+// Keep streaming model output from repeatedly running an unbounded Markdown
+// parse on mobile. Longer output stays readable as plain text.
+const MARKDOWN_PARSE_MAX_CHARS = 64_000;
+const FENCE_SCAN_MAX_CHARS = 250_000;
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -124,6 +127,20 @@ function safeLinkHref(destination: string): string | null {
   return href;
 }
 
+function isExternalWebHref(href: string): boolean {
+  try {
+    const base = typeof window === "undefined" ? "http://localhost/" : window.location.href;
+    const target = new URL(href, base);
+    const current = new URL(base);
+    return (target.protocol === "http:" || target.protocol === "https:")
+      && target.origin !== current.origin;
+  } catch {
+    // safeLinkHref already rejects malformed schemes. If URL parsing still
+    // fails, avoid opening a new browsing context.
+    return false;
+  }
+}
+
 function closeFencePattern(character: string, length: number): RegExp {
   return new RegExp(`^ {0,3}${character}{${length},}[ \t]*\r?$`);
 }
@@ -134,7 +151,7 @@ function closeFencePattern(character: string, length: number): RegExp {
  * inside a code body or mid-line never terminates a block early.
  */
 function parseSegments(text: string): Segment[] {
-  if (text.length > MARKDOWN_PARSE_MAX_CHARS) {
+  if (text.length > FENCE_SCAN_MAX_CHARS) {
     return [{ kind: "text", text, start: 0 }];
   }
   const lines = text.split("\n");
@@ -260,7 +277,7 @@ function renderInlineTokens(tokens: Token[], keyPrefix: string): InlinePart[] {
         const label = link.tokens?.length ? renderInlineTokens(link.tokens, key) : [link.text];
         const href = safeLinkHref(link.href);
         if (href) {
-          const external = /^(?:https?:)?\/\//i.test(href);
+          const external = isExternalWebHref(href);
           parts.push(
             <a
               key={key}
@@ -286,7 +303,7 @@ function renderInlineTokens(tokens: Token[], keyPrefix: string): InlinePart[] {
         const image = token as Tokens.Image;
         const href = safeLinkHref(image.href);
         if (href) {
-          const external = /^(?:https?:)?\/\//i.test(href);
+          const external = isExternalWebHref(href);
           parts.push(
             <a
               key={key}
@@ -329,11 +346,25 @@ function renderList(list: Tokens.List, key: string): ReactElement {
     const itemKey = `${key}-${itemIndex}`;
     const content = (item.tokens ?? []).map((child, childIndex) => {
       const childKey = `${itemKey}-${childIndex}`;
+      if (child.type === "checkbox") return null;
       if (child.type === "list") return renderList(child as Tokens.List, childKey);
       if (child.type === "text") return renderInlineTokens(child.tokens ?? [child], childKey);
       return renderBlockToken(child, childKey);
     });
-    return <li key={itemKey}>{content}</li>;
+    return (
+      <li key={itemKey} className={item.task ? "markdown-task-item" : undefined}>
+        {item.task && (
+          <input
+            type="checkbox"
+            checked={Boolean(item.checked)}
+            readOnly
+            disabled
+            aria-label={item.checked ? "Completed task" : "Incomplete task"}
+          />
+        )}
+        {content}
+      </li>
+    );
   });
   if (!list.ordered) {
     return (
@@ -434,6 +465,14 @@ function renderMathBlock(token: MathToken, key: string): ReactElement {
   );
 }
 
+function isUnterminatedFencedCode(raw: string): boolean {
+  const lines = raw.split("\n");
+  const opener = FENCE_OPENER.exec(lines[0] ?? "");
+  if (!opener || (opener[2][0] === "`" && opener[3].includes("`"))) return false;
+  const closer = closeFencePattern(opener[2][0], opener[2].length);
+  return !lines.slice(1).some((line) => closer.test(line));
+}
+
 function renderBlockToken(token: Token, key: string): ReactNode {
   switch (token.type) {
     case "heading": {
@@ -452,7 +491,7 @@ function renderBlockToken(token: Token, key: string): ReactNode {
           key={key}
           lang={(token as Tokens.Code).lang ?? ""}
           code={(token as Tokens.Code).text}
-          streaming={false}
+          streaming={isUnterminatedFencedCode(token.raw)}
         />
       );
     case "blockMath":
@@ -521,10 +560,6 @@ function renderProse(text: string, segmentStart: number): ReactNode {
   );
 }
 
-const MemoizedProseBlock = memo(function ProseBlock({ text, start }: { text: string; start: number }) {
-  return <>{renderProse(text, start)}</>;
-});
-
 const MemoizedCodeBlock = memo(function CodeBlockView({
   lang,
   code,
@@ -568,22 +603,7 @@ export function renderInline(text: string): Array<string | ReactElement> {
 }
 
 export function MessageContent({ text }: { text: string }) {
-  const segments = useMemo(() => parseSegments(text), [text]);
-  if (!segments.length) return null;
-  return (
-    <>
-      {segments.map((segment) =>
-        segment.kind === "code" ? (
-          <MemoizedCodeBlock
-            key={segment.start}
-            lang={segment.lang}
-            code={segment.code}
-            streaming={segment.streaming}
-          />
-        ) : (
-          <MemoizedProseBlock key={segment.start} text={segment.text} start={segment.start} />
-        ),
-      )}
-    </>
-  );
+  const content = useMemo(() => renderProse(text, 0), [text]);
+  if (!text) return null;
+  return <>{content}</>;
 }

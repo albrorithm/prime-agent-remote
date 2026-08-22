@@ -34,6 +34,9 @@ import type { EventHub } from "./event-hub.js";
 import { builtinSlashCommandEntries, detectedSlashCommandEntries, parseHeartbeatArgs } from "./slash-command-catalog.js";
 
 const now = new Date().toISOString();
+const DEMO_MAX_AGENTS = 128;
+const DEMO_MAX_TRANSCRIPT_MESSAGES = 256;
+const DEMO_MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
 const fullCapabilities: AgentCapabilities = {
   send: true,
   abort: true,
@@ -190,6 +193,7 @@ export class DemoBackend implements AgentBackend {
   private readonly models = new Map<string, { provider: string; modelId: string }>();
   private readonly efforts = new Map<string, string>();
   private readonly heartbeats = new Map<string, { status: "active" | "paused"; schedule: string; deliveryMode: "steer" | "follow_up" }>();
+  private readonly commandLocks = new Map<string, Promise<void>>();
   private createdCount = 0;
 
   async initialize(hub: EventHub): Promise<void> {
@@ -216,9 +220,17 @@ export class DemoBackend implements AgentBackend {
     const summary = this.requiredSummary(input.agentId);
     if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
     if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
+    if (input.images.length > 0) throw new BackendCapabilityError("Demo mode does not accept image attachments");
     if (!summary.capabilities.send) this.wakeAgent(summary, snapshot);
 
     this.clearTimers(input.agentId);
+    const superseded = [...snapshot.messages].reverse().find((item) => item.state === "streaming");
+    if (superseded) {
+      superseded.state = "failed";
+      superseded.text = superseded.text || "Superseded by a newer message.";
+      snapshot.revision += 1;
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_updated", payload: superseded }, snapshot);
+    }
     const createdAt = new Date().toISOString();
     const userMessage: TranscriptMessage = {
       id: input.requestId,
@@ -236,10 +248,15 @@ export class DemoBackend implements AgentBackend {
       createdAt,
     };
     snapshot.messages.push(userMessage, assistantMessage);
+    const trimmed = this.trimTranscript(snapshot);
     snapshot.revision += 1;
     this.markAgent(input.agentId, "working", null);
-    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: userMessage }, snapshot);
-    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: assistantMessage }, snapshot);
+    if (trimmed) {
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    } else {
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: userMessage }, snapshot);
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: assistantMessage }, snapshot);
+    }
 
     const chunks = [
       "I received your message. ",
@@ -248,22 +265,26 @@ export class DemoBackend implements AgentBackend {
     ];
     const timers: NodeJS.Timeout[] = [];
     chunks.forEach((chunk, index) => {
-      timers.push(
-        setTimeout(() => {
-          const current = this.snapshots.get(input.agentId);
-          if (!current) return;
-          const message = current.messages.find((item) => item.id === assistantId);
-          if (!message || message.state !== "streaming") return;
-          message.text += chunk;
-          if (index === chunks.length - 1) {
-            message.state = "complete";
-            this.markAgent(input.agentId, "idle", null);
-          }
-          this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_updated", payload: message }, current);
-        },
-        500 * (index + 1),
-      ),
-    );
+      const timer = setTimeout(() => {
+        const current = this.snapshots.get(input.agentId);
+        if (!current) return;
+        const message = current.messages.find((item) => item.id === assistantId);
+        if (!message || message.state !== "streaming") return;
+        message.text += chunk;
+        if (index === chunks.length - 1) {
+          message.state = "complete";
+          this.markAgent(input.agentId, "idle", null);
+        }
+        const trimmed = this.trimTranscript(current);
+        this.hub.publish(
+          `agent:${input.agentId}`,
+          trimmed
+            ? { kind: "agent.replaced", payload: current }
+            : { kind: "agent.message_updated", payload: message },
+          current,
+        );
+      }, 500 * (index + 1));
+      timers.push(timer);
     });
     this.timers.set(input.agentId, timers);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
@@ -300,6 +321,10 @@ export class DemoBackend implements AgentBackend {
   }
 
   async executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted> {
+    return this.withCommandLock(input.agentId, () => this.executeSlashCommandLocked(input));
+  }
+
+  private async executeSlashCommandLocked(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted> {
     const snapshot = this.requiredSnapshot(input.agentId);
     const summary = this.requiredSummary(input.agentId);
     if (!summary.capabilities.send) throw new BackendCapabilityError("This agent cannot run commands");
@@ -323,9 +348,14 @@ export class DemoBackend implements AgentBackend {
         createdAt,
       };
       snapshot.messages.push(commandMessage, resultMessage);
+      const trimmed = this.trimTranscript(snapshot);
       snapshot.revision += 1;
-      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: commandMessage }, snapshot);
-      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: resultMessage }, snapshot);
+      if (trimmed) {
+        this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
+      } else {
+        this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: commandMessage }, snapshot);
+        this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: resultMessage }, snapshot);
+      }
       return {
         accepted: true,
         requestId: input.requestId,
@@ -344,6 +374,7 @@ export class DemoBackend implements AgentBackend {
     }
 
     let result: SlashCommandResult;
+    let mutated = false;
     switch (input.name) {
       case "model": {
         if (!input.args) {
@@ -356,6 +387,7 @@ export class DemoBackend implements AgentBackend {
         }
         const modelId = input.args.slice("demo/".length);
         this.models.set(input.agentId, { provider: "demo", modelId });
+        mutated = true;
         result = { kind: "model", provider: "demo", modelId };
         break;
       }
@@ -364,7 +396,10 @@ export class DemoBackend implements AgentBackend {
         if (input.args && !levels.includes(input.args.toLowerCase())) {
           throw new BackendCapabilityError("Choose an available thinking level");
         }
-        if (input.args) this.efforts.set(input.agentId, input.args.toLowerCase());
+        if (input.args) {
+          this.efforts.set(input.agentId, input.args.toLowerCase());
+          mutated = true;
+        }
         result = { kind: "effort", level: this.efforts.get(input.agentId) ?? "medium", availableLevels: levels };
         break;
       }
@@ -372,6 +407,7 @@ export class DemoBackend implements AgentBackend {
         if (input.args) {
           if (input.args.length > 200) throw new BackendCapabilityError("Session name is too long");
           summary.name = input.args;
+          mutated = true;
           this.catalogState.revision += 1;
           this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
         }
@@ -390,14 +426,17 @@ export class DemoBackend implements AgentBackend {
         if (parsed.type === "set") {
           heartbeat = { status: "active", schedule: parsed.schedule, deliveryMode: parsed.deliveryMode ?? "steer" };
           this.heartbeats.set(input.agentId, heartbeat);
+          mutated = true;
         } else if (parsed.type === "pause" && heartbeat) {
           heartbeat = { ...heartbeat, status: "paused" };
           this.heartbeats.set(input.agentId, heartbeat);
+          mutated = true;
         } else if (parsed.type === "resume" && heartbeat) {
           heartbeat = { ...heartbeat, status: "active" };
           this.heartbeats.set(input.agentId, heartbeat);
+          mutated = true;
         } else if (parsed.type === "clear") {
-          this.heartbeats.delete(input.agentId);
+          mutated = this.heartbeats.delete(input.agentId);
           heartbeat = undefined;
         }
         result = heartbeat
@@ -407,6 +446,10 @@ export class DemoBackend implements AgentBackend {
       }
       default:
         throw new BackendCapabilityError("Command is not available");
+    }
+    if (mutated) {
+      snapshot.revision += 1;
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
     }
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision, result };
   }
@@ -451,6 +494,9 @@ export class DemoBackend implements AgentBackend {
 
   async createSession(input: CreateSessionInput): Promise<SessionCreated> {
     if (!demoTree.has(input.cwd)) throw new BackendNotFoundError("Directory not found");
+    if (this.catalogState.agents.length >= DEMO_MAX_AGENTS) {
+      throw new BackendCapabilityError("Demo session limit reached");
+    }
     this.createdCount += 1;
     const id = `root-created-${this.createdCount}`;
     const baseName = input.name?.trim() || path.basename(input.cwd) || `New session ${this.createdCount}`;
@@ -474,6 +520,22 @@ export class DemoBackend implements AgentBackend {
 
   async close(): Promise<void> {
     for (const agentId of this.timers.keys()) this.clearTimers(agentId);
+    this.commandLocks.clear();
+  }
+
+  private async withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.commandLocks.get(agentId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.catch(() => {}).then(() => gate);
+    this.commandLocks.set(agentId, queued);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.commandLocks.get(agentId) === queued) this.commandLocks.delete(agentId);
+    }
   }
 
   private wakeAgent(summary: AgentSummary, snapshot: AgentSnapshot): void {
@@ -505,6 +567,28 @@ export class DemoBackend implements AgentBackend {
     const value = this.catalogState.agents.find((item) => item.id === agentId);
     if (!value) throw new BackendNotFoundError("Agent not found");
     return value;
+  }
+
+  private trimTranscript(snapshot: AgentSnapshot): boolean {
+    const protectedMessages = new Set<TranscriptMessage>();
+    snapshot.messages.forEach((message, index) => {
+      if (message.state !== "streaming") return;
+      protectedMessages.add(message);
+      const previous = snapshot.messages[index - 1];
+      if (previous?.role === "user") protectedMessages.add(previous);
+    });
+    const totalChars = () => snapshot.messages.reduce((total, message) => total + message.text.length, 0);
+    let chars = totalChars();
+    let trimmed = false;
+    while (snapshot.messages.length > DEMO_MAX_TRANSCRIPT_MESSAGES || chars > DEMO_MAX_TRANSCRIPT_TEXT_CHARS) {
+      const removableIndex = snapshot.messages.findIndex((message, index) =>
+        index < snapshot.messages.length - 2 && !protectedMessages.has(message));
+      if (removableIndex < 0) break;
+      const [removed] = snapshot.messages.splice(removableIndex, 1);
+      chars -= removed?.text.length ?? 0;
+      trimmed = true;
+    }
+    return trimmed;
   }
 
   private markAgent(agentId: string, activity: AgentSummary["activity"], attention: AgentSummary["attention"]): void {

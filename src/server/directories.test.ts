@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { absoluteDirectoryPath, directoryCrumbs, selectDirectoryEntries, type ListedChild } from "./directories.js";
+import {
+  absoluteDirectoryPath,
+  DIRECTORY_SCAN_BOUND,
+  directoryCrumbs,
+  selectDirectoryEntries,
+  type ListedChild,
+} from "./directories.js";
 
 describe("absoluteDirectoryPath", () => {
   it("accepts absolute paths and defaults to home", () => {
@@ -47,5 +53,18 @@ describe("selectDirectoryEntries", () => {
     expect(result.entries).toHaveLength(500);
     expect(result.truncated).toBe(true);
     expect(result.entries[0].name).toBe("dir-0000");
+  });
+
+  it("bounds selection work and carries an adapter scan-truncation signal", () => {
+    const many = Array.from({ length: DIRECTORY_SCAN_BOUND + 100 }, (_, index) => ({
+      name: `dir-${String(index).padStart(5, "0")}`,
+      path: `/dir-${index}`,
+      hidden: false,
+      directory: index === DIRECTORY_SCAN_BOUND + 99,
+    }));
+    const result = selectDirectoryEntries(many);
+    expect(result.entries).toEqual([]);
+    expect(result.truncated).toBe(true);
+    expect(selectDirectoryEntries(children, true).truncated).toBe(true);
   });
 });

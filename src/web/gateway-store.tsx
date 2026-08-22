@@ -23,7 +23,7 @@ import type {
   SlashCommandCatalog,
   SlashCommandResult,
 } from "../protocol";
-import { PROTOCOL_VERSION } from "../protocol";
+import { PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
 import * as api from "./api";
 import { ApiError } from "./api";
 import type { PreparedImage } from "./image-attachments";
@@ -44,6 +44,9 @@ export interface PendingMessage {
 
 const SNAPSHOT_CAP = 24;
 const ERROR_TTL_MS = 6000;
+export const SOCKET_PING_INTERVAL_MS = 25_000;
+export const SOCKET_PONG_TIMEOUT_MS = 10_000;
+export const SOCKET_OPEN_TIMEOUT_MS = 12_000;
 
 export function imageInputsForRequest(images: PreparedImage[]): ImageAttachmentInput[] {
   return images.map(({ type, mimeType, data }) => ({ type, mimeType, data }));
@@ -61,7 +64,8 @@ function pendingAttachment(image: PreparedImage): NonNullable<PendingMessage["at
 
 export function reconcilePending(pending: PendingMessage[], messages: TranscriptMessage[]): PendingMessage[] {
   const claimedMessageIds = new Set<string>();
-  return pending.filter((item) => {
+  const remaining: PendingMessage[] = [];
+  for (const item of pending) {
     const known = new Set(item.knownUserMessageIds);
     const match = messages.find((message) => {
       if (message.role !== "user" || message.text !== item.text || known.has(message.id) || claimedMessageIds.has(message.id)) {
@@ -72,10 +76,16 @@ export function reconcilePending(pending: PendingMessage[], messages: Transcript
       return pendingMimes.length === messageMimes.length
         && pendingMimes.every((mimeType, index) => mimeType === messageMimes[index]);
     });
-    if (!match) return true;
-    claimedMessageIds.add(match.id);
-    return false;
-  });
+    if (match) claimedMessageIds.add(match.id);
+    else remaining.push(item);
+  }
+  if (!claimedMessageIds.size) return remaining;
+  // Remember consumed echoes on survivors. Otherwise the next snapshot could use
+  // the same echo to clear a second identical optimistic message.
+  return remaining.map((item) => ({
+    ...item,
+    knownUserMessageIds: [...new Set([...item.knownUserMessageIds, ...claimedMessageIds])],
+  }));
 }
 
 function pruneSnapshots(snapshots: Record<string, AgentSnapshot>, keep: string | null): Record<string, AgentSnapshot> {
@@ -105,13 +115,13 @@ type Action =
   | { type: "auth_required" }
   | { type: "connection"; value: ConnectionPhase }
   | { type: "catalog"; value: CatalogSnapshot }
-  | { type: "snapshot"; value: AgentSnapshot }
+  | { type: "snapshot"; value: AgentSnapshot; source?: "http" | "ws"; allowEqualRevision?: boolean }
   | { type: "event"; value: EventEnvelope }
   | { type: "agent_revision"; agentId: string; revision: number }
   | { type: "pending_add"; agentId: string; value: PendingMessage }
   | { type: "pending_remove"; agentId: string; id: string }
   | { type: "evict_snapshot"; agentId: string }
-  | { type: "select"; value: string }
+  | { type: "select"; value: string | null }
   | { type: "error"; value: string | null };
 
 const emptyCatalog: CatalogSnapshot = { revision: 0, agents: [] };
@@ -138,7 +148,7 @@ function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
 export function applyGatewayEvent(snapshot: AgentSnapshot, event: GatewayEvent): AgentSnapshot {
   switch (event.kind) {
     case "agent.replaced":
-      return event.payload;
+      return event.payload.revision < snapshot.revision ? snapshot : event.payload;
     case "agent.message_added":
     case "agent.message_updated":
       return { ...snapshot, messages: upsertById(snapshot.messages, event.payload) };
@@ -157,25 +167,43 @@ export function applyGatewayEvent(snapshot: AgentSnapshot, event: GatewayEvent):
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "bootstrap": {
-      const first = action.value.catalog.agents.find((agent) => agent.parentId === null)?.id ?? null;
+      const catalog = action.value.catalog.revision < state.catalog.revision
+        ? state.catalog
+        : action.value.catalog;
+      const first = catalog.agents.find((agent) => agent.parentId === null)?.id ?? null;
       return {
         ...state,
         authRequired: false,
         connection: "connecting",
         csrfToken: action.value.csrfToken,
         backend: action.value.backend,
-        catalog: action.value.catalog,
-        selectedAgentId: state.selectedAgentId ?? first,
+        catalog,
+        selectedAgentId: state.selectedAgentId
+          && catalog.agents.some((agent) => agent.id === state.selectedAgentId)
+          ? state.selectedAgentId
+          : first,
         error: null,
       };
     }
     case "auth_required":
-      return { ...state, authRequired: true, connection: "offline", csrfToken: "" };
+      return {
+        ...initialState,
+        authRequired: true,
+        connection: "offline",
+      };
     case "connection":
       return { ...state, connection: action.value };
     case "catalog":
+      if (action.value.revision < state.catalog.revision) return state;
       return { ...state, catalog: action.value };
-    case "snapshot":
+    case "snapshot": {
+      const current = state.snapshots[action.value.agentId];
+      if (!current && action.source === "http" && action.allowEqualRevision === false) return state;
+      if (current && action.value.revision < current.revision) return state;
+      if (current
+        && action.value.revision === current.revision
+        && action.source === "http"
+        && action.allowEqualRevision === false) return state;
       return {
         ...state,
         snapshots: pruneSnapshots(
@@ -187,8 +215,10 @@ function reducer(state: State, action: Action): State {
           [action.value.agentId]: reconcilePending(state.pending[action.value.agentId] ?? [], action.value.messages),
         },
       };
+    }
     case "event": {
       if (action.value.event.kind === "catalog.replaced") {
+        if (action.value.event.payload.revision < state.catalog.revision) return state;
         return { ...state, catalog: action.value.event.payload };
       }
       const agentId = action.value.streamId.startsWith("agent:") ? action.value.streamId.slice(6) : null;
@@ -247,7 +277,7 @@ interface GatewayContextValue extends State {
   pendingMessages: PendingMessage[];
   pair: (token: string) => Promise<void>;
   selectAgent: (id: string) => Promise<void>;
-  createSession: (cwd: string, name?: string) => Promise<string>;
+  createSession: (cwd: string, name?: string, requestId?: string) => Promise<string>;
   send: (text: string, images?: PreparedImage[], requestId?: string) => Promise<void>;
   loadSlashCommands: (agentId: string) => Promise<SlashCommandCatalog>;
   runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
@@ -266,14 +296,23 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const pendingPreviewUrlsRef = useRef(new Set<string>());
   const requestBaselinesRef = useRef(new Map<string, string[]>());
+  const createRequestIdsRef = useRef(new Map<string, string>());
   const stateRef = useRef(state);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const retryCount = useRef(0);
   const cursors = useRef(new Map<string, StreamCursor>());
+  const realtimeVersions = useRef(new Map<string, number>());
   const subscriptions = useRef(new Set<string>(["catalog"]));
+  const replayingStreams = useRef(new Set<string>());
   const manuallyClosed = useRef(false);
   const errorTimer = useRef<number | null>(null);
+  const socketGeneration = useRef(0);
+  const initializationGeneration = useRef(0);
+  const sessionGeneration = useRef(0);
+  const lifecycleAbort = useRef<AbortController | null>(null);
+  const selectionGeneration = useRef(0);
+  const socketRetryBlocked = useRef(false);
   stateRef.current = state;
 
   useEffect(() => {
@@ -307,14 +346,44 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const showPersistentError = useCallback((message: string) => {
+    if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
+    errorTimer.current = null;
+    dispatch({ type: "error", value: message });
+  }, []);
+
+  const markRealtimeUpdate = useCallback((streamId: string) => {
+    realtimeVersions.current.set(streamId, (realtimeVersions.current.get(streamId) ?? 0) + 1);
+  }, []);
+
+  const loadAgentHttp = useCallback(async (agentId: string, options?: api.ApiRequestOptions) => {
+    const streamId = `agent:${agentId}`;
+    const baseline = realtimeVersions.current.get(streamId) ?? 0;
+    const snapshot = await api.loadAgent(agentId, options);
+    return {
+      snapshot,
+      allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === baseline,
+    };
+  }, []);
+
+  const updateSocketPhase = useCallback(() => {
+    if (replayingStreams.current.size) dispatch({ type: "connection", value: "replaying" });
+    else if (socketRef.current?.readyState === WebSocket.OPEN) dispatch({ type: "connection", value: "live" });
+  }, []);
+
   const detach = useCallback((streamId: string) => {
     subscriptions.current.delete(streamId);
     cursors.current.delete(streamId);
+    // Tombstone the stream instead of deleting its version. Any HTTP snapshot
+    // already in flight must observe that the subscription was detached.
+    markRealtimeUpdate(streamId);
+    replayingStreams.current.delete(streamId);
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "detach", version: PROTOCOL_VERSION, streamId }));
     }
-  }, []);
+    updateSocketPhase();
+  }, [markRealtimeUpdate, updateSocketPhase]);
 
   const attach = useCallback((streamId: string) => {
     const socket = socketRef.current;
@@ -329,95 +398,263 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const resetForUnauthorized = useCallback(() => {
+    initializationGeneration.current += 1;
+    sessionGeneration.current += 1;
+    lifecycleAbort.current?.abort();
+    lifecycleAbort.current = null;
+    selectionGeneration.current += 1;
+    requestBaselinesRef.current.clear();
+    createRequestIdsRef.current.clear();
+    subscriptions.current = new Set(["catalog"]);
+    cursors.current.clear();
+    realtimeVersions.current.clear();
+    replayingStreams.current.clear();
+    socketRetryBlocked.current = false;
+    retryCount.current = 0;
+    if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
+    errorTimer.current = null;
+    if (reconnectTimer.current != null) window.clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = null;
+    const socket = socketRef.current;
+    socketRef.current = null;
+    socketGeneration.current += 1;
+    socket?.close();
+    dispatch({ type: "auth_required" });
+  }, []);
+
   const connect = useCallback(() => {
+    if (manuallyClosed.current || socketRetryBlocked.current) return;
     if (socketRef.current?.readyState === WebSocket.OPEN || socketRef.current?.readyState === WebSocket.CONNECTING) return;
     if (reconnectTimer.current != null) window.clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = null;
     dispatch({ type: "connection", value: "connecting" });
-    const socket = new WebSocket(socketUrl());
+    const generation = ++socketGeneration.current;
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(socketUrl());
+    } catch (error) {
+      dispatch({ type: "connection", value: "offline" });
+      showError(error instanceof Error ? error.message : "Could not open the realtime connection");
+      const delay = Math.min(30_000, 1_000 * 2 ** retryCount.current++);
+      reconnectTimer.current = window.setTimeout(() => connect(), delay);
+      return;
+    }
     socketRef.current = socket;
+    let openTimer: number | null = null;
+    let pingTimer: number | null = null;
+    let pongTimer: number | null = null;
+    const isCurrent = () => generation === socketGeneration.current && socketRef.current === socket;
+    const clearWatchdog = () => {
+      if (openTimer != null) window.clearTimeout(openTimer);
+      if (pingTimer != null) window.clearInterval(pingTimer);
+      if (pongTimer != null) window.clearTimeout(pongTimer);
+      openTimer = null;
+      pingTimer = null;
+      pongTimer = null;
+    };
 
     socket.addEventListener("open", () => {
+      if (!isCurrent()) return;
+      if (openTimer != null) window.clearTimeout(openTimer);
+      openTimer = null;
       retryCount.current = 0;
-      dispatch({ type: "connection", value: "live" });
+      updateSocketPhase();
       for (const streamId of subscriptions.current) attach(streamId);
+      pingTimer = window.setInterval(() => {
+        if (!isCurrent() || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ type: "ping", version: PROTOCOL_VERSION }));
+        if (pongTimer != null) window.clearTimeout(pongTimer);
+        pongTimer = window.setTimeout(() => {
+          pongTimer = null;
+          if (isCurrent()) socket.close();
+        }, SOCKET_PONG_TIMEOUT_MS);
+      }, SOCKET_PING_INTERVAL_MS);
     });
     socket.addEventListener("message", (message) => {
-      let frame: ServerFrame;
+      if (!isCurrent()) return;
+      let input: unknown;
       try {
-        frame = JSON.parse(String(message.data)) as ServerFrame;
+        input = JSON.parse(String(message.data));
       } catch {
+        showError("The server sent invalid realtime data");
+        socket.close();
         return;
       }
-      if (frame.version !== PROTOCOL_VERSION || frame.type === "pong") return;
+      const parsed = serverFrameSchema.safeParse(input);
+      if (!parsed.success) {
+        showError("The server sent invalid realtime data");
+        socket.close();
+        return;
+      }
+      const frame = parsed.data as ServerFrame;
+      if (frame.type === "pong") {
+        if (pongTimer != null) window.clearTimeout(pongTimer);
+        pongTimer = null;
+        return;
+      }
       if (frame.type === "detached") {
+        replayingStreams.current.delete(frame.streamId);
+        if (frame.reason === "server_shutdown") {
+          // Keep subscriptions. A new server epoch will replace their cursors.
+          markRealtimeUpdate(frame.streamId);
+          dispatch({ type: "connection", value: "offline" });
+          socket.close(1000, "Server restarting");
+          return;
+        }
         if (frame.reason === "stream_gone") {
           detach(frame.streamId);
           const agentId = frame.streamId.startsWith("agent:") ? frame.streamId.slice(6) : null;
           if (agentId) dispatch({ type: "evict_snapshot", agentId });
           return;
         }
+        // A lagged or invalid cursor must retry from a full snapshot. Reusing the
+        // rejected cursor would create an attach/detach loop.
+        cursors.current.delete(frame.streamId);
+        replayingStreams.current.add(frame.streamId);
+        dispatch({ type: "connection", value: "replaying" });
         attach(frame.streamId);
         return;
       }
       if (frame.type === "snapshot") {
         cursors.current.set(frame.streamId, frame.cursor);
+        replayingStreams.current.delete(frame.streamId);
+        markRealtimeUpdate(frame.streamId);
         if (frame.streamId === "catalog") dispatch({ type: "catalog", value: frame.snapshot as CatalogSnapshot });
-        else dispatch({ type: "snapshot", value: frame.snapshot as AgentSnapshot });
-        dispatch({ type: "connection", value: "live" });
+        else dispatch({ type: "snapshot", value: frame.snapshot as AgentSnapshot, source: "ws" });
+        updateSocketPhase();
         return;
       }
       const events = frame.type === "replay" ? frame.events : [frame.envelope];
-      if (frame.type === "replay") dispatch({ type: "connection", value: "replaying" });
+      if (frame.type === "replay") {
+        replayingStreams.current.add(frame.streamId);
+        dispatch({ type: "connection", value: "replaying" });
+      }
       for (const envelope of events) {
         const cursor = cursors.current.get(envelope.streamId);
         if (cursor?.epoch === envelope.epoch && envelope.seq <= cursor.seq) continue;
         if (cursor?.epoch === envelope.epoch && envelope.seq !== cursor.seq + 1) {
+          replayingStreams.current.add(envelope.streamId);
           dispatch({ type: "connection", value: "replaying" });
           attach(envelope.streamId);
           return;
         }
         cursors.current.set(envelope.streamId, { epoch: envelope.epoch, seq: envelope.seq });
+        markRealtimeUpdate(envelope.streamId);
         dispatch({ type: "event", value: envelope });
       }
       if (frame.type === "replay") {
         cursors.current.set(frame.streamId, frame.cursor);
-        dispatch({ type: "connection", value: "live" });
+        replayingStreams.current.delete(frame.streamId);
+        updateSocketPhase();
       }
     });
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
+      clearWatchdog();
+      if (!isCurrent()) return;
       socketRef.current = null;
+      replayingStreams.current.clear();
+      const closeEvent = event as CloseEvent;
+      if (closeEvent.code === 1008 && /session expired/i.test(closeEvent.reason)) {
+        resetForUnauthorized();
+        return;
+      }
       if (manuallyClosed.current || stateRef.current.authRequired) return;
       dispatch({ type: "connection", value: "offline" });
+      if (closeEvent.code === 1009) {
+        socketRetryBlocked.current = true;
+        showPersistentError("Realtime data is too large. Reduce this session's transcript, then retry.");
+        return;
+      }
       const delay = Math.min(30_000, 1_000 * 2 ** retryCount.current++);
-      reconnectTimer.current = window.setTimeout(connect, delay);
+      reconnectTimer.current = window.setTimeout(() => connect(), delay);
     });
-  }, [attach, detach]);
+    openTimer = window.setTimeout(() => {
+      if (!isCurrent() || socket.readyState !== WebSocket.CONNECTING) return;
+      showError("Realtime connection timed out. Retrying…");
+      socket.close();
+    }, SOCKET_OPEN_TIMEOUT_MS);
+  }, [attach, detach, markRealtimeUpdate, resetForUnauthorized, showError, showPersistentError, updateSocketPhase]);
 
   const initialize = useCallback(async () => {
+    const generation = ++initializationGeneration.current;
+    lifecycleAbort.current?.abort();
+    const controller = new AbortController();
+    lifecycleAbort.current = controller;
+    // Realtime recovery must not wait for the HTTP bootstrap or root snapshot.
+    connect();
     try {
-      const value = await api.bootstrap();
+      const value = await api.bootstrap({ signal: controller.signal });
+      if (generation !== initializationGeneration.current || controller.signal.aborted) return;
       dispatch({ type: "bootstrap", value });
       const first = value.catalog.agents.find((agent) => agent.parentId === null);
       if (first) {
-        const snapshot = await api.loadAgent(first.id);
-        dispatch({ type: "snapshot", value: snapshot });
-        subscriptions.current.add(`agent:${first.id}`);
+        const streamId = `agent:${first.id}`;
+        subscriptions.current.add(streamId);
+        attach(streamId);
+        const loaded = await loadAgentHttp(first.id, { signal: controller.signal });
+        if (generation !== initializationGeneration.current || controller.signal.aborted) return;
+        dispatch({
+          type: "snapshot",
+          value: loaded.snapshot,
+          source: "http",
+          allowEqualRevision: loaded.allowEqualRevision,
+        });
       }
-      connect();
+      if (!socketRetryBlocked.current) showError(null);
+      updateSocketPhase();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) dispatch({ type: "auth_required" });
-      else showError(error instanceof Error ? error.message : "Could not start the app");
+      if (generation !== initializationGeneration.current || controller.signal.aborted) return;
+      if (error instanceof ApiError && error.status === 401) {
+        resetForUnauthorized();
+        return;
+      }
+      dispatch({ type: "connection", value: "offline" });
+      showError(error instanceof Error ? error.message : "Could not start the app");
+    } finally {
+      if (lifecycleAbort.current === controller) lifecycleAbort.current = null;
     }
-  }, [connect, showError]);
+  }, [attach, connect, loadAgentHttp, resetForUnauthorized, showError, updateSocketPhase]);
 
   useEffect(() => {
     manuallyClosed.current = false;
+    const unsubscribeUnauthorized = api.onUnauthorized(resetForUnauthorized);
     void initialize();
     return () => {
       manuallyClosed.current = true;
+      unsubscribeUnauthorized();
+      initializationGeneration.current += 1;
+      sessionGeneration.current += 1;
+      lifecycleAbort.current?.abort();
+      lifecycleAbort.current = null;
+      selectionGeneration.current += 1;
       if (reconnectTimer.current != null) window.clearTimeout(reconnectTimer.current);
       if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
-      socketRef.current?.close();
+      reconnectTimer.current = null;
+      const socket = socketRef.current;
+      socketRef.current = null;
+      socketGeneration.current += 1;
+      socket?.close();
+    };
+  }, [initialize, resetForUnauthorized]);
+
+  useEffect(() => {
+    const recover = () => {
+      if (stateRef.current.authRequired || socketRetryBlocked.current) return;
+      retryCount.current = 0;
+      void initialize();
+    };
+    const recoverWhenVisible = () => {
+      if (document.visibilityState === "visible"
+        && (stateRef.current.connection === "offline" || socketRef.current?.readyState !== WebSocket.OPEN)) {
+        recover();
+      }
+    };
+    window.addEventListener("online", recover);
+    document.addEventListener("visibilitychange", recoverWhenVisible);
+    return () => {
+      window.removeEventListener("online", recover);
+      document.removeEventListener("visibilitychange", recoverWhenVisible);
     };
   }, [initialize]);
 
@@ -431,29 +668,44 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
 
   const openAgent = useCallback(
     async (id: string) => {
-      if (!stateRef.current.snapshots[id]) {
-        const snapshot = await api.loadAgent(id);
-        dispatch({ type: "snapshot", value: snapshot });
-      }
+      const generation = sessionGeneration.current;
       const streamId = `agent:${id}`;
       subscriptions.current.add(streamId);
+      attach(streamId);
+      if (!stateRef.current.snapshots[id]) {
+        const loaded = await loadAgentHttp(id);
+        if (generation !== sessionGeneration.current) return;
+        dispatch({
+          type: "snapshot",
+          value: loaded.snapshot,
+          source: "http",
+          allowEqualRevision: loaded.allowEqualRevision,
+        });
+      }
+      if (generation !== sessionGeneration.current) return;
       for (const existing of subscriptions.current) {
         if (existing !== "catalog" && existing !== streamId && !stateRef.current.snapshots[existing.slice(6)]) {
           detach(existing);
         }
       }
-      attach(streamId);
     },
-    [attach, detach],
+    [attach, detach, loadAgentHttp],
   );
 
   const selectAgent = useCallback(
     async (id: string) => {
+      const previous = stateRef.current.selectedAgentId;
+      const selection = ++selectionGeneration.current;
       dispatch({ type: "select", value: id });
       try {
         await openAgent(id);
+        if (selection === selectionGeneration.current) showError(null);
       } catch (error) {
-        showError(error instanceof Error ? error.message : "Could not open agent");
+        if (selection !== selectionGeneration.current) return;
+        dispatch({ type: "select", value: previous });
+        if (!(error instanceof ApiError && error.status === 401)) {
+          showError(error instanceof Error ? error.message : "Could not open agent");
+        }
       }
     },
     [openAgent, showError],
@@ -465,33 +717,64 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       run: (revision: number) => Promise<T>,
       initialRevision?: number,
     ): Promise<T> => {
+      const generation = sessionGeneration.current;
       const revision = initialRevision ?? stateRef.current.snapshots[agentId]?.revision;
       if (revision == null) throw new Error("Agent snapshot is not loaded");
       try {
-        return await run(revision);
+        const result = await run(revision);
+        if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+        return result;
       } catch (error) {
         if (!(error instanceof ApiError) || error.status !== 409) throw error;
-        const fresh = await api.loadAgent(agentId);
-        dispatch({ type: "snapshot", value: fresh });
-        return run(fresh.revision);
+        const loaded = await loadAgentHttp(agentId);
+        if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+        dispatch({
+          type: "snapshot",
+          value: loaded.snapshot,
+          source: "http",
+          allowEqualRevision: loaded.allowEqualRevision,
+        });
+        const result = await run(loaded.snapshot.revision);
+        if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+        return result;
       }
     },
-    [],
+    [loadAgentHttp],
   );
 
   const createSession = useCallback(
-    async (cwd: string, name?: string) => {
+    async (cwd: string, name?: string, callerRequestId?: string) => {
       const current = stateRef.current;
+      const generation = sessionGeneration.current;
+      const retryKey = JSON.stringify([cwd, name ?? ""]);
+      const requestId = callerRequestId ?? createRequestIdsRef.current.get(retryKey) ?? crypto.randomUUID();
+      createRequestIdsRef.current.set(retryKey, requestId);
+      let result;
       try {
-        const result = await api.createSession(current.csrfToken, cwd, name);
-        dispatch({ type: "select", value: result.agentId });
-        await openAgent(result.agentId);
-        showError(null);
-        return result.agentId;
+        result = await api.createSession(current.csrfToken, cwd, name, requestId);
       } catch (error) {
-        showError(error instanceof Error ? error.message : "Could not create the session");
+        if (!(error instanceof ApiError && error.status === 401)) {
+          showError(error instanceof Error ? error.message : "Could not create the session");
+        }
         throw error;
       }
+      if (createRequestIdsRef.current.get(retryKey) === requestId) createRequestIdsRef.current.delete(retryKey);
+      if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+
+      dispatch({ type: "select", value: result.agentId });
+      try {
+        await openAgent(result.agentId);
+        showError(null);
+      } catch (error) {
+        // The create mutation is committed. Hydration can be retried and must not
+        // make the caller report that creation itself failed.
+        if (!(error instanceof ApiError && error.status === 401)) {
+          showError(error instanceof Error
+            ? `Session created, but it could not be opened: ${error.message}`
+            : "Session created, but it could not be opened");
+        }
+      }
+      return result.agentId;
     },
     [openAgent, showError],
   );
@@ -572,34 +855,54 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
 
   const abort = useCallback(async (agentId?: string) => {
     const current = stateRef.current;
+    const generation = sessionGeneration.current;
     const id = agentId ?? current.selectedAgentId;
     if (!id) throw new Error("No agent selected");
     try {
-      const snapshot = current.snapshots[id] ?? await api.loadAgent(id);
-      if (!current.snapshots[id]) dispatch({ type: "snapshot", value: snapshot });
+      let snapshot = current.snapshots[id];
+      if (!snapshot) {
+        const loaded = await loadAgentHttp(id);
+        if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+        snapshot = loaded.snapshot;
+        dispatch({
+          type: "snapshot",
+          value: snapshot,
+          source: "http",
+          allowEqualRevision: loaded.allowEqualRevision,
+        });
+      }
       const result = await runMutation(
         id,
         (revision) => api.abortAgent(id, current.csrfToken, revision),
         snapshot.revision,
       );
+      if (generation !== sessionGeneration.current) return;
       dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
       showError(null);
     } catch (error) {
-      showError(error instanceof Error ? error.message : "Stop failed");
+      if (generation === sessionGeneration.current) {
+        showError(error instanceof Error ? error.message : "Stop failed");
+      }
       throw error;
     }
-  }, [runMutation, showError]);
+  }, [loadAgentHttp, runMutation, showError]);
 
   const respond = useCallback(
     async (attentionId: string, revision: number, optionId: string) => {
       const current = stateRef.current;
+      const generation = sessionGeneration.current;
+      const agentId = Object.values(current.snapshots)
+        .flatMap((snapshot) => snapshot.attention)
+        .find((request) => request.id === attentionId)?.agentId ?? current.selectedAgentId;
       try {
         const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId);
-        const agentId = current.selectedAgentId;
+        if (generation !== sessionGeneration.current) return;
         if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
         showError(null);
       } catch (error) {
-        showError(error instanceof Error ? error.message : "Response failed");
+        if (!(error instanceof ApiError && error.status === 401)) {
+          showError(error instanceof Error ? error.message : "Response failed");
+        }
         throw error;
       }
     },
@@ -607,11 +910,17 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const reconnect = useCallback(() => {
-    socketRef.current?.close();
-    socketRef.current = null;
     retryCount.current = 0;
-    connect();
-  }, [connect]);
+    socketRetryBlocked.current = false;
+    if (reconnectTimer.current != null) window.clearTimeout(reconnectTimer.current);
+    reconnectTimer.current = null;
+    const socket = socketRef.current;
+    socketRef.current = null;
+    socketGeneration.current += 1;
+    replayingStreams.current.clear();
+    socket?.close();
+    void initialize();
+  }, [initialize]);
 
   const selectedAgent = state.catalog.agents.find((item) => item.id === state.selectedAgentId) ?? null;
   const selectedSnapshot = state.selectedAgentId ? state.snapshots[state.selectedAgentId] ?? null : null;

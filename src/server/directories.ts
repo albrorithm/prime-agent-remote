@@ -2,6 +2,10 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { DirectoryEntry } from "../protocol.js";
 
 export const DIRECTORY_LISTING_BOUND = 500;
+// Filesystem adapters should stop after this many directory entries and pass
+// scanTruncated=true to selectDirectoryEntries. The extra bound also keeps
+// filtering and sorting bounded if an adapter supplies an unexpectedly large array.
+export const DIRECTORY_SCAN_BOUND = 2_000;
 
 export interface ListedChild {
   name: string;
@@ -31,13 +35,19 @@ export function directoryCrumbs(target: string): DirectoryEntry[] {
   }
 }
 
-export function selectDirectoryEntries(children: ListedChild[]): { entries: DirectoryEntry[]; truncated: boolean } {
-  const directories = children
+export function selectDirectoryEntries(
+  children: ListedChild[],
+  scanTruncated = false,
+): { entries: DirectoryEntry[]; truncated: boolean } {
+  const boundedChildren = children.slice(0, DIRECTORY_SCAN_BOUND);
+  const directories = boundedChildren
     .filter((child) => child.directory)
     .sort((left, right) => left.name.localeCompare(right.name));
   const bounded = directories.slice(0, DIRECTORY_LISTING_BOUND);
   return {
     entries: bounded.map(({ name, path, hidden }) => ({ name, path, hidden })),
-    truncated: directories.length > DIRECTORY_LISTING_BOUND,
+    truncated: scanTruncated
+      || children.length > DIRECTORY_SCAN_BOUND
+      || directories.length > DIRECTORY_LISTING_BOUND,
   };
 }

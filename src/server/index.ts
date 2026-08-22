@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   abortRequestSchema,
@@ -26,12 +27,20 @@ import { loadConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
 import { PrimeBackend } from "./prime-backend.js";
-import { MutationCache, MutationCacheMismatchError } from "./mutation-cache.js";
+import {
+  MutationCache,
+  MutationCacheCapacityError,
+  MutationCacheMismatchError,
+} from "./mutation-cache.js";
 import {
   ImageAttachmentValidationError,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
   validateImageAttachments,
 } from "./image-attachments.js";
+import {
+  enforceOutboundFrameLimits,
+  MAX_WEBSOCKET_INBOUND_FRAME_BYTES,
+} from "./websocket-frames.js";
 
 const config = loadConfig();
 const backend: AgentBackend = config.backend === "prime"
@@ -43,6 +52,10 @@ const auth = new AuthService(config);
 const staticRoot = path.resolve(process.cwd(), "dist");
 const mutationCache = new MutationCache<unknown>(10 * 60_000);
 const mutationTimes = new Map<string, number[]>();
+const MUTATION_WINDOW_MS = 60_000;
+const MAX_MUTATIONS_PER_SESSION = 120;
+const MAX_TRACKED_MUTATION_SESSIONS = 4_096;
+let lastMutationPruneAt = Number.NEGATIVE_INFINITY;
 
 function securityHeaders(res: ServerResponse): void {
   res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");
@@ -89,14 +102,26 @@ function authenticated(req: IncomingMessage, res: ServerResponse): Authenticated
   return session;
 }
 
+function pruneMutationTimes(now: number, force = false): void {
+  if (!force && now - lastMutationPruneAt < MUTATION_WINDOW_MS) return;
+  lastMutationPruneAt = now;
+  for (const [sessionId, times] of mutationTimes) {
+    const recent = times.filter((time) => now - time < MUTATION_WINDOW_MS);
+    if (recent.length === 0) mutationTimes.delete(sessionId);
+    else if (recent.length !== times.length) mutationTimes.set(sessionId, recent);
+  }
+}
+
 function allowMutation(req: IncomingMessage, res: ServerResponse, session: AuthenticatedSession): boolean {
   if (!auth.validateMutation(req, session)) {
     problem(res, 403, "Origin or CSRF validation failed");
     return false;
   }
   const now = Date.now();
-  const times = (mutationTimes.get(session.id) ?? []).filter((time) => now - time < 60_000);
-  if (times.length >= 120) {
+  pruneMutationTimes(now, mutationTimes.size >= MAX_TRACKED_MUTATION_SESSIONS);
+  const times = (mutationTimes.get(session.id) ?? []).filter((time) => now - time < MUTATION_WINDOW_MS);
+  if (times.length >= MAX_MUTATIONS_PER_SESSION
+    || (!mutationTimes.has(session.id) && mutationTimes.size >= MAX_TRACKED_MUTATION_SESSIONS)) {
     problem(res, 429, "Too many mutation requests");
     return false;
   }
@@ -296,32 +321,35 @@ const mimeTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
   ".svg": "image/svg+xml",
   ".webmanifest": "application/manifest+json",
 };
 
-async function serveStatic(res: ServerResponse, pathname: string): Promise<void> {
+async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("Allow", "GET, HEAD");
+    return problem(res, 405, "Method not allowed");
+  }
   const requested = pathname === "/" ? "index.html" : pathname.slice(1);
-  let filePath = path.resolve(staticRoot, requested);
+  const filePath = path.resolve(staticRoot, requested);
   if (!filePath.startsWith(`${staticRoot}${path.sep}`) && filePath !== path.join(staticRoot, "index.html")) {
     return problem(res, 404, "Not found");
   }
   try {
-    if (!(await stat(filePath)).isFile()) throw new Error("not_file");
-  } catch {
-    filePath = path.join(staticRoot, "index.html");
-  }
-  try {
+    if (!(await stat(filePath)).isFile()) return problem(res, 404, "Not found");
     const body = await readFile(filePath);
     securityHeaders(res);
     res.statusCode = 200;
-    res.setHeader("Content-Type", mimeTypes[path.extname(filePath)] ?? "application/octet-stream");
+    res.setHeader("Content-Type", mimeTypes[path.extname(filePath).toLowerCase()] ?? "application/octet-stream");
+    res.setHeader("Content-Length", body.byteLength);
     const basename = path.basename(filePath);
     res.setHeader("Cache-Control", basename === "index.html" || basename === "sw.js" || basename === "manifest.webmanifest"
       ? "no-cache"
       : "public, max-age=3600");
-    res.end(body);
+    res.end(req.method === "HEAD" ? undefined : body);
   } catch {
+    if (requested !== "index.html") return problem(res, 404, "Not found");
     problem(res, 404, "Web build not found", "Run npm run build before npm start.");
   }
 }
@@ -330,7 +358,7 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", "http://gateway.invalid");
     if (await api(req, res, url.pathname)) return;
-    await serveStatic(res, url.pathname);
+    await serveStatic(req, res, url.pathname);
   } catch (error) {
     if (error instanceof SyntaxError) return problem(res, 400, "Invalid JSON");
     if (error instanceof Error && error.message === "request_too_large") return problem(res, 413, "Request too large");
@@ -338,66 +366,160 @@ const server = createServer(async (req, res) => {
     if (error instanceof BackendConflictError || error instanceof MutationCacheMismatchError) {
       return problem(res, 409, "State conflict", error.message);
     }
+    if (error instanceof MutationCacheCapacityError) {
+      return problem(res, 429, "Too many mutations are pending");
+    }
     if (error instanceof BackendCapabilityError) return problem(res, 403, "Action is not allowed", error.message);
     console.error("Request failed", error);
     problem(res, 500, "Internal server error");
   }
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
-server.on("upgrade", (req, socket, head) => {
-  const pathname = new URL(req.url ?? "/", "http://gateway.invalid").pathname;
-  if (pathname !== "/ws/v1/events" || !auth.isAllowedOrigin(req) || !auth.authenticate(req)) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: MAX_WEBSOCKET_INBOUND_FRAME_BYTES,
+  perMessageDeflate: false,
 });
 
-wss.on("connection", (ws: WebSocket) => {
+function closeWebSocket(ws: WebSocket, code: number, reason: string): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.close(code, reason);
+  } catch {
+    ws.terminate();
+  }
+}
+
+function rejectWebSocketUpgrade(socket: Duplex, status: 400 | 401): void {
+  if (socket.destroyed || !socket.writable) return;
+  const label = status === 400 ? "Bad Request" : "Unauthorized";
+  try {
+    socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  } catch {
+    socket.destroy();
+  }
+}
+
+function configureWebSocket(ws: WebSocket, session: AuthenticatedSession): void {
   const subscriptions = new Map<string, () => void>();
-  const send = (frame: ServerFrame) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    if (ws.bufferedAmount > 2 * 1024 * 1024) {
-      ws.close(1013, "Client is too slow");
-      return;
-    }
-    ws.send(JSON.stringify(frame));
-  };
-  ws.on("message", (raw) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw.toString());
-    } catch {
-      ws.close(1007, "Invalid JSON");
-      return;
-    }
-    const result = clientFrameSchema.safeParse(parsed);
-    if (!result.success) {
-      ws.close(1008, "Invalid protocol frame");
-      return;
-    }
-    const frame = result.data;
-    if (frame.type === "ping") return send({ type: "pong", version: PROTOCOL_VERSION });
-    if (frame.type === "detach") {
-      subscriptions.get(frame.streamId)?.();
-      subscriptions.delete(frame.streamId);
-      return;
-    }
-    subscriptions.get(frame.streamId)?.();
-    const attached = hub.attach(frame.streamId, frame.since, send);
-    if (!attached) {
-      send({ type: "detached", version: PROTOCOL_VERSION, streamId: frame.streamId, reason: "stream_gone" });
-      return;
-    }
-    subscriptions.set(frame.streamId, attached.detach);
-    send(attached.initial);
-  });
-  ws.on("close", () => {
+  let expiryTimer: NodeJS.Timeout | undefined;
+  let cleaned = false;
+
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (expiryTimer) clearTimeout(expiryTimer);
     for (const detach of subscriptions.values()) detach();
     subscriptions.clear();
+  };
+
+  const send = (frame: ServerFrame) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(frame);
+    } catch {
+      closeWebSocket(ws, 1011, "Frame serialization failed");
+      return;
+    }
+    const serializedBytes = Buffer.byteLength(serialized, "utf8");
+    if (!enforceOutboundFrameLimits(
+      serializedBytes,
+      ws.bufferedAmount,
+      (code, reason) => closeWebSocket(ws, code, reason),
+    )) return;
+    try {
+      ws.send(serialized, (error) => {
+        if (error && ws.readyState !== WebSocket.CLOSED) ws.terminate();
+      });
+    } catch {
+      ws.terminate();
+    }
+  };
+
+  ws.on("error", cleanup);
+  ws.on("close", cleanup);
+  ws.on("message", (raw, isBinary) => {
+    try {
+      if (!auth.isSessionActive(session)) {
+        closeWebSocket(ws, 1008, "Session expired");
+        return;
+      }
+      if (isBinary) {
+        closeWebSocket(ws, 1003, "Binary frames are not supported");
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw.toString());
+      } catch {
+        closeWebSocket(ws, 1007, "Invalid JSON");
+        return;
+      }
+      const result = clientFrameSchema.safeParse(parsed);
+      if (!result.success) {
+        closeWebSocket(ws, 1008, "Invalid protocol frame");
+        return;
+      }
+      const frame = result.data;
+      if (frame.type === "ping") return send({ type: "pong", version: PROTOCOL_VERSION });
+      if (frame.type === "detach") {
+        subscriptions.get(frame.streamId)?.();
+        subscriptions.delete(frame.streamId);
+        return;
+      }
+      subscriptions.get(frame.streamId)?.();
+      const attached = hub.attach(frame.streamId, frame.since, send);
+      if (!attached) {
+        send({ type: "detached", version: PROTOCOL_VERSION, streamId: frame.streamId, reason: "stream_gone" });
+        return;
+      }
+      subscriptions.set(frame.streamId, attached.detach);
+      send(attached.initial);
+    } catch {
+      closeWebSocket(ws, 1011, "WebSocket processing failed");
+    }
   });
+
+  expiryTimer = setTimeout(() => {
+    cleanup();
+    closeWebSocket(ws, 1008, "Session expired");
+  }, Math.max(0, session.expiresAt - Date.now()));
+  expiryTimer.unref();
+}
+
+wss.on("error", (error) => {
+  console.error("WebSocket server error", error);
+});
+
+server.on("upgrade", (req, socket, head) => {
+  // Upgrade failures otherwise have no ServerResponse error boundary.
+  socket.on("error", () => {});
+  let pathname: string;
+  try {
+    pathname = new URL(req.url ?? "/", "http://gateway.invalid").pathname;
+  } catch {
+    rejectWebSocketUpgrade(socket, 400);
+    return;
+  }
+  const session = pathname === "/ws/v1/events" && auth.isAllowedOrigin(req)
+    ? auth.authenticate(req)
+    : null;
+  if (!session) {
+    rejectWebSocketUpgrade(socket, 401);
+    return;
+  }
+  try {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      try {
+        configureWebSocket(ws, session);
+      } catch {
+        ws.terminate();
+      }
+    });
+  } catch {
+    rejectWebSocketUpgrade(socket, 400);
+  }
 });
 
 server.listen(config.port, config.host, () => {
