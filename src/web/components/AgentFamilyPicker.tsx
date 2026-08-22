@@ -17,6 +17,74 @@ interface AgentFamilyPickerProps {
   onSelect: (id: string) => void;
 }
 
+interface PickerMenuPosition {
+  top: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+  placement: "above" | "below";
+}
+
+interface SafeAreaInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+function readSafeAreaInsets(): SafeAreaInsets {
+  const probe = document.createElement("div");
+  probe.style.cssText = [
+    "position:fixed",
+    "visibility:hidden",
+    "pointer-events:none",
+    "padding-top:env(safe-area-inset-top, 0px)",
+    "padding-right:env(safe-area-inset-right, 0px)",
+    "padding-bottom:env(safe-area-inset-bottom, 0px)",
+    "padding-left:env(safe-area-inset-left, 0px)",
+  ].join(";");
+  document.body.append(probe);
+  const style = getComputedStyle(probe);
+  const insets = {
+    top: Number.parseFloat(style.paddingTop) || 0,
+    right: Number.parseFloat(style.paddingRight) || 0,
+    bottom: Number.parseFloat(style.paddingBottom) || 0,
+    left: Number.parseFloat(style.paddingLeft) || 0,
+  };
+  probe.remove();
+  return insets;
+}
+
+function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
+  const margin = 8;
+  const gap = 6;
+  const rect = trigger.getBoundingClientRect();
+  const viewport = window.visualViewport;
+  const viewportLeft = viewport?.offsetLeft ?? 0;
+  const viewportTop = viewport?.offsetTop ?? 0;
+  const viewportWidth = viewport?.width ?? window.innerWidth;
+  const viewportHeight = viewport?.height ?? window.innerHeight;
+  const safeArea = readSafeAreaInsets();
+  const leftEdge = viewportLeft + safeArea.left + margin;
+  const rightEdge = Math.max(leftEdge + 1, viewportLeft + viewportWidth - safeArea.right - margin);
+  const topEdge = viewportTop + safeArea.top + margin;
+  const bottomEdge = Math.max(topEdge + 1, viewportTop + viewportHeight - safeArea.bottom - margin);
+  const width = Math.min(340, rightEdge - leftEdge);
+  const left = Math.min(Math.max(leftEdge, rect.right - width), rightEdge - width);
+  const belowTop = Math.max(topEdge, rect.bottom + gap);
+  const aboveTop = Math.min(bottomEdge, rect.top - gap);
+  const availableBelow = Math.max(0, bottomEdge - belowTop);
+  const availableAbove = Math.max(0, aboveTop - topEdge);
+  const placement = availableBelow >= 180 || availableBelow >= availableAbove ? "below" : "above";
+  return {
+    top: placement === "below" ? belowTop : aboveTop,
+    left,
+    width,
+    maxHeight: Math.max(1, Math.min(420, placement === "below" ? availableBelow : availableAbove)),
+    placement,
+  };
+}
+
 export interface AgentFamilyRow {
   agent: AgentSummary;
   level: number;
@@ -103,7 +171,7 @@ function StateIcon({ agent }: { agent: AgentSummary }) {
   return <span className="family-agent-state-dot" aria-hidden="true" />;
 }
 
-const FOCUSABLE = 'button:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFamilyPickerProps) {
   const descendants = useMemo(
@@ -113,12 +181,14 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
   const childrenByParent = useMemo(() => indexChildren(agents), [agents]);
   const descendantIds = useMemo(() => new Set(descendants.map((agent) => agent.id)), [descendants]);
   const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<PickerMenuPosition | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [focusId, setFocusId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const sheetRef = useRef<HTMLElement>(null);
+  const menuRef = useRef<HTMLElement>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const headingId = useId();
+  const menuId = useId();
   const visible = useMemo(
     () => buildVisibleAgentDescendants(agents, selectedAgent.id, expanded),
     [agents, selectedAgent.id, expanded],
@@ -129,6 +199,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
   const close = (restoreFocus = false) => {
     setOpen(false);
     setExpanded(new Set());
+    setFocusId(null);
     if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
   };
 
@@ -138,35 +209,63 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
     setFocusId(firstId);
     queueMicrotask(() => {
       if (firstId) rowRefs.current.get(firstId)?.focus();
-      else sheetRef.current?.focus();
+      else menuRef.current?.focus();
     });
   }, [open, visible, focusId]);
 
   useEffect(() => {
     if (!open) return;
+    const outsideMenu = (target: EventTarget | null) => target instanceof Node
+      && !menuRef.current?.contains(target)
+      && !triggerRef.current?.contains(target);
+    const focusFromTrigger = (backward: boolean) => {
+      const items = [...document.querySelectorAll<HTMLElement>(FOCUSABLE)]
+        .filter((item) => item.offsetParent !== null && !menuRef.current?.contains(item));
+      const triggerIndex = triggerRef.current ? items.indexOf(triggerRef.current) : -1;
+      const target = backward ? items[triggerIndex - 1] : items[triggerIndex + 1];
+      close();
+      queueMicrotask(() => (target ?? triggerRef.current)?.focus());
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         close(true);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = [...(sheetRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
-        .filter((item) => item.offsetParent !== null);
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable.at(-1)!;
-      if (event.shiftKey && document.activeElement === first) {
+      } else if (event.key === "Tab" && menuRef.current?.contains(event.target as Node)) {
         event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
+        focusFromTrigger(event.shiftKey);
       }
     };
+    const onPointerDown = (event: PointerEvent) => {
+      if (outsideMenu(event.target)) close();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (outsideMenu(event.target)) close();
+    };
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("focusin", onFocusIn);
+    };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const updatePosition = () => {
+      if (triggerRef.current) setMenuPosition(measurePickerMenu(triggerRef.current));
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [open, descendants.length, workingCount, selectedAgent.id]);
 
   useEffect(() => {
     if (!descendants.length && open) close();
@@ -218,6 +317,15 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
     event.preventDefault();
   };
 
+  const toggleOpen = () => {
+    if (open) {
+      close();
+      return;
+    }
+    if (triggerRef.current) setMenuPosition(measurePickerMenu(triggerRef.current));
+    setOpen(true);
+  };
+
   return (
     <>
       <span className="lineage-item lineage-forward">
@@ -228,8 +336,9 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
           type="button"
           aria-haspopup="dialog"
           aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
           aria-label={`Open ${countLabel} of ${selectedAgent.name}${workingCount ? `, ${workingCount} working` : ""}`}
-          onClick={() => setOpen((current) => !current)}
+          onClick={toggleOpen}
         >
           {workingCount > 0 ? <span className="lineage-forward-working" aria-hidden="true" /> : <GitBranch aria-hidden="true" />}
           <span>{descendants.length}</span>
@@ -238,16 +347,24 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
         </button>
       </span>
 
-      {open && createPortal(
+      {open && menuPosition && createPortal(
         <div className="family-picker-layer" data-gesture-exclusion>
-          <div className="family-picker-scrim" aria-hidden="true" onClick={() => close(true)} />
           <section
-            className="family-picker-sheet"
-            ref={sheetRef}
+            className="family-picker-menu"
+            id={menuId}
+            ref={menuRef}
             role="dialog"
-            aria-modal="true"
             aria-labelledby={headingId}
             tabIndex={-1}
+            data-placement={menuPosition.placement}
+            style={{
+              top: menuPosition.top,
+              left: menuPosition.left,
+              width: menuPosition.width,
+              maxHeight: menuPosition.maxHeight,
+              transform: menuPosition.placement === "above" ? "translateY(-100%)" : undefined,
+              transformOrigin: menuPosition.placement === "above" ? "bottom center" : "top center",
+            }}
           >
             <header className="family-picker-header">
               <div>

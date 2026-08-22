@@ -132,17 +132,17 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .lineage-forward-trigger > svg:first-child { color: var(--muted); }
 .lineage-forward-trigger .lineage-forward-chevron { width: 11px; height: 11px; color: var(--muted-2); }
 .lineage-forward-working { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.08); animation: blink 1.4s ease-in-out infinite; }
-.family-picker-layer { position: fixed; z-index: 70; inset: 0; display: grid; align-items: end; justify-items: center; padding: 8px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
-.family-picker-scrim { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 0; background: rgba(0,0,0,.72); }
-.family-picker-sheet { position: relative; display: flex; width: min(100%, 440px); max-height: min(72vh, 560px); min-height: 220px; flex-direction: column; overflow: hidden; border: 1px solid #343434; border-radius: 18px; outline: 0; background: #080808; box-shadow: 0 20px 60px rgba(0,0,0,.78); }
-.family-picker-header { display: flex; min-height: 60px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-bottom: 1px solid var(--border); background: #0b0b0b; }
+.family-picker-layer { position: fixed; z-index: 70; inset: 0; pointer-events: none; }
+.family-picker-menu { position: fixed; z-index: 1; display: flex; min-height: 0; flex-direction: column; overflow: hidden; pointer-events: auto; border: 1px solid #343434; border-radius: 14px; outline: 0; background: rgba(8,8,8,.98); box-shadow: 0 16px 44px rgba(0,0,0,.76); backdrop-filter: blur(18px); transform-origin: top center; animation: family-menu-in 120ms ease-out; }
+@keyframes family-menu-in { from { opacity: 0; } }
+.family-picker-header { display: flex; min-height: 52px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 5px 6px 5px 12px; border-bottom: 1px solid var(--border); background: #0b0b0b; }
 .family-picker-header > div { min-width: 0; flex: 1; }
 .family-picker-header .eyebrow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.family-picker-header h2 { margin: 2px 0 0; font-size: 17px; line-height: 1.1; }
-.family-picker-summary { flex: 0 0 auto; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.family-picker-header h2 { margin: 1px 0 0; font-size: 15px; line-height: 1.1; }
+.family-picker-summary { min-width: 0; flex: 0 1 auto; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .family-picker-scroll { min-height: 0; flex: 1; padding: 6px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
 .family-picker-tree { width: 100%; min-width: 0; }
-.family-agent-row { --family-depth: 0; display: flex; width: 100%; min-width: 0; min-height: 54px; align-items: center; padding: 5px 9px 5px calc(5px + var(--family-depth) * 16px); border: 1px solid transparent; border-radius: 12px; user-select: none; }
+.family-agent-row { --family-depth: 0; display: flex; width: 100%; min-width: 0; min-height: 50px; align-items: center; padding: 3px 8px 3px calc(4px + var(--family-depth) * 15px); border: 1px solid transparent; border-radius: 12px; user-select: none; }
 .family-agent-row:hover, .family-agent-row:focus { border-color: #292929; background: #141414; }
 .family-disclosure, .family-disclosure-space { display: inline-flex; width: 44px; height: 44px; flex: 0 0 44px; align-items: center; justify-content: center; }
 .family-disclosure { padding: 0; border: 0; color: var(--muted); background: transparent; }

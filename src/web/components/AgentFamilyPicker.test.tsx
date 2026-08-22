@@ -102,6 +102,9 @@ describe("forward subagent breadcrumb", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Subagents" })).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    expect(screen.getByRole("treeitem", { name: /research/ })).toHaveFocus();
   });
 
   it("does not expose cycle edges as expandable children", async () => {
@@ -129,13 +132,19 @@ describe("forward subagent breadcrumb", () => {
     await waitFor(() => expect(review).toHaveFocus());
   });
 
-  it("restores trigger focus when the scrim dismisses the picker", async () => {
+  it("closes on outside interaction without stealing focus", async () => {
     const user = userEvent.setup();
-    render(<AgentFamilyPicker agents={agents} selectedAgent={agents[0]} onSelect={() => {}} />);
-    const trigger = screen.getByRole("button", { name: /Open 3 subagents/ });
-    await user.click(trigger);
-    await user.click(document.querySelector<HTMLElement>(".family-picker-scrim")!);
-    expect(trigger).toHaveFocus();
+    render(
+      <>
+        <AgentFamilyPicker agents={agents} selectedAgent={agents[0]} onSelect={() => {}} />
+        <button type="button">Outside control</button>
+      </>,
+    );
+    await user.click(screen.getByRole("button", { name: /Open 3 subagents/ }));
+    const outside = screen.getByRole("button", { name: "Outside control" });
+    await user.click(outside);
+    expect(screen.queryByRole("dialog", { name: "Subagents" })).not.toBeInTheDocument();
+    expect(outside).toHaveFocus();
   });
 
   it("renders no forward control for a leaf agent", () => {
