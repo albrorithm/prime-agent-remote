@@ -181,7 +181,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .tree-unread { display: grid; flex: 0 0 auto; min-width: 17px; height: 17px; place-items: center; margin-right: 6px; padding: 0 4px; border-radius: 99px; color: #000; background: #fff; font-size: 9px; font-weight: 800; }
 .message.user.pending { opacity: .55; }
 mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
-.message-body { display: flex; flex-direction: column; gap: 8px; }
+.message-body { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
 .message-images { display: grid; max-width: min(100%, 560px); overflow: hidden; gap: 4px; border-radius: 10px; }
 .message-images.multiple { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .message-images a { display: block; min-width: 0; border-radius: 9px; }
@@ -199,12 +199,19 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 .markdown-list li + li { margin-top: 2px; }
 .markdown-blockquote { margin: 0; padding: 2px 0 2px 11px; border-left: 2px solid #444; color: #c6c6c6; }
 .markdown-blockquote p { color: inherit; }
+.markdown-table { display: block; max-width: 100%; margin: 0; overflow-x: auto; border-collapse: collapse; color: #f1f1f1; font-size: 13px; line-height: 1.5; }
+.markdown-table th, .markdown-table td { min-width: 72px; padding: 6px 9px; border: 1px solid #303030; overflow-wrap: anywhere; }
+.markdown-table th { color: #fff; background: #151515; font-weight: 650; }
+.markdown-hr { width: 100%; margin: 4px 0; border: 0; border-top: 1px solid #333; }
 .markdown-link { color: #e6e6e6; text-decoration-color: #777; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .markdown-link:hover { color: #fff; text-decoration-color: #fff; }
 .message del { color: var(--muted); }
 .inline-code { padding: 1px 5px; border-radius: 5px; background: #191919; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.markdown-math-block { max-width: 100%; margin: 0; overflow-x: auto; padding: 10px 12px; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; }
+.markdown-math-block code { color: #e8e8e8; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.markdown-list .markdown-math-block { margin: 4px 0; }
 .code-block { overflow: hidden; margin: 0; border: 1px solid #262626; border-radius: 10px; background: #0a0a0a; }
-.code-block-bar { display: flex; min-height: 30px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 6px 3px 11px; border-bottom: 1px solid #1c1c1c; color: var(--muted-2); font: 600 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.code-block-bar { display: flex; min-height: 30px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 6px 3px 11px; border-bottom: 1px solid #1c1c1c; color: var(--muted); font: 600 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; text-transform: uppercase; }
 .code-block-bar button { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; }
 .code-block-bar button:hover { color: #fff; background: #1b1b1b; }
 .code-block-bar svg { width: 13px; height: 13px; }

@@ -1,5 +1,7 @@
 import { Check, Copy } from "lucide-react";
-import { useState, type ReactElement } from "react";
+import { memo, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { Marked, Tokenizer, type Token, type TokenizerExtension, type Tokens } from "marked";
+import { latexToUnicode } from "../latex";
 
 export interface TextBlock {
   kind: "text";
@@ -15,103 +17,104 @@ export interface CodeBlockModel {
 
 export type MessageBlock = TextBlock | CodeBlockModel;
 
-const FENCE_PATTERN = /```([^\n`]*)\n([\s\S]*?)```/g;
-const JSON_BLOCK_MAX_CHARS = 20_000;
-const MARKDOWN_PARSE_MAX_CHARS = 50_000;
-const MARKDOWN_MARKER_MAX_COUNT = 512;
-const MAX_MARKDOWN_NESTING = 12;
+type Segment = (TextBlock | CodeBlockModel) & { start: number };
 
-function appendTextBlock(blocks: MessageBlock[], text: string): void {
-  const candidate = text.trim();
-  if (
-    candidate.length > 1 &&
-    candidate.length <= JSON_BLOCK_MAX_CHARS &&
-    ((candidate.startsWith("{") && candidate.endsWith("}")) ||
-      (candidate.startsWith("[") && candidate.endsWith("]")))
-  ) {
-    try {
-      const parsed = JSON.parse(candidate) as unknown;
-      blocks.push({ kind: "code", lang: "json", code: JSON.stringify(parsed, null, 2), streaming: false });
-      return;
-    } catch {
-      // Invalid JSON remains ordinary transcript text.
+const FENCE_OPENER = /^( {0,3})(`{3,}|~{3,})(.*)\r?$/;
+const MARKDOWN_PARSE_MAX_CHARS = 250_000;
+
+const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
+
+class StrictStrikethroughTokenizer extends Tokenizer {
+  override del(src: string): Tokens.Del | undefined {
+    const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
+    if (!match) return undefined;
+    return {
+      type: "del",
+      raw: match[0],
+      text: match[2],
+      tokens: this.lexer.inlineTokens(match[2]),
+    };
+  }
+}
+
+interface MathToken {
+  type: "blockMath" | "inlineMath";
+  raw: string;
+  text: string;
+}
+
+// Math must tokenize before marked's escape/emphasis handling, or \[ collapses
+// to [ and underscores inside formulas become italics. Unterminated delimiters
+// stay plain text until their closing delimiter arrives.
+const BLOCK_MATH_REGEX = /^[ \t]*(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])[ \t]*(?:\n|$)/;
+
+function minIndex(a: number, b: number): number | undefined {
+  if (a === -1) return b === -1 ? undefined : b;
+  return b === -1 ? a : Math.min(a, b);
+}
+
+const blockMathExtension: TokenizerExtension = {
+  name: "blockMath",
+  level: "block",
+  start: (src: string) => {
+    const paragraphEnd = src.indexOf("\n\n");
+    const window = paragraphEnd === -1 ? src : src.slice(0, paragraphEnd);
+    return minIndex(window.indexOf("$$"), window.indexOf("\\["));
+  },
+  tokenizer(src: string): Tokens.Generic | undefined {
+    const first = src.charCodeAt(0);
+    if (first !== 0x24 && first !== 0x5c && first !== 0x20 && first !== 0x09) return undefined;
+    const match = BLOCK_MATH_REGEX.exec(src);
+    if (!match) return undefined;
+    const token: MathToken = { type: "blockMath", raw: match[0], text: (match[1] ?? match[2]).trim() };
+    return token;
+  },
+};
+
+const INLINE_MATH_PATTERNS = [
+  /^\$\$([\s\S]+?)\$\$/,
+  /^\\\[([\s\S]+?)\\\]/,
+  /^\\\(([\s\S]+?)\\\)/,
+  /^\$([^\s$](?:[^$\n]*[^\s$])?)\$(?!\d)/,
+];
+
+const inlineMathExtension: TokenizerExtension = {
+  name: "inlineMath",
+  level: "inline",
+  start: (src: string) => {
+    const index = src.indexOf("$");
+    return index === -1 ? undefined : index;
+  },
+  tokenizer(src: string): Tokens.Generic | undefined {
+    const first = src.charCodeAt(0);
+    if (first !== 0x24 && first !== 0x5c) return undefined;
+    for (const pattern of INLINE_MATH_PATTERNS) {
+      const match = pattern.exec(src);
+      if (match) {
+        const token: MathToken = { type: "inlineMath", raw: match[0], text: match[1].trim() };
+        return token;
+      }
     }
-  }
-  blocks.push({ kind: "text", text });
+    return undefined;
+  },
+};
+
+const markdownParser = new Marked();
+markdownParser.setOptions({ gfm: true, tokenizer: new StrictStrikethroughTokenizer() });
+
+// Registered extensions slow lexing even when they do not match, so ordinary
+// prose keeps the extension-free parser used by the rest of the transcript.
+const mathMarkdownParser = new Marked();
+mathMarkdownParser.setOptions({ gfm: true, tokenizer: new StrictStrikethroughTokenizer() });
+mathMarkdownParser.use({ extensions: [blockMathExtension, inlineMathExtension] });
+
+function pickMarkdownParser(text: string): Marked {
+  return text.includes("$") || text.includes("\\(") || text.includes("\\[")
+    ? mathMarkdownParser
+    : markdownParser;
 }
 
-export function parseMessageBlocks(text: string): MessageBlock[] {
-  const blocks: MessageBlock[] = [];
-  let index = 0;
-  FENCE_PATTERN.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = FENCE_PATTERN.exec(text))) {
-    if (match.index > index) appendTextBlock(blocks, text.slice(index, match.index));
-    blocks.push({ kind: "code", lang: match[1].trim(), code: match[2].replace(/\n$/, ""), streaming: false });
-    index = FENCE_PATTERN.lastIndex;
-  }
-  const remainder = text.slice(index);
-  if (!remainder) return blocks;
-  const fenceCount = (text.match(/```/g) ?? []).length;
-  if (fenceCount % 2 === 1) {
-    const openIndex = remainder.indexOf("```");
-    if (openIndex > 0) appendTextBlock(blocks, remainder.slice(0, openIndex));
-    const afterTicks = remainder.slice(openIndex + 3);
-    const newline = afterTicks.indexOf("\n");
-    const lang = newline >= 0 ? afterTicks.slice(0, newline).trim() : "";
-    const code = newline >= 0 ? afterTicks.slice(newline + 1) : "";
-    blocks.push({ kind: "code", lang, code, streaming: true });
-  } else {
-    appendTextBlock(blocks, remainder);
-  }
-  return blocks;
-}
-
-type InlinePart = string | ReactElement;
-
-const ESCAPABLE_MARKDOWN = new Set("\\`*{}[]()#+-.!_>~|".split(""));
 const SAFE_LINK_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
-
-function isEscaped(text: string, index: number): boolean {
-  let slashCount = 0;
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) slashCount += 1;
-  return slashCount % 2 === 1;
-}
-
-function findExactRun(text: string, character: string, length: number, from: number): number {
-  for (let index = from; index < text.length; index += 1) {
-    if (text[index] !== character || isEscaped(text, index)) continue;
-    let runLength = 1;
-    while (text[index + runLength] === character) runLength += 1;
-    if (runLength === length) return index;
-    index += runLength - 1;
-  }
-  return -1;
-}
-
-function findFormattingClose(text: string, marker: string, from: number): number {
-  let index = from;
-  while (index < text.length) {
-    const candidate = findExactRun(text, marker[0], marker.length, index);
-    if (candidate < 0) return -1;
-    if (candidate > from && !/\s/.test(text[candidate - 1])) return candidate;
-    index = candidate + marker.length;
-  }
-  return -1;
-}
-
-function unescapeMarkdown(value: string): string {
-  let result = "";
-  for (let index = 0; index < value.length; index += 1) {
-    if (value[index] === "\\" && index + 1 < value.length && ESCAPABLE_MARKDOWN.has(value[index + 1])) {
-      result += value[index + 1];
-      index += 1;
-    } else {
-      result += value[index];
-    }
-  }
-  return result;
-}
 
 function safeLinkHref(destination: string): string | null {
   const href = destination.trim();
@@ -121,111 +124,149 @@ function safeLinkHref(destination: string): string | null {
   return href;
 }
 
-interface ParsedLink {
-  label: string;
-  href: string;
-  title?: string;
-  end: number;
+function closeFencePattern(character: string, length: number): RegExp {
+  return new RegExp(`^ {0,3}${character}{${length},}[ \t]*\r?$`);
 }
 
-function parseLinkTarget(rawTarget: string): { href: string; title?: string } | null {
-  const target = rawTarget.trim();
-  const angleMatch = /^<([^<>]*)>(?:[ \t]+(?:"([^"]*)"|'([^']*)'))?$/.exec(target);
-  const plainMatch = /^(\S+?)(?:[ \t]+(?:"([^"]*)"|'([^']*)'))?$/.exec(target);
-  const match = angleMatch ?? plainMatch;
-  if (!match) return null;
-  return {
-    href: unescapeMarkdown(match[1]),
-    title: match[2] ?? match[3],
-  };
-}
-
-function parseLinkAt(text: string, start: number): ParsedLink | null {
-  if (text[start] !== "[") return null;
-  let bracketDepth = 1;
-  let labelEnd = -1;
-  for (let index = start + 1; index < text.length; index += 1) {
-    if (isEscaped(text, index)) continue;
-    if (text[index] === "[") bracketDepth += 1;
-    if (text[index] === "]") {
-      bracketDepth -= 1;
-      if (bracketDepth === 0) {
-        labelEnd = index;
-        break;
-      }
-    }
+/**
+ * Split message text into fenced code blocks and prose runs.
+ * Fences are recognized only at line starts (CommonMark), so a ``` run
+ * inside a code body or mid-line never terminates a block early.
+ */
+function parseSegments(text: string): Segment[] {
+  if (text.length > MARKDOWN_PARSE_MAX_CHARS) {
+    return [{ kind: "text", text, start: 0 }];
   }
-  if (labelEnd < 0 || text[labelEnd + 1] !== "(") return null;
-
-  let parenthesisDepth = 1;
-  let targetEnd = -1;
-  for (let index = labelEnd + 2; index < text.length; index += 1) {
-    if (isEscaped(text, index)) continue;
-    if (text[index] === "(") parenthesisDepth += 1;
-    if (text[index] === ")") {
-      parenthesisDepth -= 1;
-      if (parenthesisDepth === 0) {
-        targetEnd = index;
-        break;
-      }
-    }
+  const lines = text.split("\n");
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    lineStarts.push(offset);
+    offset += line.length + 1;
   }
-  if (targetEnd < 0) return null;
-  const target = parseLinkTarget(text.slice(labelEnd + 2, targetEnd));
-  if (!target) return null;
-  return {
-    label: text.slice(start + 1, labelEnd),
-    href: target.href,
-    title: target.title,
-    end: targetEnd + 1,
-  };
-}
 
-function appendInlineText(parts: InlinePart[], value: string): void {
-  if (!value) return;
-  const previous = parts[parts.length - 1];
-  if (typeof previous === "string") parts[parts.length - 1] = previous + value;
-  else parts.push(value);
-}
-
-function renderInlineInternal(text: string, keyPrefix: string, allowLinks: boolean, depth = 0): InlinePart[] {
-  if (depth >= MAX_MARKDOWN_NESTING) return [unescapeMarkdown(text)];
-  const parts: InlinePart[] = [];
+  const segments: Segment[] = [];
+  let proseStart: number | null = 0;
   let index = 0;
-  while (index < text.length) {
-    const character = text[index];
-
-    if (character === "\\" && index + 1 < text.length && ESCAPABLE_MARKDOWN.has(text[index + 1])) {
-      appendInlineText(parts, text[index + 1]);
-      index += 2;
+  while (index < lines.length) {
+    const opener = FENCE_OPENER.exec(lines[index]);
+    // A backtick fence's info string cannot contain backticks; such lines are prose.
+    const validOpener = Boolean(opener && !(opener[2][0] === "`" && opener[3].includes("`")));
+    if (!validOpener) {
+      if (proseStart === null) proseStart = lineStarts[index];
+      index += 1;
       continue;
     }
+    if (proseStart !== null && proseStart !== lineStarts[index]) {
+      segments.push({ kind: "text", text: text.slice(proseStart, lineStarts[index]), start: proseStart });
+    }
+    const openerIndent = opener![1].length;
+    const fenceCharacter = opener![2][0];
+    const fenceLength = opener![2].length;
+    const info = opener![3].trim();
+    const lang = info.split(/\s+/)[0] ?? "";
 
-    if (character === "`") {
-      let runLength = 1;
-      while (text[index + runLength] === "`") runLength += 1;
-      const close = findExactRun(text, "`", runLength, index + runLength);
-      if (close > index + runLength) {
-        const code = text.slice(index + runLength, close).replace(/\n/g, " ");
-        parts.push(<code key={`${keyPrefix}-code-${index}`} className="inline-code">{code}</code>);
-        index = close + runLength;
-        continue;
+    let closeIndex = -1;
+    const closer = closeFencePattern(fenceCharacter, fenceLength);
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      if (closer.test(lines[cursor])) {
+        closeIndex = cursor;
+        break;
       }
     }
+    const start = lineStarts[index];
+    const codeEnd = closeIndex < 0 ? lines.length : closeIndex;
+    const code = lines
+      .slice(index + 1, codeEnd)
+      .map((line) => {
+        let remove = 0;
+        while (remove < openerIndent && line[remove] === " ") remove += 1;
+        return line.slice(remove);
+      })
+      .join("\n");
+    if (closeIndex < 0) {
+      segments.push({ kind: "code", lang, code, streaming: true, start });
+      return segments;
+    }
+    segments.push({ kind: "code", lang, code, streaming: false, start });
+    // Preserve the newline after the closing fence as prose, matching the
+    // previous parseMessageBlocks contract and keeping source offsets exact.
+    proseStart = lineStarts[closeIndex] + lines[closeIndex].length;
+    index = closeIndex + 1;
+  }
+  if (proseStart !== null && proseStart < text.length) {
+    segments.push({ kind: "text", text: text.slice(proseStart), start: proseStart });
+  }
+  return segments;
+}
 
-    if (allowLinks && character === "[") {
-      const link = parseLinkAt(text, index);
-      if (link) {
-        const label = renderInlineInternal(link.label, `${keyPrefix}-link-${index}`, false, depth + 1);
+export function parseMessageBlocks(text: string): MessageBlock[] {
+  return parseSegments(text).map((segment) =>
+    segment.kind === "code"
+      ? { kind: segment.kind, lang: segment.lang, code: segment.code, streaming: segment.streaming }
+      : { kind: segment.kind, text: segment.text },
+  );
+}
+
+type InlinePart = string | ReactElement;
+
+function renderInlineTokens(tokens: Token[], keyPrefix: string): InlinePart[] {
+  const parts: InlinePart[] = [];
+  let index = 0;
+  for (const token of tokens) {
+    const key = `${keyPrefix}-${index}`;
+    switch (token.type) {
+      case "escape":
+      case "text":
+      case "em_text": {
+        const textToken = token as Tokens.Text | Tokens.Escape;
+        if ("tokens" in textToken && textToken.tokens?.length) {
+          parts.push(...renderInlineTokens(textToken.tokens, key));
+        } else {
+          appendPart(parts, textToken.text);
+        }
+        break;
+      }
+      case "strong":
+        parts.push(
+          <strong key={key}>{renderInlineTokens((token as Tokens.Strong).tokens ?? [], key)}</strong>,
+        );
+        break;
+      case "em":
+        parts.push(<em key={key}>{renderInlineTokens((token as Tokens.Em).tokens ?? [], key)}</em>);
+        break;
+      case "del":
+        parts.push(<del key={key}>{renderInlineTokens((token as Tokens.Del).tokens ?? [], key)}</del>);
+        break;
+      case "codespan":
+        parts.push(
+          <code key={key} className="inline-code">
+            {(token as Tokens.Codespan).text}
+          </code>,
+        );
+        break;
+      case "inlineMath":
+        parts.push(
+          <code key={key} className="inline-code markdown-math-inline">
+            {latexToUnicode((token as unknown as MathToken).text).replace(/\s*\n\s*/g, " ")}
+          </code>,
+        );
+        break;
+      case "br":
+        parts.push("\n");
+        break;
+      case "link": {
+        const link = token as Tokens.Link;
+        const label = link.tokens?.length ? renderInlineTokens(link.tokens, key) : [link.text];
         const href = safeLinkHref(link.href);
         if (href) {
           const external = /^(?:https?:)?\/\//i.test(href);
           parts.push(
             <a
-              key={`${keyPrefix}-link-${index}`}
+              key={key}
               className="markdown-link"
               href={href}
-              title={link.title}
+              title={link.title ?? undefined}
               target={external ? "_blank" : undefined}
               rel={external ? "noopener noreferrer" : undefined}
               data-gesture-exclusion
@@ -234,116 +275,121 @@ function renderInlineInternal(text: string, keyPrefix: string, allowLinks: boole
             </a>,
           );
         } else {
-          for (const labelPart of label) {
-            if (typeof labelPart === "string") appendInlineText(parts, labelPart);
-            else parts.push(labelPart);
+          for (const part of label) {
+            if (typeof part === "string") appendPart(parts, part);
+            else parts.push(part);
           }
         }
-        index = link.end;
-        continue;
+        break;
       }
-    }
-
-    const tripleMarker = text.startsWith("***", index)
-      ? "***"
-      : text.startsWith("___", index)
-        ? "___"
-        : null;
-    if (tripleMarker && !/\s/.test(text[index + 3] ?? "")) {
-      const close = findFormattingClose(text, tripleMarker, index + 3);
-      if (close > index + 3) {
-        parts.push(
-          <strong key={`${keyPrefix}-strong-em-${index}`}>
-            <em>{renderInlineInternal(text.slice(index + 3, close), `${keyPrefix}-strong-em-${index}`, allowLinks, depth + 1)}</em>
-          </strong>,
-        );
-        index = close + 3;
-        continue;
+      case "image": {
+        const image = token as Tokens.Image;
+        const href = safeLinkHref(image.href);
+        if (href) {
+          const external = /^(?:https?:)?\/\//i.test(href);
+          parts.push(
+            <a
+              key={key}
+              className="markdown-link markdown-image-link"
+              href={href}
+              target={external ? "_blank" : undefined}
+              rel={external ? "noopener noreferrer" : undefined}
+              data-gesture-exclusion
+            >
+              {image.text || image.href}
+            </a>,
+          );
+        } else {
+          appendPart(parts, image.text);
+        }
+        break;
       }
+      case "html":
+        appendPart(parts, (token as Tokens.HTML).raw.trim());
+        break;
+      default:
+        if ("text" in token && typeof (token as { text?: unknown }).text === "string") {
+          appendPart(parts, (token as unknown as { text: string }).text);
+        }
     }
-
-    const strongMarker = text.startsWith("**", index)
-      ? "**"
-      : text.startsWith("__", index)
-        ? "__"
-        : null;
-    if (strongMarker && text[index + 2] !== strongMarker[0] && !/\s/.test(text[index + 2] ?? "")) {
-      const close = findFormattingClose(text, strongMarker, index + 2);
-      if (close > index + 2) {
-        parts.push(
-          <strong key={`${keyPrefix}-strong-${index}`}>
-            {renderInlineInternal(text.slice(index + 2, close), `${keyPrefix}-strong-${index}`, allowLinks, depth + 1)}
-          </strong>,
-        );
-        index = close + 2;
-        continue;
-      }
-    }
-
-    if (text.startsWith("~~", index) && text[index + 2] !== "~" && !/\s/.test(text[index + 2] ?? "")) {
-      const close = findFormattingClose(text, "~~", index + 2);
-      if (close > index + 2) {
-        parts.push(
-          <del key={`${keyPrefix}-del-${index}`}>
-            {renderInlineInternal(text.slice(index + 2, close), `${keyPrefix}-del-${index}`, allowLinks, depth + 1)}
-          </del>,
-        );
-        index = close + 2;
-        continue;
-      }
-    }
-
-    if ((character === "*" || character === "_") && text[index + 1] !== character && !/\s/.test(text[index + 1] ?? "")) {
-      const intrawordUnderscore = character === "_" && /[A-Za-z0-9]/.test(text[index - 1] ?? "");
-      const close = intrawordUnderscore ? -1 : findFormattingClose(text, character, index + 1);
-      if (close > index + 1) {
-        parts.push(
-          <em key={`${keyPrefix}-em-${index}`}>
-            {renderInlineInternal(text.slice(index + 1, close), `${keyPrefix}-em-${index}`, allowLinks, depth + 1)}
-          </em>,
-        );
-        index = close + 1;
-        continue;
-      }
-    }
-
-    appendInlineText(parts, character);
     index += 1;
   }
   return parts;
 }
 
-export function renderInline(text: string): Array<string | ReactElement> {
-  return renderInlineInternal(text, "inline", true);
+function appendPart(parts: InlinePart[], value: string): void {
+  if (!value) return;
+  const previous = parts[parts.length - 1];
+  if (typeof previous === "string") parts[parts.length - 1] = previous + value;
+  else parts.push(value);
 }
 
-interface ListItemMatch {
-  ordered: boolean;
-  number: number;
-  text: string;
+function renderList(list: Tokens.List, key: string): ReactElement {
+  const items = list.items.map((item, itemIndex) => {
+    const itemKey = `${key}-${itemIndex}`;
+    const content = (item.tokens ?? []).map((child, childIndex) => {
+      const childKey = `${itemKey}-${childIndex}`;
+      if (child.type === "list") return renderList(child as Tokens.List, childKey);
+      if (child.type === "text") return renderInlineTokens(child.tokens ?? [child], childKey);
+      return renderBlockToken(child, childKey);
+    });
+    return <li key={itemKey}>{content}</li>;
+  });
+  if (!list.ordered) {
+    return (
+      <ul key={key} className="markdown-list markdown-list-unordered">
+        {items}
+      </ul>
+    );
+  }
+  const start = typeof list.start === "number" ? list.start : 1;
+  return (
+    <ol key={key} className="markdown-list markdown-list-ordered" start={start === 1 ? undefined : start}>
+      {items}
+    </ol>
+  );
 }
 
-function matchListItem(line: string): ListItemMatch | null {
-  const unordered = /^ {0,3}[-+*][ \t]+(.*)$/.exec(line);
-  if (unordered) return { ordered: false, number: 1, text: unordered[1] };
-  const ordered = /^ {0,3}(\d+)[.)][ \t]+(.*)$/.exec(line);
-  if (ordered) return { ordered: true, number: Number.parseInt(ordered[1], 10), text: ordered[2] };
-  return null;
+function renderTableCell(cell: Tokens.TableCell, key: string): InlinePart[] {
+  return renderInlineTokens(cell.tokens ?? [], key);
 }
 
-function matchHeading(line: string): { level: number; text: string } | null {
-  const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/.exec(line);
-  if (!match) return null;
-  return {
-    level: match[1].length,
-    text: (match[2] ?? "").replace(/[ \t]+#+[ \t]*$/, ""),
-  };
+function alignmentStyle(align: "center" | "left" | "right" | null): React.CSSProperties | undefined {
+  if (!align) return undefined;
+  return { textAlign: align };
 }
 
-function renderHeading(level: number, text: string, key: string): ReactElement {
-  const className = `markdown-heading markdown-heading-${level}`;
-  const content = renderInlineInternal(text, `${key}-inline`, true);
-  switch (level) {
+function renderTable(table: Tokens.Table, key: string): ReactElement {
+  return (
+    <table key={key} className="markdown-table" tabIndex={0}>
+      <thead>
+        <tr>
+          {table.header.map((cell, cellIndex) => (
+            <th key={`${key}-h-${cellIndex}`} style={alignmentStyle(table.align[cellIndex])}>
+              {renderTableCell(cell, `${key}-h-${cellIndex}`)}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {table.rows.map((row, rowIndex) => (
+          <tr key={`${key}-r-${rowIndex}`}>
+            {row.map((cell, cellIndex) => (
+              <td key={`${key}-r-${rowIndex}-${cellIndex}`} style={alignmentStyle(table.align[cellIndex])}>
+                {renderTableCell(cell, `${key}-r-${rowIndex}-${cellIndex}`)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function renderHeading(depth: number, tokens: Token[], key: string): ReactElement {
+  const className = `markdown-heading markdown-heading-${depth}`;
+  const content = renderInlineTokens(tokens, `${key}-inline`);
+  switch (depth) {
     case 1: return <h1 key={key} className={className}>{content}</h1>;
     case 2: return <h2 key={key} className={className}>{content}</h2>;
     case 3: return <h3 key={key} className={className}>{content}</h3>;
@@ -353,104 +399,145 @@ function renderHeading(level: number, text: string, key: string): ReactElement {
   }
 }
 
-function renderMarkdownBlocks(text: string, keyPrefix: string, quoteDepth = 0): ReactElement[] {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const elements: ReactElement[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    if (!lines[index].trim()) {
-      index += 1;
-      continue;
-    }
-
-    const heading = matchHeading(lines[index]);
-    if (heading) {
-      elements.push(renderHeading(heading.level, heading.text, `${keyPrefix}-heading-${index}`));
-      index += 1;
-      continue;
-    }
-
-    const quote = /^ {0,3}>[ \t]?(.*)$/.exec(lines[index]);
-    if (quote && quoteDepth < MAX_MARKDOWN_NESTING) {
-      const quoteLines: string[] = [];
-      const start = index;
-      while (index < lines.length) {
-        const line = /^ {0,3}>[ \t]?(.*)$/.exec(lines[index]);
-        if (!line) break;
-        quoteLines.push(line[1]);
-        index += 1;
-      }
-      elements.push(
-        <blockquote key={`${keyPrefix}-quote-${start}`} className="markdown-blockquote">
-          {renderMarkdownBlocks(quoteLines.join("\n"), `${keyPrefix}-quote-${start}`, quoteDepth + 1)}
-        </blockquote>,
-      );
-      continue;
-    }
-
-    const firstListItem = matchListItem(lines[index]);
-    if (firstListItem) {
-      const items: ListItemMatch[] = [];
-      const start = index;
-      while (index < lines.length) {
-        const item = matchListItem(lines[index]);
-        if (!item || item.ordered !== firstListItem.ordered) break;
-        items.push(item);
-        index += 1;
-      }
-      const listItems = items.map((item, itemIndex) => (
-        <li key={`${keyPrefix}-list-${start}-${itemIndex}`}>
-          {renderInlineInternal(item.text, `${keyPrefix}-list-${start}-${itemIndex}`, true)}
-        </li>
-      ));
-      elements.push(firstListItem.ordered ? (
-        <ol
-          key={`${keyPrefix}-list-${start}`}
-          className="markdown-list markdown-list-ordered"
-          start={firstListItem.number === 1 ? undefined : firstListItem.number}
-        >
-          {listItems}
-        </ol>
-      ) : (
-        <ul key={`${keyPrefix}-list-${start}`} className="markdown-list markdown-list-unordered">
-          {listItems}
-        </ul>
-      ));
-      continue;
-    }
-
-    const paragraphLines: string[] = [];
-    const start = index;
-    while (index < lines.length && lines[index].trim()) {
-      if (paragraphLines.length > 0 && (matchHeading(lines[index]) || matchListItem(lines[index]) || /^ {0,3}>/.test(lines[index]))) {
-        break;
-      }
-      paragraphLines.push(lines[index]);
-      index += 1;
-    }
-    elements.push(
-      <p key={`${keyPrefix}-paragraph-${start}`} className="markdown-paragraph">
-        {renderInlineInternal(paragraphLines.join("\n"), `${keyPrefix}-paragraph-${start}`, true)}
-      </p>,
-    );
+function renderBlockquote(quote: Tokens.Blockquote, key: string): ReactElement {
+  const chain: Tokens.Blockquote[] = [quote];
+  while (true) {
+    const children = chain[chain.length - 1].tokens ?? [];
+    if (children.length !== 1 || children[0].type !== "blockquote") break;
+    chain.push(children[0] as Tokens.Blockquote);
   }
 
-  return elements;
+  const innermost = chain[chain.length - 1];
+  let content: ReactNode = innermost.tokens?.map((child, childIndex) =>
+    renderBlockToken(child, `${key}-${chain.length}-${childIndex}`),
+  );
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    content = (
+      <blockquote key={index === 0 ? key : `${key}-quote-${index}`} className="markdown-blockquote">
+        {content}
+      </blockquote>
+    );
+  }
+  return content as ReactElement;
 }
 
-function MarkdownProse({ text }: { text: string }) {
-  const markerCount = text.match(/[*_~`\[\]]/g)?.length ?? 0;
-  const tooComplex = markerCount > MARKDOWN_MARKER_MAX_COUNT || (text.length > 10_000 && markerCount > 64);
-  if (text.length > MARKDOWN_PARSE_MAX_CHARS || tooComplex) return <p className="markdown-paragraph">{text}</p>;
-  return <>{renderMarkdownBlocks(text, "markdown")}</>;
+function renderMathBlock(token: MathToken, key: string): ReactElement {
+  const converted = latexToUnicode(token.text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join("\n");
+  return (
+    <pre key={key} className="markdown-math-block" data-gesture-exclusion>
+      <code>{converted}</code>
+    </pre>
+  );
 }
 
-function CodeBlockView({ block }: { block: CodeBlockModel }) {
+function renderBlockToken(token: Token, key: string): ReactNode {
+  switch (token.type) {
+    case "heading": {
+      const heading = token as Tokens.Heading;
+      return renderHeading(heading.depth, heading.tokens ?? [], key);
+    }
+    case "paragraph":
+      return (
+        <p key={key} className="markdown-paragraph">
+          {renderInlineTokens((token as Tokens.Paragraph).tokens ?? [], `${key}-inline`)}
+        </p>
+      );
+    case "code":
+      return (
+        <MemoizedCodeBlock
+          key={key}
+          lang={(token as Tokens.Code).lang ?? ""}
+          code={(token as Tokens.Code).text}
+          streaming={false}
+        />
+      );
+    case "blockMath":
+      return renderMathBlock(token as unknown as MathToken, key);
+    case "table":
+      return renderTable(token as Tokens.Table, key);
+    case "list":
+      return renderList(token as Tokens.List, key);
+    case "blockquote":
+      return renderBlockquote(token as Tokens.Blockquote, key);
+    case "hr":
+      return <hr key={key} className="markdown-hr" />;
+    case "space":
+      return null;
+    case "html":
+      return (
+        <p key={key} className="markdown-paragraph">
+          {(token as Tokens.HTML).raw.trim()}
+        </p>
+      );
+    case "text":
+      return (
+        <p key={key} className="markdown-paragraph">
+          {renderInlineTokens((token as Tokens.Text).tokens ?? [token], `${key}-inline`)}
+        </p>
+      );
+    default:
+      if ("text" in token && typeof (token as { text?: unknown }).text === "string") {
+        return (
+          <p key={key} className="markdown-paragraph">
+            {(token as unknown as { text: string }).text}
+          </p>
+        );
+      }
+      return null;
+  }
+}
+
+interface MarkdownBlockProps {
+  token: Token;
+  fingerprint: string;
+  start: number;
+}
+
+const MemoizedMarkdownBlock = memo(
+  function MarkdownBlock({ token, start }: MarkdownBlockProps) {
+    return <>{renderBlockToken(token, `md-${start}`)}</>;
+  },
+  (previous, next) => previous.start === next.start && previous.fingerprint === next.fingerprint,
+);
+
+function renderProse(text: string, segmentStart: number): ReactNode {
+  if (text.length > MARKDOWN_PARSE_MAX_CHARS) return <p className="markdown-paragraph">{text}</p>;
+  const tokens = pickMarkdownParser(text).lexer(text);
+  const linksFingerprint = Object.keys(tokens.links).length > 0 ? JSON.stringify(tokens.links) : "";
+  let tokenStart = segmentStart;
+  return (
+    <>
+      {tokens.map((token) => {
+        const start = tokenStart;
+        tokenStart += token.raw.length;
+        const fingerprint = `${token.type}\0${token.raw}\0${linksFingerprint}`;
+        return <MemoizedMarkdownBlock key={start} token={token} fingerprint={fingerprint} start={start} />;
+      })}
+    </>
+  );
+}
+
+const MemoizedProseBlock = memo(function ProseBlock({ text, start }: { text: string; start: number }) {
+  return <>{renderProse(text, start)}</>;
+});
+
+const MemoizedCodeBlock = memo(function CodeBlockView({
+  lang,
+  code,
+  streaming,
+}: {
+  lang: string;
+  code: string;
+  streaming: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(block.code);
+      await navigator.clipboard.writeText(code);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -460,8 +547,8 @@ function CodeBlockView({ block }: { block: CodeBlockModel }) {
   return (
     <figure className="code-block" data-gesture-exclusion>
       <figcaption className="code-block-bar">
-        <span>{block.lang || "code"}</span>
-        {block.streaming ? (
+        <span>{lang || "code"}</span>
+        {streaming ? (
           <span className="code-streaming">writing…</span>
         ) : (
           <button onClick={() => void copy()} aria-label={copied ? "Copied" : "Copy code"} disabled={copied}>
@@ -469,21 +556,32 @@ function CodeBlockView({ block }: { block: CodeBlockModel }) {
           </button>
         )}
       </figcaption>
-      <pre><code>{block.code}</code></pre>
+      <pre><code>{code}</code></pre>
     </figure>
   );
+});
+
+export function renderInline(text: string): Array<string | ReactElement> {
+  const parser = pickMarkdownParser(text);
+  const tokens = parser.Lexer.lexInline(text, parser.defaults);
+  return renderInlineTokens(tokens, "inline");
 }
 
 export function MessageContent({ text }: { text: string }) {
-  const blocks = parseMessageBlocks(text);
-  if (!blocks.length) return null;
+  const segments = useMemo(() => parseSegments(text), [text]);
+  if (!segments.length) return null;
   return (
     <>
-      {blocks.map((block, index) =>
-        block.kind === "code" ? (
-          <CodeBlockView key={index} block={block} />
+      {segments.map((segment) =>
+        segment.kind === "code" ? (
+          <MemoizedCodeBlock
+            key={segment.start}
+            lang={segment.lang}
+            code={segment.code}
+            streaming={segment.streaming}
+          />
         ) : (
-          <MarkdownProse key={index} text={block.text} />
+          <MemoizedProseBlock key={segment.start} text={segment.text} start={segment.start} />
         ),
       )}
     </>

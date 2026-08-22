@@ -130,6 +130,7 @@ export function TranscriptEntry({
             src: `/api/v1/attachments/${encodeURIComponent(attachment.id)}`,
           }))}
         />
+        {/* Search mode intentionally renders matched bodies as flat plain-text <p> so highlights stay simple. */}
         {searchTerm !== undefined
           ? <p><HighlightedText text={message.text} term={searchTerm} /></p>
           : <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />}
@@ -150,6 +151,8 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const lastText = selectedSnapshot?.messages.at(-1)?.text ?? "";
   const previousCount = useRef(0);
   const previousAttention = useRef(0);
+  const previousAgentId = useRef<string | null>(null);
+  const previousSnapshotAgentId = useRef<string | null>(null);
   const lineage = useMemo(
     () => deriveAgentLineage(catalog.agents, selectedAgent?.id ?? null),
     [catalog.agents, selectedAgent?.id],
@@ -175,6 +178,30 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
   }, [lastText, following]);
+
+  // Reset scroll-following state when switching agents so a new session's
+  // history doesn't register as "unseen" and the view jumps to its bottom.
+  // A selected agent can render before its snapshot loads, so baseline again
+  // when that snapshot first arrives. This effect must run before vibration.
+  useEffect(() => {
+    const agentId = selectedAgent?.id ?? null;
+    const snapshotAgentId = selectedSnapshot?.agentId ?? null;
+    const baselineSnapshotAgentId = agentId && snapshotAgentId === agentId ? agentId : null;
+    const agentChanged = previousAgentId.current !== agentId;
+    const snapshotChanged = previousSnapshotAgentId.current !== baselineSnapshotAgentId;
+    if (!agentChanged && !snapshotChanged) return;
+
+    previousAgentId.current = agentId;
+    previousSnapshotAgentId.current = baselineSnapshotAgentId;
+    previousCount.current = messageCount;
+    previousAttention.current = snapshotAttention;
+    if (agentChanged) {
+      setFollowing(true);
+      setUnseen(0);
+    }
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [selectedAgent?.id, selectedSnapshot?.agentId, messageCount, snapshotAttention]);
 
   useEffect(() => {
     if (snapshotAttention > previousAttention.current && typeof navigator.vibrate === "function") {

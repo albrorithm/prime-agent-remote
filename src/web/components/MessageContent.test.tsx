@@ -4,12 +4,30 @@ import { describe, expect, it, vi } from "vitest";
 import { MessageContent, parseMessageBlocks, renderInline } from "./MessageContent";
 
 describe("parseMessageBlocks", () => {
-  it("splits fenced code from prose", () => {
-    const blocks = parseMessageBlocks("Before\n```ts\nconst x = 1;\n```\nAfter");
+  it("splits fenced code from prose and extracts the language", () => {
+    const blocks = parseMessageBlocks("Before\n```ts title=example\nconst x = 1;\n```\nAfter");
     expect(blocks).toHaveLength(3);
     expect(blocks[0]).toEqual({ kind: "text", text: "Before\n" });
     expect(blocks[1]).toEqual({ kind: "code", lang: "ts", code: "const x = 1;", streaming: false });
     expect(blocks[2]).toEqual({ kind: "text", text: "\nAfter" });
+  });
+
+  it("supports tilde fences", () => {
+    expect(parseMessageBlocks("~~~python\nprint(1)\n~~~")).toEqual([
+      { kind: "code", lang: "python", code: "print(1)", streaming: false },
+    ]);
+  });
+
+  it("removes up to the opener indentation from fenced code", () => {
+    expect(parseMessageBlocks("  ```text\n  two spaces\n one space\nnone\n  ```")).toEqual([
+      { kind: "code", lang: "text", code: "two spaces\none space\nnone", streaming: false },
+    ]);
+  });
+
+  it("detects unterminated CRLF fences as streaming", () => {
+    expect(parseMessageBlocks("```js\r\nwork()\r\n")).toEqual([
+      { kind: "code", lang: "js", code: "work()\r\n", streaming: true },
+    ]);
   });
 
   it("treats an unterminated fence as streaming code", () => {
@@ -22,20 +40,26 @@ describe("parseMessageBlocks", () => {
     expect(parseMessageBlocks("just words")).toEqual([{ kind: "text", text: "just words" }]);
   });
 
-  it("formats a pure JSON payload as a code block", () => {
-    expect(parseMessageBlocks('{"type":"tool","payload":{"ok":true}}')).toEqual([
-      {
-        kind: "code",
-        lang: "json",
-        code: '{\n  "type": "tool",\n  "payload": {\n    "ok": true\n  }\n}',
-        streaming: false,
-      },
+  it("keeps JSON payloads as ordinary transcript text", () => {
+    const text = '{"type":"tool","payload":{"ok":true}}';
+    expect(parseMessageBlocks(text)).toEqual([{ kind: "text", text }]);
+  });
+
+  it("does not close a fence at a mid-line backtick run", () => {
+    expect(parseMessageBlocks("```js\nfoo ``` bar\nbaz\n```")).toEqual([
+      { kind: "code", lang: "js", code: "foo ``` bar\nbaz", streaming: false },
     ]);
   });
 
-  it("leaves malformed JSON as transcript text", () => {
-    const text = '{"type":tool}';
-    expect(parseMessageBlocks(text)).toEqual([{ kind: "text", text }]);
+  it("keeps a mid-line backtick run inside streaming code", () => {
+    expect(parseMessageBlocks("```js\nconst marker = ```;\nstill writing")).toEqual([
+      {
+        kind: "code",
+        lang: "js",
+        code: "const marker = ```;\nstill writing",
+        streaming: true,
+      },
+    ]);
   });
 });
 
@@ -51,6 +75,12 @@ describe("renderInline", () => {
     const code = screen.getByText("**literal** [link](javascript:alert(1))");
     expect(code.tagName).toBe("CODE");
     expect(code.querySelector("strong, a")).toBeNull();
+  });
+
+  it("uses the math-enabled parser for inline rendering", () => {
+    const { container } = render(<p>{renderInline("value \\(x_i\\)")}</p>);
+    expect(container.querySelector(".markdown-math-inline")?.textContent).toBe("xᵢ");
+    expect(container.textContent).toBe("value xᵢ");
   });
 });
 
@@ -82,20 +112,87 @@ describe("MessageContent", () => {
     expect(container.querySelector("blockquote")?.textContent).toContain("quoted text");
   });
 
-  it("renders safe links and rejects unsafe schemes", () => {
+  it("renders GFM tables", () => {
     const { container } = render(
+      <MessageContent text={"| Name | State |\n| :--- | ---: |\n| build | ready |"} />,
+    );
+    const table = container.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(table?.getAttribute("tabindex")).toBe("0");
+    expect(table?.querySelectorAll("thead th")).toHaveLength(2);
+    expect(table?.querySelectorAll("tbody td")).toHaveLength(2);
+    expect(table?.textContent).toContain("build");
+    expect((table?.querySelector("th") as HTMLElement).style.textAlign).toBe("left");
+  });
+
+  it("renders setext headings and horizontal rules", () => {
+    const { container } = render(<MessageContent text={"Heading\n=======\n\n---"} />);
+    expect(screen.getByRole("heading", { level: 1, name: "Heading" })).toBeDefined();
+    expect(container.querySelector("hr.markdown-hr")).not.toBeNull();
+  });
+
+  it("renders autolinks, bare URLs, and safe relative links", () => {
+    render(
       <MessageContent
-        text={"[docs](https://example.com/docs) [help](/help) [bad](JaVaScRiPt:alert(1)) [data](data:text/html,bad)"}
+        text={"<https://example.com/angle> https://example.com/bare [help](/help)"}
       />,
     );
 
-    expect(screen.getByRole("link", { name: "docs" }).getAttribute("href")).toBe("https://example.com/docs");
-    expect(screen.getByRole("link", { name: "docs" }).getAttribute("rel")).toBe("noopener noreferrer");
+    expect(screen.getByRole("link", { name: "https://example.com/angle" }).getAttribute("href"))
+      .toBe("https://example.com/angle");
+    expect(screen.getByRole("link", { name: "https://example.com/bare" }).getAttribute("href"))
+      .toBe("https://example.com/bare");
     expect(screen.getByRole("link", { name: "help" }).getAttribute("href")).toBe("/help");
-    expect(screen.queryByRole("link", { name: "bad" })).toBeNull();
+  });
+
+  it("updates reference links when a later definition changes", () => {
+    const view = render(<MessageContent text={"[docs][ref]\n\n[ref]: /one"} />);
+    expect(screen.getByRole("link", { name: "docs" }).getAttribute("href")).toBe("/one");
+
+    view.rerender(<MessageContent text={"[docs][ref]\n\n[ref]: /two"} />);
+    expect(screen.getByRole("link", { name: "docs" }).getAttribute("href")).toBe("/two");
+  });
+
+  it("rejects unsafe link schemes", () => {
+    const { container } = render(
+      <MessageContent text={"[label](javascript:alert(1)) [data](data:text/html,bad)"} />,
+    );
+
+    expect(screen.queryByRole("link", { name: "label" })).toBeNull();
     expect(screen.queryByRole("link", { name: "data" })).toBeNull();
-    expect(container.textContent).toContain("bad");
+    expect(container.textContent).toContain("label");
     expect(container.textContent).toContain("data");
+  });
+
+  it("renders images as safe links instead of inline images", () => {
+    const { container } = render(<MessageContent text={"![diagram](https://example.com/diagram.png)"} />);
+    expect(screen.getByRole("link", { name: "diagram" }).getAttribute("href"))
+      .toBe("https://example.com/diagram.png");
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("renders four-space nested lists", () => {
+    const { container } = render(<MessageContent text={"- parent\n    - child"} />);
+    expect(container.querySelector("ul ul")?.textContent).toBe("child");
+  });
+
+  it("preserves paragraph blocks inside loose list items", () => {
+    const { container } = render(
+      <MessageContent text={"- first paragraph\n\n  second paragraph\n- next"} />,
+    );
+    expect(container.querySelectorAll("ul")).toHaveLength(1);
+    expect(container.querySelectorAll("ul > li")).toHaveLength(2);
+    const paragraphs = container.querySelectorAll("ul > li:first-child > p");
+    expect(paragraphs).toHaveLength(2);
+    expect(Array.from(paragraphs, (paragraph) => paragraph.textContent)).toEqual([
+      "first paragraph",
+      "second paragraph",
+    ]);
+  });
+
+  it("handles adjacent emphasis markers as nested strong text", () => {
+    const { container } = render(<MessageContent text={"****bold****"} />);
+    expect(container.querySelector("strong strong")?.textContent).toBe("bold");
   });
 
   it("renders raw HTML as escaped text", () => {
@@ -106,15 +203,113 @@ describe("MessageContent", () => {
     expect(container.textContent).toContain("<script>alert(2)</script>");
   });
 
-  it("bounds deeply nested and marker-heavy Markdown", () => {
+  it("handles deeply nested and marker-heavy Markdown through marked", () => {
     const nested = render(<MessageContent text={`${">".repeat(100)} deep quote`} />);
     expect(nested.container.textContent).toContain("deep quote");
-    expect(nested.container.querySelectorAll("blockquote").length).toBeLessThanOrEqual(12);
+    expect(nested.container.querySelectorAll("blockquote")).toHaveLength(100);
     nested.unmount();
 
-    const markers = render(<MessageContent text={"*".repeat(2_000)} />);
-    expect(markers.container.textContent).toHaveLength(2_000);
-    expect(markers.container.querySelector("strong, em")).toBeNull();
+    const markerHeavy = Array.from({ length: 160 }, (_, index) => `**word${index}**`).join(" ");
+    const markers = render(<MessageContent text={markerHeavy} />);
+    expect(markers.container.querySelectorAll("strong")).toHaveLength(160);
+    expect(markers.container.textContent).toContain("word159");
+  });
+
+  it("renders display math delimiters as Unicode blocks", () => {
+    const { container } = render(
+      <MessageContent
+        text={"Intro:\n\n\\[\ny_t = \\sum_{k=0}^{W-1} w_k \\odot x_{t-k}\n\\]\n\n$$\nE = mc^2\n$$"}
+      />,
+    );
+    const blocks = container.querySelectorAll(".markdown-math-block");
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].textContent).toBe("yₜ = ∑ₖ₌₀ᵂ⁻¹ wₖ ⊙ xₜ₋ₖ");
+    expect(blocks[1].textContent).toBe("E = mc²");
+    expect(container.textContent).not.toContain("\\sum");
+  });
+
+  it("renders inline math without treating dollar amounts as formulas", () => {
+    const { container } = render(
+      <MessageContent
+        text={"weights \\(w_k\\) and $x_i \\cdot y$; between $5 and $10 total; prices $5,$10 listed"}
+      />,
+    );
+    const inline = container.querySelectorAll(".markdown-math-inline");
+    expect(inline).toHaveLength(2);
+    expect(Array.from(inline, (node) => node.textContent)).toEqual(["wₖ", "xᵢ · y"]);
+    expect(container.textContent).toContain("between $5 and $10 total");
+    expect(container.textContent).toContain("prices $5,$10 listed");
+  });
+
+  it("keeps unterminated display math plain until it closes", () => {
+    const view = render(<MessageContent text={"$$\ny_t = \\sum"} />);
+    expect(view.container.querySelector(".markdown-math-block")).toBeNull();
+    expect(view.container.textContent).toContain("$$");
+    expect(view.container.textContent).toContain("\\sum");
+
+    view.rerender(<MessageContent text={"$$\ny_t = \\sum_{k=1}^{n} k\n$$"} />);
+    expect(view.container.querySelector(".markdown-math-block")?.textContent).toBe("yₜ = ∑ₖ₌₁ⁿ k");
+    expect(view.container.textContent).not.toContain("\\sum");
+  });
+
+  it("renders inline and display math inside list items", () => {
+    const { container } = render(
+      <MessageContent
+        text={"- gradient \\(\\nabla_\\theta J\\) step\n- energy:\n\n  $$\n  E = mc^2\n  $$"}
+      />,
+    );
+    expect(container.querySelector("ul")?.textContent).toContain("gradient ∇_θ J step");
+    expect(container.querySelector("ul .markdown-math-block")?.textContent).toBe("E = mc²");
+  });
+
+  it("renders display math inside an ordered loose list", () => {
+    const { container } = render(
+      <MessageContent
+        text={"1. The sum:\n\n   \\[\n   \\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\n   \\]\n\n2. Next item"}
+      />,
+    );
+    expect(container.querySelectorAll("ol")).toHaveLength(1);
+    expect(container.querySelectorAll("ol > li")).toHaveLength(2);
+    expect(container.querySelector("ol .markdown-math-block")?.textContent).toBe("∑ₖ₌₁ⁿ k = (n(n+1))/2");
+    expect(container.textContent).toContain("Next item");
+  });
+
+  it("recognizes four-space-indented and CRLF display math", () => {
+    const { container } = render(
+      <MessageContent text={"    \\[\r\n    E = mc^2\r\n    \\]\r\n"} />,
+    );
+    expect(container.querySelector(".markdown-math-block")?.textContent).toBe("E = mc²");
+    expect(container.querySelector("figure.code-block")).toBeNull();
+  });
+
+  it("keeps ordinary four-space-indented text as code", () => {
+    const { container } = render(
+      <MessageContent text={"Code:\n\n    const x = 1;\n    return x;"} />,
+    );
+    expect(container.querySelector("figure.code-block")?.textContent).toContain("const x = 1;");
+    expect(container.querySelector(".markdown-math-block, .markdown-math-inline")).toBeNull();
+  });
+
+  it("leaves math delimiters inside code untouched", () => {
+    const { container } = render(
+      <MessageContent text={"run `$x_i$` now\n\n```latex\n\\[\nE = mc^2\n\\]\n```"} />,
+    );
+    expect(container.querySelector(".inline-code")?.textContent).toBe("$x_i$");
+    expect(container.querySelector("figure.code-block")?.textContent).toContain("E = mc^2");
+    expect(container.querySelector(".markdown-math-block, .markdown-math-inline")).toBeNull();
+  });
+
+  it("joins multiline inline math with spaces", () => {
+    const { container } = render(<MessageContent text={"a \\(x +\ny\\) b"} />);
+    expect(container.querySelector(".markdown-math-inline")?.textContent).toBe("x + y");
+    expect(container.textContent).toBe("a x + y b");
+  });
+
+  it("renders JSON as prose instead of an automatic code block", () => {
+    const text = '{"type":"tool"}';
+    const { container } = render(<MessageContent text={text} />);
+    expect(container.querySelector("p")?.textContent).toBe(text);
+    expect(container.querySelector("figure.code-block")).toBeNull();
   });
 
   it("renders a copy button for complete code blocks", async () => {

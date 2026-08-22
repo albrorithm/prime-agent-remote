@@ -1,7 +1,21 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import type { AgentSummary, TranscriptMessage } from "../../protocol";
-import { countUnseen, deriveAgentLineage, TranscriptEntry } from "./TranscriptPanel";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
+import type { useGateway } from "../gateway-store";
+import { countUnseen, deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
+
+type GatewayMockState = Pick<
+  ReturnType<typeof useGateway>,
+  "catalog" | "selectedAgent" | "selectedSnapshot" | "pendingMessages" | "selectAgent"
+>;
+
+const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }));
+
+vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock.state }));
+vi.mock("./MessageContent", () => ({ MessageContent: ({ text }: { text: string }) => <p>{text}</p> }));
+vi.mock("./Composer", () => ({ Composer: () => <div /> }));
+vi.mock("./GoalStrip", () => ({ GoalStrip: () => <div /> }));
+vi.mock("./AttentionCard", () => ({ AttentionCard: () => <div /> }));
 
 function agent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -103,5 +117,111 @@ describe("compact transcript entries", () => {
     const image = screen.getByRole("img", { name: "Attached image 1" });
     expect(image).toHaveAttribute("src", "/api/v1/attachments/image_safe");
     expect(image).toHaveAttribute("loading", "lazy");
+  });
+});
+
+describe("agent switching resets scroll state", () => {
+  function messages(count: number, prefix: string): TranscriptMessage[] {
+    return Array.from({ length: count }, (_, index) => ({
+      id: `${prefix}-${index}`,
+      role: "assistant",
+      text: `${prefix} message ${index}`,
+      state: "complete",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+  }
+
+  function gatewayState(
+    agentId: string,
+    snapshotMessages: TranscriptMessage[] | null,
+    attention: AttentionRequest[] = [],
+  ) {
+    const selectedAgent = agent(agentId, null, 0);
+    const snapshot: AgentSnapshot | null = snapshotMessages
+      ? {
+          revision: 1,
+          agentId,
+          messages: snapshotMessages,
+          activity: [],
+          attention,
+        }
+      : null;
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [selectedAgent] },
+      selectedAgent,
+      selectedSnapshot: snapshot,
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+  }
+
+  function constrainScroll(element: HTMLElement) {
+    Object.defineProperty(element, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(element, "clientHeight", { configurable: true, value: 400 });
+  }
+
+  it("scrolls to bottom and clears unseen when the selected agent changes", () => {
+    gatewayState("agent-a", messages(3, "a"));
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const scroller = document.querySelector(".transcript-scroll") as HTMLElement;
+    expect(scroller).not.toBeNull();
+
+    // Simulate being scrolled away from the bottom of agent A's transcript.
+    constrainScroll(scroller);
+    scroller.scrollTop = 100;
+    fireEvent.scroll(scroller);
+
+    // New messages for agent A while not following produce an unseen badge.
+    gatewayState("agent-a", messages(6, "a"));
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("button", { name: /Latest/ })).toBeInTheDocument();
+
+    // Switching to agent B (with a longer transcript) must reset following.
+    gatewayState("agent-b", messages(12, "b"));
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.queryByRole("button", { name: /Latest/ })).not.toBeInTheDocument();
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+
+    // Follow mode sticks: further messages keep the view pinned to bottom.
+    gatewayState("agent-b", messages(15, "b"));
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.queryByRole("button", { name: /Latest/ })).not.toBeInTheDocument();
+  });
+
+  it("does not vibrate for attention that already exists in a newly selected session", () => {
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: vibrate });
+
+    gatewayState("agent-a", messages(1, "a"));
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(vibrate).not.toHaveBeenCalled();
+
+    const existingAttention: AttentionRequest[] = [{
+      id: "att-1",
+      agentId: "agent-b",
+      kind: "question",
+      title: "Needs input",
+      revision: 1,
+      options: [{ id: "ok", label: "OK", tone: "default" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }];
+    // Selection changes before an uncached snapshot finishes loading.
+    gatewayState("agent-b", null);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(vibrate).not.toHaveBeenCalled();
+
+    gatewayState("agent-b", messages(2, "b"), existingAttention);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(vibrate).not.toHaveBeenCalled();
+
+    gatewayState("agent-b", messages(2, "b"), [
+      ...existingAttention,
+      { ...existingAttention[0], id: "att-2", revision: 2 },
+    ]);
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(vibrate).toHaveBeenCalledWith(30);
+
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: undefined });
   });
 });

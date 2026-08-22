@@ -9,5 +9,6 @@ coverage/
 .research/
 .analysis-repos/
 .audit-source/
+.ui-harness/
 *.log
 /start-live.local.sh
