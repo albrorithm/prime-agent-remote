@@ -21,6 +21,7 @@
   --radius: 14px;
   --drawer-width: min(88vw, 352px);
   --header-height: 54px;
+  --composer-safe-bottom: max(9px, env(safe-area-inset-bottom, 0px));
 }
 
 * { box-sizing: border-box; }
@@ -246,7 +247,7 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 .goal-progress > div { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 99px; background: #292929; }
 .goal-progress > div > span { display: block; height: 100%; background: #fff; }
 
-.composer { position: relative; display: grid; grid-template-columns: 40px minmax(0,1fr) 44px; flex: 0 0 auto; align-items: end; gap: 7px; padding: 9px 10px max(9px, env(safe-area-inset-bottom)); border-top: 1px solid #171717; background: rgba(0,0,0,.94); backdrop-filter: blur(18px); }
+.composer { position: relative; display: grid; grid-template-columns: 40px minmax(0,1fr) 44px; flex: 0 0 auto; align-items: end; gap: 7px; padding: 9px 10px max(9px, var(--composer-safe-bottom)); border-top: 1px solid #171717; background: rgba(0,0,0,.94); backdrop-filter: blur(18px); }
 .composer-options-trigger { display: grid; width: 40px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: var(--muted); background: transparent; }
 .composer-options-trigger:hover, .composer-options-trigger[aria-expanded="true"] { color: #fff; background: #171717; }
 .composer-options-trigger svg { width: 19px; height: 19px; }
@@ -336,7 +337,7 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 
 @media (max-width: 720px) and (display-mode: fullscreen),
   (max-width: 720px) and (display-mode: standalone) {
-  .composer { padding-bottom: max(28px, env(safe-area-inset-bottom)); }
+  :root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }
 }
 
 @media (max-width: 380px) {

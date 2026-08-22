@@ -7,6 +7,7 @@ import { Login } from "./components/Login";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useGateway } from "./gateway-store";
 import { useDrawerGesture } from "./hooks/useDrawerGesture";
+import { useInstalledViewportRecovery } from "./hooks/useInstalledViewportRecovery";
 
 const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 const HINT_KEY = "prime-web-gesture-hint";
@@ -45,6 +46,7 @@ function GestureHint() {
 }
 
 export function App() {
+  useInstalledViewportRecovery();
   const gateway = useGateway();
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);

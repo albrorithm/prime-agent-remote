@@ -69,7 +69,8 @@ describe("PWA assets", () => {
     expect(appShell).toContain("inset: 0");
     expect(appShell).not.toMatch(/100(?:s|d|l)?vh/);
     expect(body).not.toMatch(/100(?:s|d|l)?vh/);
-    expect(styles).toContain(".composer { padding-bottom: max(28px, env(safe-area-inset-bottom)); }");
+    expect(styles).toContain(":root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }");
+    expect(styles).toContain("padding: 9px 10px max(9px, var(--composer-safe-bottom))");
   });
 
   it("keeps API data out of the offline shell cache", async () => {
