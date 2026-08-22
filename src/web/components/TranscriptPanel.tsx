@@ -93,9 +93,7 @@ export function TranscriptEntry({
     return (
       <div className={`timeline-row thinking ${message.state}`} role="note" aria-label={`Thinking: ${message.text}`}>
         <Brain aria-hidden="true" />
-        <strong>Thinking…</strong>
-        <span className="timeline-separator" aria-hidden="true">·</span>
-        <span className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></span>
+        <strong className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></strong>
       </div>
     );
   }

@@ -96,7 +96,10 @@ describe("compact transcript entries", () => {
       </>,
     );
 
-    expect(screen.getByLabelText("Thinking: Planning focused checks")).toBeInTheDocument();
+    const thinking = screen.getByLabelText("Thinking: Planning focused checks");
+    expect(thinking).toBeInTheDocument();
+    expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
+    expect(screen.getByText("Planning focused checks")).toMatchObject({ tagName: "STRONG" });
     expect(screen.getByLabelText("bash tool complete: npm test, ↑ 2 ↓ 12 lines · 1.2s")).toBeInTheDocument();
   });
 

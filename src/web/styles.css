@@ -146,7 +146,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .timeline-row code.timeline-preview { padding: 0; background: transparent; font: inherit; }
 .timeline-row .timeline-meta { flex: 0 1 auto; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .timeline-row.thinking { color: #8d8d96; }
-.timeline-row.thinking .timeline-preview { color: #a8a8b0; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.timeline-row.thinking .timeline-preview { color: #c3c3ca; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-weight: 700; }
 .timeline-row.tool.complete > svg { color: #83b88a; }
 .timeline-row.tool.running > svg { color: #d8d8d8; }
 .timeline-row.tool.waiting > svg, .timeline-row.tool.unknown > svg { color: var(--muted); }
