@@ -42,6 +42,14 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 
 Session creation is a mutation too: `POST /api/v1/sessions` with `{ requestId, cwd, name? }` creates a daemon session with `cwd` as its working directory and returns the new agent id. `GET /api/v1/directories?path=…` is the read-only companion used by the picker: it returns one directory level as `{ path, home, crumbs, entries, truncated }` where every entry carries an absolute path and clients never join path segments themselves.
 
+### Session slash commands
+
+`POST /api/v1/agents/:id/commands` accepts `{ requestId, expectedRevision, name, args }`. `name` is restricted to `compact`, `refine`, `goal`, or `autonomous`, and `args` is a bounded single-line string. The gateway reconstructs the command and calls Prime through the normal session-input admission path. It never accepts raw command text or daemon command objects.
+
+These four commands are owned by the Prime session and work without terminal UI. Client-only commands such as `/model`, `/settings`, `/login`, `/export`, and `/quit` are not forwarded as prompts. Unknown or multiline slash input is rejected in the composer instead of becoming a model turn.
+
+Command mutations use the same authentication, CSRF, revision, idempotency, and rate-limit checks as message sends. They do not create optimistic transcript bubbles. During a rolling local upgrade, a browser that receives a route-level 404 may reconstruct one of the same four enum-validated commands through the existing message route; the strict endpoint is used after the gateway restarts. Authoritative command and result rows arrive through the agent stream.
+
 ### Image messages
 
 `POST /api/v1/agents/:id/messages` accepts `text` plus up to three `images`. Each image is exactly `{ type: "image", mimeType, data }`, where `mimeType` is JPEG, PNG, or WebP and `data` is canonical base64. Either text or at least one image is required. The gateway validates count, per-image size, total size, canonical encoding, and MIME signature before calling Prime Agent's native image prompt API.

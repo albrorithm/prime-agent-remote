@@ -118,6 +118,43 @@ try {
     body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: snapshot.revision, text: "Smoke test" }),
   });
   if (message.status !== 202) throw new Error(`Message admission failed: ${message.status} ${await message.text()}`);
+  const messageBody = await message.json();
+  const commandPath = `${origin}/api/v1/agents/${encodeURIComponent(agentId)}/commands`;
+  const commandRequest = {
+    requestId: crypto.randomUUID(),
+    expectedRevision: messageBody.revision,
+    name: "goal",
+    args: "status",
+  };
+  const commandWithoutCsrf = await fetch(commandPath, {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify(commandRequest),
+  });
+  if (commandWithoutCsrf.status !== 403) throw new Error(`Expected command CSRF rejection, got ${commandWithoutCsrf.status}`);
+
+  const commandHeaders = {
+    Origin: origin,
+    Cookie: cookie,
+    "Content-Type": "application/json",
+    "X-CSRF-Token": pairBody.csrfToken,
+  };
+  const command = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify(commandRequest),
+  });
+  if (command.status !== 202) throw new Error(`Command admission failed: ${command.status} ${await command.text()}`);
+  const commandBody = await command.json();
+  const duplicate = await fetch(commandPath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify(commandRequest),
+  });
+  const duplicateBody = await json(duplicate);
+  if (duplicate.status !== 202 || duplicateBody.requestId !== commandBody.requestId) {
+    throw new Error("Command idempotency failed");
+  }
 
   console.log("Gateway smoke test passed");
 } finally {

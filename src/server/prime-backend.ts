@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
-import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
+import { MAX_IMAGE_REQUEST_BASE64_CHARS, SESSION_SLASH_COMMAND_NAMES } from "../protocol.js";
 import type {
   ActivityItem,
   AgentCapabilities,
@@ -30,6 +30,7 @@ import {
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
+  type ExecuteSessionSlashCommandInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -226,6 +227,18 @@ function messageText(message: unknown): string {
 
 type PrimeRecord = Record<string, unknown>;
 
+const SESSION_SLASH_COMMAND_NAME_SET: ReadonlySet<string> = new Set(SESSION_SLASH_COMMAND_NAMES);
+
+function sessionSlashCommand(record: PrimeRecord): { name: string; text: string } | undefined {
+  const details = primeRecord(record.details);
+  const command = primeRecord(details?.command);
+  const name = command?.name;
+  const text = command?.text;
+  if (typeof name !== "string" || !SESSION_SLASH_COMMAND_NAME_SET.has(name) || typeof text !== "string") return undefined;
+  if (!text.startsWith(`/${name}`) || /[\r\n\u2028\u2029]/u.test(text)) return undefined;
+  return { name, text: text.slice(0, 4_100) };
+}
+
 function primeRecord(value: unknown): PrimeRecord | undefined {
   return value && typeof value === "object" ? value as PrimeRecord : undefined;
 }
@@ -313,6 +326,28 @@ function projectMessage(
     }];
   }
   if (rawRole === "custom" && record.display !== true) return [];
+  if (rawRole === "custom") {
+    const command = sessionSlashCommand(record);
+    if (record.customType === "session_slash_command" && command && messageText(record) === command.text) {
+      const item = plainMessage(record, index, "user", command.text, streaming, "session-command");
+      return item ? [item] : [];
+    }
+    if (record.customType === "session_slash_command_result" && command) {
+      const details = primeRecord(record.details);
+      const success = details?.success === true;
+      const content = success ? messageText(record).slice(0, 4_000) : `/${command.name} failed.`;
+      const item = plainMessage(
+        record,
+        index,
+        "system",
+        content.trim() || `/${command.name} completed.`,
+        streaming,
+        "session-command-result",
+      );
+      if (item && !success) item.state = "failed";
+      return item ? [item] : [];
+    }
+  }
 
   if (rawRole === "assistant" && Array.isArray(record.content)) {
     const entries: TranscriptMessage[] = [];
@@ -637,6 +672,7 @@ export class PrimeBackend implements AgentBackend {
     const snapshot = this.requiredSnapshot(input.agentId);
     if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
     const summary = this.rawSummaries.get(input.agentId);
+    if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
     if (input.images.length > 0 && summary?.model?.input?.includes("image") !== true) {
       throw new BackendCapabilityError("This model does not accept image attachments");
     }
@@ -652,6 +688,22 @@ export class PrimeBackend implements AgentBackend {
       throw new Error("Prime prompt failed");
     }
     for (const image of input.images) this.cacheImage(image);
+    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async executeSessionSlashCommand(input: ExecuteSessionSlashCommandInput): Promise<MutationAccepted> {
+    const record = await this.requiredConnection(input.agentId);
+    const snapshot = this.requiredSnapshot(input.agentId);
+    if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+    const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+    try {
+      await record.connection.prompt(command, {
+        queueIfBusy: true,
+        streamingBehavior: "followUp",
+      });
+    } catch {
+      throw new Error("Prime command failed");
+    }
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 

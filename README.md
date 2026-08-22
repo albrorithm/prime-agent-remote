@@ -13,6 +13,7 @@ A mobile-first, first-party web interface for Prime Agent. It keeps the daemon o
 - Optimistic send bubbles that reconcile against the server echo.
 - JPEG, PNG, and WebP attachments for image-capable models, with client-side resizing and authenticated transcript thumbnails.
 - Quick replies and per-agent drafts that survive reloads.
+- Autocomplete and strict execution for `/compact`, `/refine`, `/goal`, and `/autonomous` session commands.
 - Approval and question cards.
 - Authenticated HTTP mutations and WebSocket events.
 - Starting new sessions: pick a working directory with the in-app browser and name the session.

@@ -20,6 +20,7 @@ import type {
   StreamCursor,
   TranscriptMessage,
   MutationAccepted,
+  SessionSlashCommandName,
 } from "../protocol";
 import { PROTOCOL_VERSION } from "../protocol";
 import * as api from "./api";
@@ -247,6 +248,7 @@ interface GatewayContextValue extends State {
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string) => Promise<string>;
   send: (text: string, images?: PreparedImage[], requestId?: string) => Promise<void>;
+  runSlashCommand: (name: SessionSlashCommandName, args: string, requestId?: string) => Promise<void>;
   abort: (agentId?: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   reconnect: () => void;
@@ -543,6 +545,26 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [runMutation, showError],
   );
 
+  const runSlashCommand = useCallback(
+    async (name: SessionSlashCommandName, args: string, requestId: string = crypto.randomUUID()) => {
+      const current = stateRef.current;
+      const id = current.selectedAgentId;
+      if (!id || !current.snapshots[id]) throw new Error("No agent selected");
+      try {
+        const result = await runMutation(
+          id,
+          (revision) => api.executeSessionSlashCommand(id, current.csrfToken, revision, name, args, requestId),
+        );
+        dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
+        showError(null);
+      } catch (error) {
+        showError(error instanceof Error ? error.message : "Command failed");
+        throw error;
+      }
+    },
+    [runMutation, showError],
+  );
+
   const abort = useCallback(async (agentId?: string) => {
     const current = stateRef.current;
     const id = agentId ?? current.selectedAgentId;
@@ -599,11 +621,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       selectAgent,
       createSession,
       send,
+      runSlashCommand,
       abort,
       respond,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, abort, respond, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, runSlashCommand, abort, respond, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

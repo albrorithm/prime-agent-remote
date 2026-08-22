@@ -6,6 +6,9 @@ export type AgentLifecycle = "starting" | "live" | "inactive" | "stopped" | "fai
 export type AgentActivityState = "working" | "idle" | "blocked";
 export type AttentionKind = "approval" | "question" | "error";
 
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
+export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
+
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 export const MAX_IMAGE_ATTACHMENTS = 3;
 export const MAX_IMAGE_BASE64_CHARS = Math.floor(4.5 * 1024 * 1024);
@@ -234,7 +237,19 @@ export const sendMessageRequestSchema = z.object({
   if (!value.text && value.images.length === 0) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "A message or image is required" });
   }
+  if (value.text.startsWith("/")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Slash commands use the command endpoint" });
+  }
 });
+
+export const executeSessionSlashCommandRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+  name: z.enum(SESSION_SLASH_COMMAND_NAMES),
+  args: z.string().trim().max(4_000).refine((value) => !/[\r\n\u2028\u2029]/u.test(value), "Command arguments must be one line"),
+}).strict();
+
+export type ExecuteSessionSlashCommandRequest = z.infer<typeof executeSessionSlashCommandRequestSchema>;
 
 export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),

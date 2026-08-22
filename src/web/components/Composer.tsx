@@ -11,6 +11,12 @@ import {
 } from "react";
 import { useGateway } from "../gateway-store";
 import { MAX_IMAGE_ATTACHMENTS, prepareImageFile, type PreparedImage } from "../image-attachments";
+import {
+  completeSessionSlashCommand,
+  matchingSessionSlashCommands,
+  parseSessionSlashCommandInput,
+  type SessionSlashCommandOption,
+} from "../slash-commands";
 
 const DRAFTS_KEY = "prime-web-drafts";
 const SUCCESS_PREVIEW_REVOKE_DELAY_MS = 2_000;
@@ -53,7 +59,7 @@ function preparationErrorMessage(error: unknown): string {
 }
 
 export function Composer() {
-  const { selectedAgent, selectedSnapshot, send, abort } = useGateway();
+  const { selectedAgent, selectedSnapshot, send, runSlashCommand, abort } = useGateway();
   const [drafts, setDraftsState] = useState<Record<string, string>>(loadDrafts);
   const [images, setImages] = useState<PreparedImage[]>([]);
   const [preparing, setPreparing] = useState(false);
@@ -61,6 +67,8 @@ export function Composer() {
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [slashCommandIndex, setSlashCommandIndex] = useState(0);
+  const [dismissedSlashDraft, setDismissedSlashDraft] = useState("");
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +85,15 @@ export function Composer() {
   const activeAgentIdRef = useRef(id);
   activeAgentIdRef.current = id;
   const draft = drafts[id] ?? "";
+  const commandDraft = draft.trimStart().startsWith("/");
+  const slashCommands = matchingSessionSlashCommands(draft);
+  const slashMenuOpen = slashCommands.length > 0
+    && dismissedSlashDraft !== draft
+    && !optionsOpen
+    && !sending
+    && Boolean(selectedAgent?.capabilities.send);
+  const activeSlashCommandIndex = slashCommands.length > 0 ? Math.min(slashCommandIndex, slashCommands.length - 1) : 0;
+  const activeSlashCommand = slashCommands[activeSlashCommandIndex];
   const streaming = selectedSnapshot?.messages.some((message) => message.state === "streaming") ?? false;
   const canAttachImages = Boolean(selectedAgent?.capabilities.send && selectedAgent.capabilities.images);
   const visibleImages = imageOwnerRef.current === id ? images : [];
@@ -137,6 +154,8 @@ export function Composer() {
     setSending(false);
     setStopping(false);
     setOptionsOpen(false);
+    setSlashCommandIndex(0);
+    setDismissedSlashDraft("");
     setAttachmentStatus("");
     if (imageInputRef.current) imageInputRef.current.value = "";
     clearImages();
@@ -177,6 +196,10 @@ export function Composer() {
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
   }, [optionsOpen]);
+
+  useEffect(() => {
+    setSlashCommandIndex(0);
+  }, [draft]);
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -315,6 +338,15 @@ export function Composer() {
     const selectedImages = imageOwnerRef.current === id ? imagesRef.current : [];
     if (!id || !selectedAgent?.capabilities.send || (selectedImages.length > 0 && !canAttachImages) || (!text && !selectedImages.length)) return;
     if (submittingRef.current || preparingRef.current) return;
+    const slashCommand = text.startsWith("/") ? parseSessionSlashCommandInput(text) : null;
+    if (text.startsWith("/") && !slashCommand) {
+      setAttachmentStatus("Unknown or invalid session command.");
+      return;
+    }
+    if (slashCommand && selectedImages.length > 0) {
+      setAttachmentStatus("Remove image attachments before running a command.");
+      return;
+    }
 
     const agentId = id;
     const fingerprint = JSON.stringify([agentId, text, ...selectedImages.map((image) => image.previewUrl)]);
@@ -327,7 +359,8 @@ export function Composer() {
     setSending(true);
     setOptionsOpen(false);
     try {
-      if (selectedImages.length) await send(text, selectedImages, requestId);
+      if (slashCommand) await runSlashCommand(slashCommand.name, slashCommand.args, requestId);
+      else if (selectedImages.length) await send(text, selectedImages, requestId);
       else await send(text, undefined, requestId);
       if (activeAgentIdRef.current === agentId && submissionVersion === submissionVersionRef.current) {
         setDrafts((current) => ({ ...current, [agentId]: "" }));
@@ -360,12 +393,46 @@ export function Composer() {
     }
   }
 
+  function selectSlashCommand(command: SessionSlashCommandOption) {
+    setDrafts((current) => ({ ...current, [id]: completeSessionSlashCommand(command) }));
+    setSlashCommandIndex(0);
+    setDismissedSlashDraft("");
+    queueMicrotask(() => textareaRef.current?.focus());
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
+    if (commandDraft && event.key === "Enter" && event.shiftKey) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Escape" && optionsOpen) {
       event.preventDefault();
       setOptionsOpen(false);
       return;
+    }
+    if (event.key === "Escape" && slashMenuOpen) {
+      event.preventDefault();
+      setDismissedSlashDraft(draft);
+      return;
+    }
+    if (slashMenuOpen && activeSlashCommand) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setSlashCommandIndex((current) => (current + direction + slashCommands.length) % slashCommands.length);
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        selectSlashCommand(activeSlashCommand);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey && draft !== `/${activeSlashCommand.name}`) {
+        event.preventDefault();
+        selectSlashCommand(activeSlashCommand);
+        return;
+      }
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -376,6 +443,7 @@ export function Composer() {
   function startSlashCommand() {
     setDrafts((current) => ({ ...current, [id]: current[id]?.trim() ? current[id] : "/" }));
     setOptionsOpen(false);
+    setDismissedSlashDraft("");
     queueMicrotask(() => textareaRef.current?.focus());
   }
 
@@ -392,6 +460,23 @@ export function Composer() {
         disabled={!canAttachImages || preparing || sending}
         onChange={onImageSelection}
       />
+      {slashMenuOpen && (
+        <div className="slash-command-menu" id="slash-command-options" role="listbox" aria-label="Session commands">
+          {slashCommands.map((command, index) => (
+            <button
+              key={command.name}
+              id={`slash-command-${command.name}`}
+              type="button"
+              role="option"
+              aria-selected={index === activeSlashCommandIndex}
+              onClick={() => selectSlashCommand(command)}
+            >
+              <span><strong>/{command.name}</strong><code>{command.argumentHint}</code></span>
+              <small>{command.description}</small>
+            </button>
+          ))}
+        </div>
+      )}
       {optionsOpen && (
         <div className="composer-menu" id="composer-options" role="menu" aria-label="Composer options">
           <button role="menuitem" onClick={startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a Prime command</small></span></button>
@@ -435,6 +520,9 @@ export function Composer() {
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           rows={1}
+          aria-autocomplete="list"
+          aria-controls={slashMenuOpen ? "slash-command-options" : undefined}
+          aria-activedescendant={slashMenuOpen && activeSlashCommand ? `slash-command-${activeSlashCommand.name}` : undefined}
           placeholder="Send a message"
           disabled={!selectedAgent.capabilities.send}
         />
@@ -447,7 +535,7 @@ export function Composer() {
           className="composer-action send"
           onClick={() => void submit()}
           disabled={!selectedAgent.capabilities.send || (!draft.trim() && !visibleImages.length) || preparing || sending}
-          aria-label="Send message"
+          aria-label={commandDraft ? "Run command" : "Send message"}
         ><Send /></button>
       )}
     </div>

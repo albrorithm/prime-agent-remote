@@ -21,6 +21,7 @@ import {
   type AbortInput,
   type AgentBackend,
   type CreateSessionInput,
+  type ExecuteSessionSlashCommandInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -206,6 +207,7 @@ export class DemoBackend implements AgentBackend {
     const snapshot = this.requiredSnapshot(input.agentId);
     const summary = this.requiredSummary(input.agentId);
     if (!summary.capabilities.send) throw new BackendCapabilityError("This agent cannot receive messages");
+    if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
     if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
 
     this.clearTimers(input.agentId);
@@ -256,6 +258,35 @@ export class DemoBackend implements AgentBackend {
     );
     });
     this.timers.set(input.agentId, timers);
+    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async executeSessionSlashCommand(input: ExecuteSessionSlashCommandInput): Promise<MutationAccepted> {
+    const snapshot = this.requiredSnapshot(input.agentId);
+    const summary = this.requiredSummary(input.agentId);
+    if (!summary.capabilities.send) throw new BackendCapabilityError("This agent cannot run commands");
+    if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+
+    const createdAt = new Date().toISOString();
+    const commandText = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+    const commandMessage: TranscriptMessage = {
+      id: input.requestId,
+      role: "user",
+      text: commandText,
+      state: "complete",
+      createdAt,
+    };
+    const resultMessage: TranscriptMessage = {
+      id: randomUUID(),
+      role: "system",
+      text: `/${input.name} accepted.`,
+      state: "complete",
+      createdAt,
+    };
+    snapshot.messages.push(commandMessage, resultMessage);
+    snapshot.revision += 1;
+    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: commandMessage }, snapshot);
+    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_added", payload: resultMessage }, snapshot);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 

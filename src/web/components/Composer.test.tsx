@@ -46,6 +46,7 @@ beforeEach(() => {
     selectedAgent: agent,
     selectedSnapshot: snapshot,
     send: vi.fn().mockResolvedValue(undefined),
+    runSlashCommand: vi.fn().mockResolvedValue(undefined),
     abort: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -103,6 +104,63 @@ describe("Composer", () => {
     await user.click(screen.getByRole("menuitem", { name: /Slash command/ }));
     expect(screen.getByRole("textbox", { name: "Message Agent" })).toHaveValue("/");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("completes and runs a supported session slash command", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+
+    await user.click(screen.getByRole("button", { name: "Composer options" }));
+    await user.click(screen.getByRole("menuitem", { name: /^Slash command/ }));
+    expect(screen.getByRole("listbox", { name: "Session commands" })).toBeInTheDocument();
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    await user.click(screen.getByRole("option", { name: /^\/goal/ }));
+    expect(input).toHaveValue("/goal ");
+
+    await user.type(input, "status");
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand).toHaveBeenCalledWith("goal", "status", expect.any(String)));
+    expect(gatewayMock.current.send).not.toHaveBeenCalled();
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it("keeps a failed command for retry with the same request id", async () => {
+    gatewayMock.current.runSlashCommand = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+
+    await user.type(input, "/goal status");
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue("/goal status");
+    const requestId = (gatewayMock.current.runSlashCommand as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand).toHaveBeenCalledTimes(2));
+    expect((gatewayMock.current.runSlashCommand as ReturnType<typeof vi.fn>).mock.calls[1][2]).toBe(requestId);
+    await waitFor(() => expect(input).toHaveValue(""));
+  });
+
+  it("supports keyboard completion and blocks unknown or multiline commands", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+
+    await user.type(input, "/go");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("/goal ");
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(input).toHaveValue("/goal ");
+    await user.clear(input);
+    await user.type(input, "/model gpt");
+    await user.click(screen.getByRole("button", { name: "Run command" }));
+    expect(gatewayMock.current.runSlashCommand).not.toHaveBeenCalled();
+    expect(gatewayMock.current.send).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent("Unknown or invalid session command.");
   });
 
   it("selects, previews, and removes images without exposing their filenames", async () => {

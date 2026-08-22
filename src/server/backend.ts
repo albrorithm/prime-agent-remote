@@ -6,6 +6,7 @@ import type {
   ImageMimeType,
   MutationAccepted,
   SessionCreated,
+  SessionSlashCommandName,
 } from "../protocol.js";
 import type { EventHub } from "./event-hub.js";
 import type { ValidatedImageAttachment } from "./image-attachments.js";
@@ -16,6 +17,14 @@ export interface SendMessageInput {
   expectedRevision: number;
   text: string;
   images: ValidatedImageAttachment[];
+}
+
+export interface ExecuteSessionSlashCommandInput {
+  agentId: string;
+  requestId: string;
+  expectedRevision: number;
+  name: SessionSlashCommandName;
+  args: string;
 }
 
 export interface AttachmentData {
@@ -62,6 +71,7 @@ export interface AgentBackend {
   catalog(): CatalogSnapshot;
   agentSnapshot(agentId: string): Promise<AgentSnapshot | null>;
   sendMessage(input: SendMessageInput): Promise<MutationAccepted>;
+  executeSessionSlashCommand(input: ExecuteSessionSlashCommandInput): Promise<MutationAccepted>;
   attachment(id: string): AttachmentData | null;
   abort(input: AbortInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;

@@ -6,6 +6,7 @@ import type {
   MutationAccepted,
   ProblemDetails,
   SessionCreated,
+  SessionSlashCommandName,
 } from "../protocol";
 
 export class ApiError extends Error {
@@ -77,6 +78,33 @@ export function sendMessage(
     text,
     images,
   });
+}
+
+export async function executeSessionSlashCommand(
+  agentId: string,
+  csrfToken: string,
+  expectedRevision: number,
+  name: SessionSlashCommandName,
+  args: string,
+  requestId: string = crypto.randomUUID(),
+): Promise<MutationAccepted> {
+  try {
+    return await mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, csrfToken, {
+      requestId,
+      expectedRevision,
+      name,
+      args,
+    });
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404) throw error;
+    const text = `/${name}${args ? ` ${args}` : ""}`;
+    return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/messages`, csrfToken, {
+      requestId,
+      expectedRevision,
+      text,
+      images: [],
+    });
+  }
 }
 
 export function abortAgent(agentId: string, csrfToken: string, expectedRevision: number) {

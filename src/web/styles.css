@@ -259,6 +259,13 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 .composer-menu button > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .composer-menu strong { font-size: 12px; }
 .composer-menu small { color: var(--muted); font-size: 10px; }
+.slash-command-menu { position: absolute; z-index: 13; right: 10px; bottom: calc(100% - 2px); left: 10px; display: grid; max-height: min(292px, 42dvh); gap: 3px; padding: 6px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #333; border-radius: 14px; background: rgba(12,12,12,.98); box-shadow: 0 16px 48px rgba(0,0,0,.72); backdrop-filter: blur(18px); }
+.slash-command-menu button { display: grid; min-height: 54px; gap: 4px; padding: 8px 10px; border: 0; border-radius: 9px; color: #fff; background: transparent; text-align: left; }
+.slash-command-menu button:hover, .slash-command-menu button[aria-selected="true"] { background: #1b1b1b; }
+.slash-command-menu span { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.slash-command-menu strong { font-size: 13px; }
+.slash-command-menu code { overflow: hidden; color: var(--muted); font: 500 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.slash-command-menu small { color: var(--muted); font-size: 11px; }
 .composer-input { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
 .composer-attachments { width: min(100%, 360px); }
 .composer-attachments > div { position: relative; min-width: 0; }

@@ -227,6 +227,41 @@ describe("projectPrimeTranscript", () => {
       presentation: { kind: "tool", label: "python", status: "running" },
     });
   });
+  it("projects session commands as user rows and sanitizes failures", () => {
+    const messages = projectPrimeTranscript([
+      {
+        role: "custom",
+        customType: "session_slash_command",
+        content: "/goal status",
+        display: true,
+        details: { command: { name: "goal", args: "status", text: "/goal status" } },
+        timestamp: 1,
+      },
+      {
+        role: "custom",
+        customType: "session_slash_command_result",
+        content: "Goal active: Ship it",
+        display: true,
+        details: { command: { name: "goal", args: "status", text: "/goal status" }, success: true },
+        timestamp: 2,
+      },
+      {
+        role: "custom",
+        customType: "session_slash_command_result",
+        content: "Command failed: private internal detail",
+        display: true,
+        details: { command: { name: "refine", args: "rollback invalid", text: "/refine rollback invalid" }, success: false },
+        timestamp: 3,
+      },
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: "user", text: "/goal status", state: "complete" },
+      { role: "system", text: "Goal active: Ship it", state: "complete" },
+      { role: "system", text: "/refine failed.", state: "failed" },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("private internal detail");
+  });
 });
 
 describe("PrimeBackend", () => {
@@ -311,6 +346,26 @@ describe("PrimeBackend", () => {
         },
       });
 
+      await backend.executeSessionSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        name: "goal",
+        args: "status",
+      });
+      expect(fixture.prompts[2]).toEqual({
+        message: "/goal status",
+        options: { queueIfBusy: true, streamingBehavior: "followUp" },
+      });
+      await expect(backend.sendMessage({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        text: "/model gpt",
+        images: [],
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(fixture.prompts).toHaveLength(3);
+
       fixture.promptError = new Error("provider detail with sensitive image payload");
       let promptError: unknown;
       try {
@@ -327,6 +382,22 @@ describe("PrimeBackend", () => {
       expect(promptError).toBeInstanceOf(Error);
       expect((promptError as Error).message).toBe("Prime prompt failed");
       expect(JSON.stringify(promptError)).not.toContain("sensitive");
+
+      let commandError: unknown;
+      try {
+        await backend.executeSessionSlashCommand({
+          agentId: summary.id,
+          requestId: crypto.randomUUID(),
+          expectedRevision: snapshot!.revision,
+          name: "refine",
+          args: "private command argument",
+        });
+      } catch (error) {
+        commandError = error;
+      }
+      expect(commandError).toBeInstanceOf(Error);
+      expect((commandError as Error).message).toBe("Prime command failed");
+      expect(JSON.stringify(commandError)).not.toContain("private command argument");
       delete fixture.promptError;
 
       const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void) | null;

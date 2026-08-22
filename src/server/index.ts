@@ -7,6 +7,7 @@ import {
   attentionResponseSchema,
   clientFrameSchema,
   createSessionRequestSchema,
+  executeSessionSlashCommandRequestSchema,
   pairRequestSchema,
   PROTOCOL_VERSION,
   sendMessageRequestSchema,
@@ -211,6 +212,18 @@ async function api(req: IncomingMessage, res: ServerResponse, pathname: string):
     }
     const result = await deduplicated(session, parsed.data.requestId, () =>
       backend.sendMessage({ agentId, ...parsed.data, images }),
+    );
+    json(res, 202, result);
+    return true;
+  }
+
+  const commandMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/commands$/);
+  if (req.method === "POST" && commandMatch) {
+    const agentId = decodeSegment(commandMatch[1]);
+    const parsed = executeSessionSlashCommandRequestSchema.safeParse(await readJson(req));
+    if (!agentId || !parsed.success) { problem(res, 400, "Invalid slash command request"); return true; }
+    const result = await deduplicated(session, parsed.data.requestId, () =>
+      backend.executeSessionSlashCommand({ agentId, ...parsed.data }),
     );
     json(res, 202, result);
     return true;
