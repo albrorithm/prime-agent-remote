@@ -1,11 +1,12 @@
 import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
-import type { AgentSummary, TranscriptMessage } from "../../protocol";
+import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { AttentionCard } from "./AttentionCard";
 import { AgentFamilyPicker } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
+import { ImageViewer } from "./ImageViewer";
 import { MessageContent } from "./MessageContent";
 import { SwitchHapticButton } from "./SwitchHapticButton";
 import { agentStatus } from "./agent-status";
@@ -61,20 +62,34 @@ function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete"
   return <Circle aria-hidden="true" />;
 }
 
+interface TranscriptImageSource {
+  id: string;
+  mimeType: ImageMimeType;
+  src: string;
+}
+
+function imageExtension(mimeType: ImageMimeType): string {
+  if (mimeType === "image/jpeg") return "jpg";
+  if (mimeType === "image/webp") return "webp";
+  return "png";
+}
+
 function TranscriptImage({
   image,
   index,
   onLoad,
 }: {
-  image: { id: string; src: string };
+  image: TranscriptImageSource;
   index: number;
   onLoad?: () => void;
 }) {
   const [unavailable, setUnavailable] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [viewerOpen, setViewerOpen] = useState(false);
   useEffect(() => {
     setUnavailable(false);
     setAttempt(0);
+    setViewerOpen(false);
   }, [image.src]);
   if (unavailable) {
     return (
@@ -89,18 +104,34 @@ function TranscriptImage({
   }
   const separator = image.src.includes("?") ? "&" : "?";
   const src = attempt ? `${image.src}${separator}retry=${attempt}` : image.src;
+  const alt = `Attached image ${index + 1}`;
   return (
-    <a href={image.src} target="_blank" rel="noopener noreferrer" aria-label={`View attached image ${index + 1}`}>
-      <img
-        key={attempt}
-        src={src}
-        alt={`Attached image ${index + 1}`}
-        loading="lazy"
-        decoding="async"
-        onLoad={onLoad}
-        onError={() => setUnavailable(true)}
-      />
-    </a>
+    <>
+      <button
+        className="message-image-trigger"
+        type="button"
+        aria-label={`View attached image ${index + 1}`}
+        onClick={() => setViewerOpen(true)}
+      >
+        <img
+          key={attempt}
+          src={src}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          onLoad={onLoad}
+          onError={() => setUnavailable(true)}
+        />
+      </button>
+      {viewerOpen && (
+        <ImageViewer
+          alt={alt}
+          downloadName={`attached-image-${index + 1}.${imageExtension(image.mimeType)}`}
+          onClose={() => setViewerOpen(false)}
+          src={src}
+        />
+      )}
+    </>
   );
 }
 
@@ -108,7 +139,7 @@ function TranscriptImages({
   images,
   onLoad,
 }: {
-  images: Array<{ id: string; src: string }>;
+  images: TranscriptImageSource[];
   onLoad?: () => void;
 }) {
   if (!images.length) return null;
@@ -168,6 +199,7 @@ export function TranscriptEntry({
           onLoad={onImageLoad}
           images={(message.attachments ?? []).map((attachment) => ({
             id: attachment.id,
+            mimeType: attachment.mimeType,
             src: `/api/v1/attachments/${encodeURIComponent(attachment.id)}`,
           }))}
         />
@@ -446,7 +478,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                         <TranscriptImages
                           onLoad={handleTranscriptImageLoad}
                           images={(message.attachments ?? []).flatMap((attachment, index) => attachment.previewUrl
-                            ? [{ id: `${message.id}:${index}`, src: attachment.previewUrl }]
+                            ? [{ id: `${message.id}:${index}`, mimeType: attachment.mimeType, src: attachment.previewUrl }]
                             : [])}
                         />
                         {message.text && <p>{message.text}</p>}

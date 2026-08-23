@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
@@ -121,6 +121,42 @@ describe("compact transcript entries", () => {
     const image = screen.getByRole("img", { name: "Attached image 1" });
     expect(image).toHaveAttribute("src", "/api/v1/attachments/image_safe");
     expect(image).toHaveAttribute("loading", "lazy");
+  });
+
+  it("opens attachments in an in-app viewer with close and download controls", async () => {
+    const user = userEvent.setup();
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "viewer-image",
+          role: "user",
+          text: "Open this",
+          attachments: [{ id: "viewer_safe", type: "image", mimeType: "image/jpeg" }],
+        }}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "View attached image 1" });
+    await user.click(trigger);
+
+    const dialog = screen.getByRole("dialog", { name: "Attached image 1" });
+    expect(within(dialog).getByRole("img", { name: "Attached image 1 full size" }))
+      .toHaveAttribute("src", "/api/v1/attachments/viewer_safe");
+    expect(within(dialog).getByRole("link", { name: "Download" }))
+      .toHaveAttribute("href", "/api/v1/attachments/viewer_safe");
+    expect(within(dialog).getByRole("link", { name: "Download" }))
+      .toHaveAttribute("download", "attached-image-1.jpg");
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
 
