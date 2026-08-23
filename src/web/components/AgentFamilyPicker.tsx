@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { ChevronDown, ChevronRight, CircleAlert, GitBranch, LoaderCircle, Moon, X } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { AgentSummary } from "../../protocol";
 
@@ -69,7 +69,7 @@ function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
   const rightEdge = Math.max(leftEdge + 1, viewportLeft + viewportWidth - safeArea.right - margin);
   const topEdge = viewportTop + safeArea.top + margin;
   const bottomEdge = Math.max(topEdge + 1, viewportTop + viewportHeight - safeArea.bottom - margin);
-  const width = Math.min(340, rightEdge - leftEdge);
+  const width = Math.min(220, rightEdge - leftEdge);
   const left = Math.min(Math.max(leftEdge, rect.right - width), rightEdge - width);
   const belowTop = Math.max(topEdge, rect.bottom + gap);
   const aboveTop = Math.min(bottomEdge, rect.top - gap);
@@ -80,7 +80,7 @@ function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
     top: placement === "below" ? belowTop : aboveTop,
     left,
     width,
-    maxHeight: Math.max(1, Math.min(420, placement === "below" ? availableBelow : availableAbove)),
+    maxHeight: Math.max(1, Math.min(320, placement === "below" ? availableBelow : availableAbove)),
     placement,
   };
 }
@@ -147,28 +147,8 @@ export function buildVisibleAgentDescendants(
   return visible;
 }
 
-function stateLabel(agent: AgentSummary): string {
-  if (agent.attention) return `Needs ${agent.attention}`;
-  if (agent.lifecycle === "failed") return "Failed";
-  if (agent.lifecycle === "stopped") return "Stopped";
-  if (agent.lifecycle === "inactive") return "Inactive";
-  if (agent.lifecycle === "starting") return "Starting";
-  if (agent.activity === "working") return "Working";
-  if (agent.activity === "blocked") return "Blocked";
-  return "Idle";
-}
-
-function StateIcon({ agent }: { agent: AgentSummary }) {
-  if (agent.attention || agent.lifecycle === "failed") {
-    return <CircleAlert className="family-agent-state attention" aria-hidden="true" />;
-  }
-  if (agent.activity === "working" || agent.lifecycle === "starting") {
-    return <LoaderCircle className="family-agent-state working spin" aria-hidden="true" />;
-  }
-  if (agent.lifecycle === "inactive" || agent.lifecycle === "stopped") {
-    return <Moon className="family-agent-state" aria-hidden="true" />;
-  }
-  return <span className="family-agent-state-dot" aria-hidden="true" />;
+function activityLabel(agent: AgentSummary): "Active" | "Idle" {
+  return agent.activity === "working" || agent.lifecycle === "starting" ? "Active" : "Idle";
 }
 
 const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -187,7 +167,6 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLElement>(null);
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
-  const headingId = useId();
   const menuId = useId();
   const visible = useMemo(
     () => buildVisibleAgentDescendants(agents, selectedAgent.id, expanded),
@@ -354,7 +333,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
             id={menuId}
             ref={menuRef}
             role="dialog"
-            aria-labelledby={headingId}
+            aria-label="Subagents"
             tabIndex={-1}
             data-placement={menuPosition.placement}
             style={{
@@ -366,14 +345,6 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
               transformOrigin: menuPosition.placement === "above" ? "bottom center" : "top center",
             }}
           >
-            <header className="family-picker-header">
-              <div>
-                <p className="eyebrow" title={selectedAgent.name}>{selectedAgent.name}</p>
-                <h2 id={headingId}>Subagents</h2>
-              </div>
-              <span className="family-picker-summary">{countLabel}{workingCount ? ` · ${workingCount} working` : ""}</span>
-              <button className="icon-button" type="button" onClick={() => close(true)} aria-label="Close subagent picker"><X /></button>
-            </header>
             <div className="family-picker-scroll">
               <div className="family-picker-tree" role="tree" aria-label={`Subagents of ${selectedAgent.name}`}>
                 {visible.map((row, index) => {
@@ -390,7 +361,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
                       role="treeitem"
                       aria-level={row.level}
                       aria-expanded={children.length ? isExpanded : undefined}
-                      aria-label={`${row.agent.name}, ${stateLabel(row.agent)}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}`}
+                      aria-label={`${row.agent.name}, ${activityLabel(row.agent)}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}`}
                       tabIndex={focusId === row.agent.id || (!focusId && index === 0) ? 0 : -1}
                       style={{ "--family-depth": row.level - 1 } as CSSProperties}
                       onFocus={() => setFocusId(row.agent.id)}
@@ -411,16 +382,10 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
                           {isExpanded ? <ChevronDown /> : <ChevronRight />}
                         </button>
                       ) : <span className="family-disclosure-space" />}
-                      <StateIcon agent={row.agent} />
                       <span className="family-agent-copy">
-                        <strong>{row.agent.name}</strong>
-                        <small>{stateLabel(row.agent)}</small>
+                        <strong title={row.agent.name}>{row.agent.name}</strong>
+                        <small>{activityLabel(row.agent)}</small>
                       </span>
-                      {row.agent.unreadCount > 0 && (
-                        <span className="family-agent-unread" aria-label={`${row.agent.unreadCount} unread`}>
-                          {row.agent.unreadCount > 99 ? "99+" : row.agent.unreadCount}
-                        </span>
-                      )}
                     </div>
                   );
                 })}

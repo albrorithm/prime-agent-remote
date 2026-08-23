@@ -136,29 +136,19 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .lineage-forward-trigger .lineage-forward-chevron { width: 11px; height: 11px; color: var(--muted-2); }
 .lineage-forward-working { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.08); animation: blink 1.4s ease-in-out infinite; }
 .family-picker-layer { position: fixed; z-index: 70; inset: 0; pointer-events: none; }
-.family-picker-menu { position: fixed; z-index: 1; display: flex; min-height: 0; flex-direction: column; overflow: hidden; pointer-events: auto; border: 1px solid #343434; border-radius: 14px; outline: 0; background: rgba(8,8,8,.98); box-shadow: 0 16px 44px rgba(0,0,0,.76); backdrop-filter: blur(18px); transform-origin: top center; animation: family-menu-in 120ms ease-out; }
+.family-picker-menu { position: fixed; z-index: 1; display: flex; min-height: 0; flex-direction: column; overflow: hidden; pointer-events: auto; border: 1px solid #343434; border-radius: 10px; outline: 0; background: rgba(8,8,8,.98); box-shadow: 0 12px 32px rgba(0,0,0,.72); backdrop-filter: blur(18px); transform-origin: top center; animation: family-menu-in 120ms ease-out; }
 @keyframes family-menu-in { from { opacity: 0; } }
-.family-picker-header { display: flex; min-height: 52px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 5px 6px 5px 12px; border-bottom: 1px solid var(--border); background: #0b0b0b; }
-.family-picker-header > div { min-width: 0; flex: 1; }
-.family-picker-header .eyebrow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.family-picker-header h2 { margin: 1px 0 0; font-size: 15px; line-height: 1.1; }
-.family-picker-summary { min-width: 0; flex: 0 1 auto; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.family-picker-scroll { min-height: 0; flex: 1; padding: 6px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.family-picker-scroll { min-height: 0; flex: 1; padding: 4px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
 .family-picker-tree { width: 100%; min-width: 0; }
-.family-agent-row { --family-depth: 0; display: flex; width: 100%; min-width: 0; min-height: 50px; align-items: center; padding: 3px 8px 3px calc(4px + var(--family-depth) * 15px); border: 1px solid transparent; border-radius: 12px; user-select: none; }
+.family-agent-row { --family-depth: 0; display: flex; width: 100%; min-width: 0; min-height: 46px; align-items: center; padding: 1px 6px 1px calc(3px + var(--family-depth) * 13px); border: 1px solid transparent; border-radius: 7px; user-select: none; }
 .family-agent-row:hover, .family-agent-row:focus { border-color: #292929; background: #141414; }
-.family-disclosure, .family-disclosure-space { display: inline-flex; width: 44px; height: 44px; flex: 0 0 44px; align-items: center; justify-content: center; }
-.family-disclosure { padding: 0; border: 0; color: var(--muted); background: transparent; }
+.family-disclosure { display: inline-flex; width: 40px; height: 44px; flex: 0 0 40px; align-items: center; justify-content: center; padding: 0; border: 0; color: var(--muted); background: transparent; }
+.family-disclosure-space { width: 12px; flex: 0 0 12px; }
 .family-disclosure:hover { color: #fff; }
-.family-disclosure svg { width: 16px; height: 16px; }
-.family-agent-state { width: 15px; height: 15px; flex: 0 0 15px; margin-right: 9px; color: var(--muted-2); }
-.family-agent-state.working { color: #fff; }
-.family-agent-state.attention { color: #fff; filter: drop-shadow(0 0 5px rgba(255,255,255,.35)); }
-.family-agent-state-dot { width: 7px; height: 7px; flex: 0 0 7px; margin: 0 13px 0 4px; border-radius: 50%; background: #555; }
-.family-agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
-.family-agent-copy strong { overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.family-agent-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
-.family-agent-unread { display: grid; min-width: 20px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0 5px; border-radius: 99px; color: #000; background: #fff; font-size: 9px; font-weight: 800; }
+.family-disclosure svg { width: 14px; height: 14px; }
+.family-agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+.family-agent-copy strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.family-agent-copy small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-presence { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #555; }
 .agent-presence.working, .agent-presence.starting { background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.08); animation: blink 1.4s ease-in-out infinite; }
 .agent-presence.attention, .agent-presence.blocked, .agent-presence.failed { background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.2); }
@@ -405,7 +395,6 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
   .agent-lineage button { max-width: 68px; }
   .lineage-forward-label { display: none; }
   .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
-  .family-picker-summary { display: none; }
   .state-pill { display: none; }
 }
 

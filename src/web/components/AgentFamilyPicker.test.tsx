@@ -73,8 +73,9 @@ describe("forward subagent breadcrumb", () => {
     await user.click(trigger);
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("dialog", { name: "Subagents" })).toBeInTheDocument();
-    expect(screen.getByRole("treeitem", { name: /research/ })).toBeInTheDocument();
-    expect(screen.getByRole("treeitem", { name: /review/ })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "research, Active, 1 direct subagent" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "review, Idle" })).toBeInTheDocument();
+    expect(screen.getByText("research")).toHaveAttribute("title", "research");
     expect(screen.queryByRole("treeitem", { name: /example/ })).not.toBeInTheDocument();
 
     const disclosure = screen.getByRole("button", { name: "Expand research subagents" });
