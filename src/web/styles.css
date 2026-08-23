@@ -390,6 +390,27 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
   :root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }
 }
 
+@media (max-width: 1099px) {
+  .agent-lineage h1 { font-size: 16px; }
+  .agent-lineage button { font-size: 14px; }
+  .agent-hierarchy .lineage-forward-trigger { font-size: 13px; }
+  .message-author { font-size: 11px; }
+  .message-author svg { width: 14px; height: 14px; }
+  .message-author time { font-size: 11px; }
+  .message p, .markdown-list { font-size: 16px; line-height: 1.58; }
+  .timeline-row { font-size: 14px; line-height: 1.45; }
+  .timeline-row > svg { width: 16px; height: 16px; flex-basis: 16px; }
+  .markdown-heading-1 { font-size: 22px; }
+  .markdown-heading-2 { font-size: 20px; }
+  .markdown-heading-3 { font-size: 18px; }
+  .markdown-heading-4, .markdown-heading-5, .markdown-heading-6 { font-size: 16px; }
+  .markdown-table { font-size: 14px; }
+  .markdown-math-block code { font-size: 14px; }
+  .code-block-bar { font-size: 10px; }
+  .code-block code { font-size: 13px; }
+  .jump-latest { font-size: 12px; }
+}
+
 @media (max-width: 380px) {
   .agent-lineage h1 { max-width: 34vw; }
   .agent-lineage button { max-width: 68px; }
