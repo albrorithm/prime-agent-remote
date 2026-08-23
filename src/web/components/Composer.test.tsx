@@ -265,7 +265,7 @@ describe("Composer", () => {
 
     await user.type(input, "/dep");
     const detected = await screen.findByRole("option", { name: /deploy.*Experimental extension command/ });
-    expect(input).toHaveAttribute("aria-expanded", "true");
+    expect(input).toHaveAttribute("aria-controls", "slash-command-options");
     expect(input).toHaveAttribute("aria-activedescendant", detected.id);
     expect(detected).toHaveAttribute("aria-disabled", "false");
     expect(detected).toHaveAttribute("data-availability", "experimental");
@@ -479,6 +479,26 @@ describe("Composer", () => {
 
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Could not decode the image file."));
     expect(document.body).not.toHaveTextContent("local-secret.png");
+  });
+
+  it("sends a steering prompt instead of stopping when a streaming composer has content", async () => {
+    gatewayMock.current.selectedSnapshot = {
+      ...snapshot,
+      messages: [{ id: "stream", role: "assistant", text: "Working", state: "streaming", createdAt: "2026-01-01T00:00:00.000Z" }],
+    };
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    expect(screen.getByRole("button", { name: "Stop agent" })).toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "change direction");
+
+    expect(screen.queryByRole("button", { name: "Stop agent" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("change direction", undefined, expect.any(String)));
+    expect(gatewayMock.current.abort).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop agent" })).toBeInTheDocument());
   });
 
   it("prevents duplicate stop requests while one is pending", async () => {

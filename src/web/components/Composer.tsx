@@ -132,6 +132,7 @@ export function Composer() {
   const streaming = selectedSnapshot?.messages.some((message) => message.state === "streaming") ?? false;
   const canAttachImages = Boolean(selectedAgent?.capabilities.send && selectedAgent.capabilities.images);
   const visibleImages = imageOwnerRef.current === id ? images : [];
+  const hasComposerContent = Boolean(draft.trim() || visibleImages.length);
 
   function closeOptions(restoreFocus: boolean) {
     focusOptionsOnOpenRef.current = false;
@@ -719,7 +720,6 @@ export function Composer() {
           rows={1}
           maxLength={MAX_DRAFT_LENGTH}
           aria-autocomplete="list"
-          aria-expanded={slashMenuOpen}
           aria-controls={slashMenuOpen ? "slash-command-options" : undefined}
           aria-activedescendant={slashMenuOpen && activeSlashCommand && selectableSlashIndexes.length ? `slash-command-${activeSlashCommandIndex}` : undefined}
           placeholder={wakeOnSend ? "Send a message to wake" : "Send a message"}
@@ -738,7 +738,7 @@ export function Composer() {
           >EXPERIMENTAL ACCESS</span>
         )}
       </div>
-      {streaming && selectedAgent.capabilities.abort ? (
+      {streaming && selectedAgent.capabilities.abort && !hasComposerContent ? (
         <button className="composer-action stop" onClick={() => void stop()} disabled={stopping} aria-label="Stop agent"><Square /></button>
       ) : (
         <SwitchHapticButton

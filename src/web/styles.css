@@ -329,7 +329,7 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
 .composer textarea:focus { border-color: #777; box-shadow: 0 0 0 2px rgba(255,255,255,.07); }
 .composer textarea::placeholder { color: var(--muted); }
 .composer-action { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid #fff; border-radius: 50%; color: #000; background: #fff; }
-.composer-action.stop { color: #fff; border-color: #555; background: #1b1b1b; }
+.composer-action.stop { color: #000; border-color: #fff; background: #fff; }
 .composer-action svg { width: 17px; height: 17px; }
 
 .agents-panel, .activity-panel { width: 100%; min-width: 0; overflow: hidden; }

@@ -485,7 +485,7 @@ describe("PrimeBackend", () => {
         text: "Hello",
         images: [],
       });
-      expect(fixture.prompts).toEqual([{ message: "Hello", options: { queueIfBusy: true, streamingBehavior: "followUp", images: [] } }]);
+      expect(fixture.prompts).toEqual([{ message: "Hello", options: { queueIfBusy: true, streamingBehavior: "steer", images: [] } }]);
 
       await backend.sendMessage({
         agentId: summary.id,
@@ -502,7 +502,7 @@ describe("PrimeBackend", () => {
         message: "Image attached.",
         options: {
           queueIfBusy: true,
-          streamingBehavior: "followUp",
+          streamingBehavior: "steer",
           images: [{ type: "image", mimeType: "image/jpeg", data: FIXTURE_JPEG_DATA }],
         },
       });
@@ -516,7 +516,7 @@ describe("PrimeBackend", () => {
       });
       expect(fixture.prompts[2]).toEqual({
         message: "/goal status",
-        options: { queueIfBusy: true, streamingBehavior: "followUp" },
+        options: { queueIfBusy: true, streamingBehavior: "steer" },
       });
       await expect(backend.sendMessage({
         agentId: summary.id,
@@ -546,7 +546,7 @@ describe("PrimeBackend", () => {
       expect(experimentalResult.result).toEqual({ kind: "experimental_accepted", source: "extension" });
       expect(fixture.prompts[3]).toEqual({
         message: "/deploy staging",
-        options: { queueIfBusy: true, streamingBehavior: "followUp" },
+        options: { queueIfBusy: true, streamingBehavior: "steer" },
       });
       await expect(backend.executeSlashCommand({
         agentId: summary.id,
@@ -837,7 +837,7 @@ describe("PrimeBackend", () => {
       expect(fixture.creates).toEqual([{ type: "create", sessionPath: "/fixture/saved-session.jsonl" }]);
       expect(fixture.prompts).toEqual([{
         message: "Continue this thread",
-        options: { queueIfBusy: true, streamingBehavior: "followUp", images: [] },
+        options: { queueIfBusy: true, streamingBehavior: "steer", images: [] },
       }]);
       expect(fixture.attachOptions).toMatchObject({
         activeSessionId: expect.stringMatching(/^private-resumed-active-/),

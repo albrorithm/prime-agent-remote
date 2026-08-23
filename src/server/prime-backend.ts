@@ -1033,7 +1033,7 @@ export class PrimeBackend implements AgentBackend {
       try {
         await record.connection.prompt(input.text || "Image attached.", {
           queueIfBusy: true,
-          streamingBehavior: "followUp",
+          streamingBehavior: "steer",
           images,
         });
       } catch {
@@ -1133,7 +1133,7 @@ export class PrimeBackend implements AgentBackend {
     if (SESSION_SLASH_COMMAND_NAME_SET.has(input.name)) {
       const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
       try {
-        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "followUp" });
+        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
       } catch {
         throw new Error("Prime command failed");
       }
@@ -1162,7 +1162,7 @@ export class PrimeBackend implements AgentBackend {
       }
       const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
       try {
-        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "followUp" });
+        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
       } catch {
         throw new Error("Prime experimental command failed");
       }
