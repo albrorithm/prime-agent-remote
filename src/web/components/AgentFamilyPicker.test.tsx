@@ -2,11 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
-import {
-  AgentFamilyPicker,
-  buildVisibleAgentDescendants,
-  collectAgentDescendants,
-} from "./AgentFamilyPicker";
+import { AgentFamilyPicker } from "./AgentFamilyPicker";
 
 function agent(id: string, parentId: string | null, depth: number, overrides: Partial<AgentSummary> = {}): AgentSummary {
   return {
@@ -35,25 +31,6 @@ const agents = [
   agent("unrelated", null, 0),
   agent("other-child", "unrelated", 1),
 ];
-
-describe("agent family indexing", () => {
-  it("collects all descendants without including unrelated agents", () => {
-    expect(collectAgentDescendants(agents, "root").map((item) => item.id))
-      .toEqual(["research", "example", "review"]);
-  });
-
-  it("shows direct children first and reveals only expanded branches", () => {
-    expect(buildVisibleAgentDescendants(agents, "root", new Set()).map((row) => [row.agent.id, row.level]))
-      .toEqual([["research", 1], ["review", 1]]);
-    expect(buildVisibleAgentDescendants(agents, "root", new Set(["research"])).map((row) => [row.agent.id, row.level]))
-      .toEqual([["research", 1], ["example", 2], ["review", 1]]);
-  });
-
-  it("stops safely when malformed relationships form a cycle", () => {
-    const malformed = [agent("root", "child", 0), agent("child", "root", 1)];
-    expect(collectAgentDescendants(malformed, "root").map((item) => item.id)).toEqual(["child"]);
-  });
-});
 
 describe("forward subagent breadcrumb", () => {
   it("opens a tree, expands without navigating, and selects a descendant", async () => {

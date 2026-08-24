@@ -105,6 +105,12 @@ interface State {
   backend: "demo" | "prime" | null;
   catalog: CatalogSnapshot;
   snapshots: Record<string, AgentSnapshot>;
+  // Agent ids whose stream was explicitly declared gone (a "stream_gone" detach).
+  // Distinct from "no snapshot yet": a late HTTP response for one of these must
+  // never resurrect it, whereas an agent that simply hasn't loaded yet should
+  // still accept its HTTP snapshot even if unrelated realtime traffic touched
+  // the stream while the fetch was in flight.
+  goneAgentIds: Set<string>;
   pending: Record<string, PendingMessage[]>;
   selectedAgentId: string | null;
   error: string | null;
@@ -132,6 +138,7 @@ const initialState: State = {
   backend: null,
   catalog: emptyCatalog,
   snapshots: {},
+  goneAgentIds: new Set(),
   pending: {},
   selectedAgentId: null,
   error: null,
@@ -198,18 +205,26 @@ function reducer(state: State, action: Action): State {
       return { ...state, catalog: action.value };
     case "snapshot": {
       const current = state.snapshots[action.value.agentId];
-      if (!current && action.source === "http" && action.allowEqualRevision === false) return state;
+      // A stream that was explicitly declared gone must never be resurrected by a
+      // late HTTP response, even though there is no current snapshot to protect.
+      if (!current && action.source === "http" && state.goneAgentIds.has(action.value.agentId)) return state;
       if (current && action.value.revision < current.revision) return state;
       if (current
         && action.value.revision === current.revision
         && action.source === "http"
         && action.allowEqualRevision === false) return state;
+      let goneAgentIds = state.goneAgentIds;
+      if (goneAgentIds.has(action.value.agentId)) {
+        goneAgentIds = new Set(goneAgentIds);
+        goneAgentIds.delete(action.value.agentId);
+      }
       return {
         ...state,
         snapshots: pruneSnapshots(
           { ...state.snapshots, [action.value.agentId]: action.value },
           state.selectedAgentId,
         ),
+        goneAgentIds,
         pending: {
           ...state.pending,
           [action.value.agentId]: reconcilePending(state.pending[action.value.agentId] ?? [], action.value.messages),
@@ -259,10 +274,12 @@ function reducer(state: State, action: Action): State {
       };
     }
     case "evict_snapshot": {
-      if (!(action.agentId in state.snapshots)) return state;
+      const goneAgentIds = new Set(state.goneAgentIds);
+      goneAgentIds.add(action.agentId);
+      if (!(action.agentId in state.snapshots)) return { ...state, goneAgentIds };
       const snapshots = { ...state.snapshots };
       delete snapshots[action.agentId];
-      return { ...state, snapshots };
+      return { ...state, snapshots, goneAgentIds };
     }
     case "select":
       return { ...state, selectedAgentId: action.value };

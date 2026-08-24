@@ -339,6 +339,43 @@ describe("GatewayProvider recovery and state ownership", () => {
     await waitFor(() => expect(result.current.snapshots["agent-a"]?.messages[0]?.text).toBe("new realtime text"));
   });
 
+  it("accepts an HTTP snapshot for a newly opened agent even if unrelated realtime traffic touched the stream first", async () => {
+    const http = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockReturnValue(http.promise);
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(apiMock.bootstrap).toHaveBeenCalled());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    const selecting = act(() => result.current.selectAgent("agent-a"));
+    // A realtime event for this stream arrives before any snapshot exists locally
+    // (e.g. the server races an event ahead of the initial full sync). The event
+    // itself is dropped because there is nothing to apply it to, but it still bumps
+    // the stream's realtime version, making the in-flight HTTP fetch's
+    // allowEqualRevision false.
+    act(() => socket.message({
+      type: "event",
+      version: 1,
+      envelope: {
+        version: 1,
+        streamId: "agent:agent-a",
+        epoch: "epoch",
+        seq: 1,
+        emittedAt: "2026-01-01T00:00:00.000Z",
+        event: {
+          kind: "agent.activity_added",
+          payload: { id: "activity-1", kind: "tool", title: "Tool", status: "running", createdAt: "2026-01-01T00:00:00.000Z" },
+        },
+      },
+    }));
+    http.resolve(snapshot("agent-a"));
+    await selecting;
+
+    // The stream was never marked gone, so the HTTP snapshot must still populate
+    // the agent instead of leaving it stuck with no snapshot at all.
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    expect(result.current.snapshots["agent-a"]?.revision).toBe(1);
+  });
+
   it("does not restore a late HTTP snapshot after its stream is gone", async () => {
     const http = deferred<AgentSnapshot>();
     apiMock.loadAgent.mockReturnValue(http.promise);

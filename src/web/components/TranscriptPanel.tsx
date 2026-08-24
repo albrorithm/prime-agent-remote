@@ -1,7 +1,9 @@
 import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
+import { useReplyAnnouncer } from "../hooks/useReplyAnnouncer";
+import { useScrollFollowing } from "../hooks/useScrollFollowing";
 import { AttentionCard } from "./AttentionCard";
 import { AgentFamilyPicker } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
@@ -30,10 +32,6 @@ export function deriveAgentLineage(agents: AgentSummary[], selectedId: string | 
     cursor = agent.parentId;
   }
   return lineage;
-}
-
-export function countUnseen(previousCount: number, currentCount: number): number {
-  return currentCount > previousCount ? currentCount - previousCount : 0;
 }
 
 function HighlightedText({ text, term }: { text: string; term: string }) {
@@ -215,26 +213,12 @@ export function TranscriptEntry({
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
   const { selectedAgent, selectedSnapshot, pendingMessages, catalog, selectAgent } = useGateway();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [following, setFollowing] = useState(true);
-  const [unseen, setUnseen] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [replyAnnouncement, setReplyAnnouncement] = useState({ key: 0, text: "" });
   const messageCount = selectedSnapshot?.messages.length ?? 0;
   const renderedMessageCount = messageCount + pendingMessages.length;
   const lastMessage = selectedSnapshot?.messages.at(-1);
   const lastContentKey = `${lastMessage?.id ?? ""}\0${lastMessage?.text ?? ""}\0${pendingMessages.map((message) => `${message.id}:${message.text}:${message.attachments?.length ?? 0}`).join("|")}`;
-  const previousCount = useRef(0);
-  const previousContentKey = useRef("");
-  const previousAttention = useRef(0);
-  const previousAgentId = useRef<string | null>(null);
-  const previousSnapshotAgentId = useRef<string | null>(null);
-  const followingRef = useRef(following);
-  followingRef.current = following;
-  const announcementAgentIdRef = useRef<string | null>(null);
-  const announcementInitializedRef = useRef(false);
-  const announcedMessageStatesRef = useRef(new Map<string, TranscriptMessage["state"]>());
   const lineage = useMemo(
     () => deriveAgentLineage(catalog.agents, selectedAgent?.id ?? null),
     [catalog.agents, selectedAgent?.id],
@@ -244,114 +228,15 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
   const selectedStatus = selectedAgent ? agentStatus(selectedAgent) : null;
 
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    if (following) {
-      element.scrollTop = element.scrollHeight;
-      setUnseen(0);
-    } else {
-      setUnseen((count) => count + countUnseen(previousCount.current, renderedMessageCount));
-    }
-    previousCount.current = renderedMessageCount;
-  }, [renderedMessageCount, following]);
+  const { scrollRef, following, unseen, handleTranscriptImageLoad, updateFollowing, jumpToLatest } = useScrollFollowing({
+    selectedAgentId: selectedAgent?.id ?? null,
+    selectedSnapshotAgentId: selectedSnapshot?.agentId ?? null,
+    renderedMessageCount,
+    lastContentKey,
+    snapshotAttention,
+  });
 
-  useEffect(() => {
-    const changed = previousContentKey.current !== lastContentKey;
-    previousContentKey.current = lastContentKey;
-    if (!changed) return;
-    const element = scrollRef.current;
-    if (following) {
-      if (element) element.scrollTop = element.scrollHeight;
-    } else {
-      // A streamed reply can grow without increasing the message count.
-      setUnseen((count) => Math.max(1, count));
-    }
-  }, [lastContentKey, following]);
-
-  // Reset scroll-following state when switching agents so a new session's
-  // history doesn't register as "unseen" and the view jumps to its bottom.
-  // A selected agent can render before its snapshot loads, so baseline again
-  // when that snapshot first arrives. This effect must run before vibration.
-  useEffect(() => {
-    const agentId = selectedAgent?.id ?? null;
-    const snapshotAgentId = selectedSnapshot?.agentId ?? null;
-    const baselineSnapshotAgentId = agentId && snapshotAgentId === agentId ? agentId : null;
-    const agentChanged = previousAgentId.current !== agentId;
-    const snapshotChanged = previousSnapshotAgentId.current !== baselineSnapshotAgentId;
-    if (!agentChanged && !snapshotChanged) return;
-
-    previousAgentId.current = agentId;
-    previousSnapshotAgentId.current = baselineSnapshotAgentId;
-    previousCount.current = renderedMessageCount;
-    previousContentKey.current = lastContentKey;
-    previousAttention.current = snapshotAttention;
-    if (agentChanged) {
-      setFollowing(true);
-      setUnseen(0);
-    }
-    const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [selectedAgent?.id, selectedSnapshot?.agentId, renderedMessageCount, lastContentKey, snapshotAttention]);
-
-  useEffect(() => {
-    if (snapshotAttention > previousAttention.current && typeof navigator.vibrate === "function") {
-      navigator.vibrate(30);
-    }
-    previousAttention.current = snapshotAttention;
-  }, [snapshotAttention]);
-
-  useEffect(() => {
-    const agentId = selectedAgent?.id ?? null;
-    if (announcementAgentIdRef.current !== agentId) {
-      announcementAgentIdRef.current = agentId;
-      announcementInitializedRef.current = false;
-      announcedMessageStatesRef.current.clear();
-      setReplyAnnouncement((current) => current.text ? { key: current.key + 1, text: "" } : current);
-    }
-    if (!agentId || selectedSnapshot?.agentId !== agentId) return;
-
-    const nextStates = new Map<string, TranscriptMessage["state"]>();
-    for (const message of selectedSnapshot.messages) nextStates.set(message.id, message.state);
-    if (!announcementInitializedRef.current) {
-      announcedMessageStatesRef.current = nextStates;
-      announcementInitializedRef.current = true;
-      return;
-    }
-
-    let text = "";
-    const agentName = selectedAgent?.name ?? "Agent";
-    for (const message of selectedSnapshot.messages) {
-      if (message.role !== "assistant" || message.presentation) continue;
-      const previousState = announcedMessageStatesRef.current.get(message.id);
-      if (message.state === "complete" && previousState && previousState !== "complete") {
-        text = `${agentName} finished replying.`;
-      } else if (message.state === "complete" && !previousState) {
-        text = `${agentName} replied.`;
-      } else if (message.state === "failed" && previousState !== "failed") {
-        text = `${agentName}'s reply failed.`;
-      }
-    }
-    announcedMessageStatesRef.current = nextStates;
-    if (text) setReplyAnnouncement((current) => ({ key: current.key + 1, text }));
-  }, [selectedAgent?.id, selectedAgent?.name, selectedSnapshot]);
-
-  function handleTranscriptImageLoad() {
-    const element = scrollRef.current;
-    if (!element) return;
-    if (followingRef.current) {
-      element.scrollTop = element.scrollHeight;
-      setUnseen(0);
-    } else {
-      setUnseen((count) => Math.max(1, count));
-    }
-  }
-
-  function updateFollowing() {
-    const element = scrollRef.current;
-    if (!element) return;
-    setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 96);
-  }
+  const replyAnnouncement = useReplyAnnouncer(selectedAgent?.id ?? null, selectedAgent?.name, selectedSnapshot);
 
   function closeSearch() {
     setSearchOpen(false);
@@ -493,10 +378,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           {!following && unseen > 0 && (
             <button
               className="jump-latest"
-              onClick={() => {
-                setFollowing(true);
-                scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-              }}
+              onClick={jumpToLatest}
             ><ArrowDown /> Latest ({unseen})</button>
           )}
           <GoalStrip goal={selectedSnapshot?.goal} />

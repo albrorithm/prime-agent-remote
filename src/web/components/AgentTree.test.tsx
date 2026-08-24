@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
-import { AgentTree, buildVisibleAgents, directoryLeaf } from "./AgentTree";
+import { AgentTree, directoryLeaf } from "./AgentTree";
 
 function makeAgent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -95,21 +95,6 @@ describe("AgentTree", () => {
 
     await act(async () => { finishAbort?.(); });
     await waitFor(() => expect(screen.getByRole("button", { name: "Stop root" })).toBeEnabled());
-  });
-
-  it("guards cycles rather than recursing forever", () => {
-    const cyclic = [makeAgent("a", "b", 1), makeAgent("b", "a", 1)];
-    expect(buildVisibleAgents(cyclic, new Set(["a", "b"])).map((item) => item.id).sort()).toEqual(["a", "b"]);
-  });
-
-  it("keeps collapsed subtrees hidden across catalog updates", () => {
-    expect(buildVisibleAgents(agents, new Set(agents.map((item) => item.id))).map((item) => item.id)).toEqual([
-      "root",
-      "child",
-      "grandchild",
-      "great-grandchild",
-    ]);
-    expect(buildVisibleAgents(agents, new Set(["root", "grandchild"])).map((item) => item.id)).toEqual(["root", "child"]);
   });
 
   it("derives the directory leaf for row subtitles", () => {

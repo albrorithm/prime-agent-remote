@@ -10,6 +10,12 @@ import {
 import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { AgentSummary } from "../../protocol";
+import {
+  buildVisibleAgentDescendants,
+  collectAgentDescendants,
+  indexChildren,
+  type AgentFamilyRow,
+} from "./agent-tree-utils";
 
 interface AgentFamilyPickerProps {
   agents: AgentSummary[];
@@ -83,68 +89,6 @@ function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
     maxHeight: Math.max(1, Math.min(320, placement === "below" ? availableBelow : availableAbove)),
     placement,
   };
-}
-
-export interface AgentFamilyRow {
-  agent: AgentSummary;
-  level: number;
-}
-
-function agentPriority(agent: AgentSummary): number {
-  if (agent.attention) return 0;
-  if (agent.activity === "working") return 1;
-  if (agent.lifecycle === "inactive") return 3;
-  return 2;
-}
-
-function indexChildren(agents: AgentSummary[]): Map<string, AgentSummary[]> {
-  const children = new Map<string, AgentSummary[]>();
-  for (const agent of agents) {
-    if (!agent.parentId) continue;
-    const siblings = children.get(agent.parentId) ?? [];
-    siblings.push(agent);
-    children.set(agent.parentId, siblings);
-  }
-  for (const siblings of children.values()) {
-    siblings.sort((a, b) => agentPriority(a) - agentPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
-  }
-  return children;
-}
-
-export function collectAgentDescendants(agents: AgentSummary[], parentId: string): AgentSummary[] {
-  const children = indexChildren(agents);
-  const descendants: AgentSummary[] = [];
-  const seen = new Set<string>([parentId]);
-  const visit = (id: string) => {
-    for (const child of children.get(id) ?? []) {
-      if (seen.has(child.id)) continue;
-      seen.add(child.id);
-      descendants.push(child);
-      visit(child.id);
-    }
-  };
-  visit(parentId);
-  return descendants;
-}
-
-export function buildVisibleAgentDescendants(
-  agents: AgentSummary[],
-  parentId: string,
-  expanded: ReadonlySet<string>,
-): AgentFamilyRow[] {
-  const children = indexChildren(agents);
-  const visible: AgentFamilyRow[] = [];
-  const seen = new Set<string>([parentId]);
-  const visit = (id: string, level: number) => {
-    for (const child of children.get(id) ?? []) {
-      if (seen.has(child.id)) continue;
-      seen.add(child.id);
-      visible.push({ agent: child, level });
-      if (expanded.has(child.id)) visit(child.id, level + 1);
-    }
-  };
-  visit(parentId, 1);
-  return visible;
 }
 
 function activityLabel(agent: AgentSummary): "Active" | "Idle" {

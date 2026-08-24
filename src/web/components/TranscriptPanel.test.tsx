@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
 import type { useGateway } from "../gateway-store";
-import { countUnseen, deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
+import { deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
 
 type GatewayMockState = Pick<
   ReturnType<typeof useGateway>,
@@ -46,27 +46,6 @@ describe("agent lineage", () => {
     const cycle = [agent("a", "b", 1), agent("b", "a", 1)];
     expect(deriveAgentLineage(cycle, "a").map((item) => item.id)).toEqual(["b", "a"]);
     expect(deriveAgentLineage([agent("orphan", "missing", 1)], "orphan").map((item) => item.id)).toEqual(["orphan"]);
-  });
-});
-
-describe("unseen counting", () => {
-  it("counts only genuinely new messages", () => {
-    expect(countUnseen(3, 5)).toBe(2);
-  });
-
-  it("never counts downward or on equal counts", () => {
-    expect(countUnseen(5, 5)).toBe(0);
-    expect(countUnseen(5, 3)).toBe(0);
-  });
-
-  it("accumulates across polls without phantom increments", () => {
-    let previous = 0;
-    let total = 0;
-    for (const current of [1, 1, 2, 2, 7]) {
-      total += countUnseen(previous, current);
-      previous = current;
-    }
-    expect(total).toBe(7);
   });
 });
 

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 import { agentStatus } from "./agent-status";
+import { buildVisibleAgents } from "./agent-tree-utils";
 
 interface Props {
   agents: AgentSummary[];
@@ -33,51 +34,6 @@ function StateIcon({ agent }: { agent: AgentSummary }) {
     return <Moon className="agent-state" aria-hidden="true" />;
   }
   return <span className="agent-state-dot" aria-hidden="true" />;
-}
-
-export function buildVisibleAgents(agents: AgentSummary[], expanded: Set<string>): AgentSummary[] {
-  const byParent = new Map<string | null, AgentSummary[]>();
-  for (const item of agents) {
-    const list = byParent.get(item.parentId) ?? [];
-    list.push(item);
-    byParent.set(item.parentId, list);
-  }
-  const priority = (item: AgentSummary) => (item.attention ? 0 : item.activity === "working" ? 1 : item.lifecycle === "inactive" ? 3 : 2);
-  for (const list of byParent.values()) list.sort((a, b) => priority(a) - priority(b) || b.updatedAt.localeCompare(a.updatedAt));
-
-  const output: AgentSummary[] = [];
-  const decided = new Set<string>();
-  const displayed = new Set<string>();
-  const knownIds = new Set(agents.map((item) => item.id));
-  const visit = (item: AgentSummary) => {
-    if (decided.has(item.id)) return;
-    decided.add(item.id);
-    displayed.add(item.id);
-    output.push(item);
-    if (expanded.has(item.id)) for (const child of byParent.get(item.id) ?? []) visit(child);
-  };
-  for (const root of byParent.get(null) ?? []) visit(root);
-
-  let progress = true;
-  while (progress) {
-    progress = false;
-    for (const item of agents) {
-      if (decided.has(item.id)) continue;
-      const parentId = item.parentId;
-      const parentMissing = parentId !== null && !knownIds.has(parentId);
-      const parentDisplayed = parentId !== null && displayed.has(parentId);
-      if (parentMissing || (parentDisplayed && expanded.has(parentId))) {
-        visit(item);
-        progress = true;
-      } else if (parentDisplayed || (parentId !== null && decided.has(parentId))) {
-        decided.add(item.id);
-        progress = true;
-      }
-    }
-  }
-
-  for (const item of agents) if (!decided.has(item.id)) visit(item);
-  return output;
 }
 
 export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }: Props) {
