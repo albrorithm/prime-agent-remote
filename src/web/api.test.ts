@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, executeSlashCommand, loadSlashCommandCatalog, onUnauthorized } from "./api";
+import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -56,6 +56,67 @@ describe("slash command API", () => {
     await expect(executeSlashCommand("agent-1", "csrf", 3, "goal", "status", requestId)).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects a malformed slash command catalog as invalid server data", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      agentId: "agent-1",
+      agentRevision: 3,
+      partial: false,
+      commands: [{ name: "goal", description: "Manage the goal", source: "session", availability: "sometimes", takesArguments: true }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(loadSlashCommandCatalog("agent-1")).rejects.toMatchObject({
+      status: 502,
+      message: "The server returned invalid data",
+    });
+  });
+
+  it("rejects a malformed slash command acceptance as invalid server data", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 4,
+      result: { kind: "heartbeat", status: "sleeping" },
+    }), { status: 202, headers: { "Content-Type": "application/json" } })));
+
+    await expect(executeSlashCommand("agent-1", "csrf", 3, "heartbeat", "", requestId)).rejects.toMatchObject({
+      status: 502,
+      message: "The server returned invalid data",
+    });
+  });
+});
+
+describe("directory listing API", () => {
+  it("loads a well-formed directory listing", async () => {
+    const listing = {
+      path: "/workspace",
+      home: "/home/user",
+      crumbs: [{ name: "workspace", path: "/workspace", hidden: false }],
+      entries: [{ name: "src", path: "/workspace/src", hidden: false }],
+      truncated: false,
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(listing), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(listDirectories("/workspace")).resolves.toEqual(listing);
+  });
+
+  it("rejects a directory listing missing a required field as invalid server data", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      path: "/workspace",
+      home: "/home/user",
+      crumbs: [],
+      entries: [{ name: "src", path: "/workspace/src" }],
+      truncated: false,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    await expect(listDirectories("/workspace")).rejects.toMatchObject({
+      status: 502,
+      message: "The server returned invalid data",
+    });
+  });
 });
 
 
@@ -69,6 +130,14 @@ describe("request safety", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     await expect(bootstrap()).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("falls back to a generic message when the error body doesn't match ProblemDetails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      status: "not-a-number",
+    }), { status: 500, headers: { "Content-Type": "application/json" } })));
+
+    await expect(bootstrap()).rejects.toMatchObject({ status: 500, message: "HTTP 500" });
   });
 
   it("notifies the central auth handler on any 401", async () => {

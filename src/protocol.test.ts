@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   bootstrapResponseSchema,
+  directoryListingSchema,
   executeSlashCommandRequestSchema,
+  mutationAcceptedSchema,
+  problemDetailsSchema,
   sendMessageRequestSchema,
   serverFrameSchema,
+  sessionCreatedSchema,
+  slashCommandAcceptedSchema,
+  slashCommandCatalogSchema,
+  slashCommandResultSchema,
   EXECUTABLE_SLASH_COMMAND_NAMES,
 } from "./protocol";
 
@@ -106,6 +113,155 @@ describe("runtime server protocol validation", () => {
         emittedAt: "2026-01-01T00:00:00.000Z",
         event: { kind: "agent.replaced", payload: snapshot },
       }],
+    }).success).toBe(false);
+  });
+});
+
+describe("slash command catalog schema", () => {
+  it("accepts a well-formed catalog", () => {
+    expect(slashCommandCatalogSchema.safeParse({
+      agentId: "agent-1",
+      agentRevision: 3,
+      partial: false,
+      commands: [{
+        name: "goal",
+        description: "Manage the agent's goal",
+        source: "session",
+        availability: "available",
+        takesArguments: true,
+        options: [{ value: "status", label: "Status", current: true }],
+      }],
+    }).success).toBe(true);
+  });
+
+  it("rejects a command entry with an invalid availability value", () => {
+    expect(slashCommandCatalogSchema.safeParse({
+      agentId: "agent-1",
+      agentRevision: 3,
+      partial: false,
+      commands: [{
+        name: "goal",
+        description: "Manage the agent's goal",
+        source: "session",
+        availability: "sometimes",
+        takesArguments: true,
+      }],
+    }).success).toBe(false);
+  });
+});
+
+describe("directory listing schema", () => {
+  it("accepts a well-formed listing", () => {
+    expect(directoryListingSchema.safeParse({
+      path: "/workspace",
+      home: "/home/user",
+      crumbs: [{ name: "workspace", path: "/workspace", hidden: false }],
+      entries: [{ name: "src", path: "/workspace/src", hidden: false }],
+      truncated: false,
+    }).success).toBe(true);
+  });
+
+  it("rejects an entry missing the required hidden flag", () => {
+    expect(directoryListingSchema.safeParse({
+      path: "/workspace",
+      home: "/home/user",
+      crumbs: [],
+      entries: [{ name: "src", path: "/workspace/src" }],
+      truncated: false,
+    }).success).toBe(false);
+  });
+});
+
+describe("slash command result schema", () => {
+  it("accepts each discriminated variant", () => {
+    expect(slashCommandResultSchema.safeParse({ kind: "session_accepted" }).success).toBe(true);
+    expect(slashCommandResultSchema.safeParse({
+      kind: "heartbeat",
+      status: "active",
+      schedule: "*/5 * * * *",
+      deliveryMode: "steer",
+    }).success).toBe(true);
+  });
+
+  it("rejects an unknown heartbeat status", () => {
+    expect(slashCommandResultSchema.safeParse({
+      kind: "heartbeat",
+      status: "sleeping",
+    }).success).toBe(false);
+  });
+
+  it("rejects an unrecognized kind", () => {
+    expect(slashCommandResultSchema.safeParse({ kind: "unknown_kind" }).success).toBe(false);
+  });
+});
+
+describe("mutation accepted schema", () => {
+  it("accepts a well-formed acceptance", () => {
+    expect(mutationAcceptedSchema.safeParse({
+      accepted: true,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      revision: 4,
+    }).success).toBe(true);
+  });
+
+  it("rejects accepted: false", () => {
+    expect(mutationAcceptedSchema.safeParse({
+      accepted: false,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      revision: 4,
+    }).success).toBe(false);
+  });
+});
+
+describe("slash command accepted schema", () => {
+  it("accepts an acceptance carrying a slash command result", () => {
+    expect(slashCommandAcceptedSchema.safeParse({
+      accepted: true,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      revision: 4,
+      result: { kind: "model", provider: "openai", modelId: "example" },
+    }).success).toBe(true);
+  });
+
+  it("rejects a missing result", () => {
+    expect(slashCommandAcceptedSchema.safeParse({
+      accepted: true,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      revision: 4,
+    }).success).toBe(false);
+  });
+});
+
+describe("session created schema", () => {
+  it("accepts a well-formed session", () => {
+    expect(sessionCreatedSchema.safeParse({
+      requestId: "11111111-1111-4111-8111-111111111111",
+      agentId: "agent-1",
+    }).success).toBe(true);
+  });
+
+  it("rejects a session missing an agentId", () => {
+    expect(sessionCreatedSchema.safeParse({
+      requestId: "11111111-1111-4111-8111-111111111111",
+    }).success).toBe(false);
+  });
+});
+
+describe("problem details schema", () => {
+  it("accepts a well-formed problem", () => {
+    expect(problemDetailsSchema.safeParse({
+      type: "about:blank",
+      title: "Not Found",
+      status: 404,
+      detail: "No such agent",
+    }).success).toBe(true);
+  });
+
+  it("rejects a problem with a non-numeric status", () => {
+    expect(problemDetailsSchema.safeParse({
+      type: "about:blank",
+      title: "Not Found",
+      status: "404",
     }).success).toBe(false);
   });
 });

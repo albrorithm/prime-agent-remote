@@ -40,27 +40,11 @@ export interface SlashCommandCatalog {
   commands: SlashCommandCatalogEntry[];
 }
 
-export type SlashCommandResult =
-  | { kind: "session_accepted" }
-  | { kind: "experimental_accepted"; source: "extension" | "prompt" | "skill" }
-  | { kind: "model"; provider?: string; modelId?: string }
-  | { kind: "effort"; level?: string; availableLevels: string[] }
-  | { kind: "name"; name?: string }
-  | {
-      kind: "context_usage";
-      contextTokens?: number;
-      contextWindow?: number;
-      percent?: number;
-      totalTokens?: number;
-      cost?: number;
-    }
-  | {
-      kind: "heartbeat";
-      status: "none" | "active" | "paused" | "completed" | "cancelled" | "unknown";
-      schedule?: string;
-      deliveryMode?: "steer" | "follow_up";
-      nextRunAt?: string;
-    };
+// SlashCommandResult is a discriminated union, so (following the ClientFrame
+// precedent below) it is declared as a type derived from its schema rather
+// than as a hand-written interface with a parallel schema. See
+// `slashCommandResultSchema` further down for the runtime definition.
+export type SlashCommandResult = z.infer<typeof slashCommandResultSchema>;
 
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 export const MAX_IMAGE_ATTACHMENTS = 3;
@@ -277,6 +261,30 @@ const agentSummarySchema = z.object({
 export const catalogSnapshotSchema = z.object({
   revision: z.number().int().nonnegative(),
   agents: z.array(agentSummarySchema),
+});
+
+const slashCommandOptionSchema = z.object({
+  value: z.string(),
+  label: z.string(),
+  current: z.boolean().optional(),
+});
+
+const slashCommandCatalogEntrySchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  argumentHint: z.string().optional(),
+  source: z.enum(["session", "adapter", "extension", "prompt", "skill"]),
+  availability: z.enum(["available", "experimental", "unavailable"]),
+  unavailableReason: z.enum(["inactive_agent", "adapter_missing", "not_supported_on_mobile"]).optional(),
+  takesArguments: z.boolean(),
+  options: z.array(slashCommandOptionSchema).optional(),
+});
+
+export const slashCommandCatalogSchema = z.object({
+  agentId: z.string(),
+  agentRevision: z.number().int().nonnegative(),
+  partial: z.boolean(),
+  commands: z.array(slashCommandCatalogEntrySchema),
 });
 
 const transcriptAttachmentSchema = z.object({
@@ -522,21 +530,68 @@ export const abortRequestSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
 });
 
+export const slashCommandResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("session_accepted") }),
+  z.object({ kind: z.literal("experimental_accepted"), source: z.enum(["extension", "prompt", "skill"]) }),
+  z.object({ kind: z.literal("model"), provider: z.string().optional(), modelId: z.string().optional() }),
+  z.object({ kind: z.literal("effort"), level: z.string().optional(), availableLevels: z.array(z.string()) }),
+  z.object({ kind: z.literal("name"), name: z.string().optional() }),
+  z.object({
+    kind: z.literal("context_usage"),
+    contextTokens: z.number().optional(),
+    contextWindow: z.number().optional(),
+    percent: z.number().optional(),
+    totalTokens: z.number().optional(),
+    cost: z.number().optional(),
+  }),
+  z.object({
+    kind: z.literal("heartbeat"),
+    status: z.enum(["none", "active", "paused", "completed", "cancelled", "unknown"]),
+    schedule: z.string().optional(),
+    deliveryMode: z.enum(["steer", "follow_up"]).optional(),
+    nextRunAt: z.string().optional(),
+  }),
+]);
+
+export const mutationAcceptedSchema = z.object({
+  accepted: z.literal(true),
+  requestId: z.string(),
+  revision: z.number().int().nonnegative(),
+});
+
 export interface MutationAccepted {
   accepted: true;
   requestId: string;
   revision: number;
 }
 
+export const slashCommandAcceptedSchema = mutationAcceptedSchema.extend({
+  result: slashCommandResultSchema,
+});
+
 export interface SlashCommandAccepted extends MutationAccepted {
   result: SlashCommandResult;
 }
+
+export const directoryEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  hidden: z.boolean(),
+});
 
 export interface DirectoryEntry {
   name: string;
   path: string;
   hidden: boolean;
 }
+
+export const directoryListingSchema = z.object({
+  path: z.string(),
+  home: z.string(),
+  crumbs: z.array(directoryEntrySchema),
+  entries: z.array(directoryEntrySchema),
+  truncated: z.boolean(),
+});
 
 export interface DirectoryListing {
   path: string;
@@ -545,6 +600,11 @@ export interface DirectoryListing {
   entries: DirectoryEntry[];
   truncated: boolean;
 }
+
+export const sessionCreatedSchema = z.object({
+  requestId: z.string(),
+  agentId: z.string(),
+});
 
 export interface SessionCreated {
   requestId: string;
@@ -555,6 +615,13 @@ export const createSessionRequestSchema = z.object({
   requestId: z.string().uuid(),
   cwd: z.string().min(1).max(1024),
   name: z.string().trim().min(1).max(200).optional(),
+});
+
+export const problemDetailsSchema = z.object({
+  type: z.string(),
+  title: z.string(),
+  status: z.number(),
+  detail: z.string().optional(),
 });
 
 export interface ProblemDetails {

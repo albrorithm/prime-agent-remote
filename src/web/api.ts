@@ -1,7 +1,13 @@
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import {
   agentSnapshotSchema,
   bootstrapResponseSchema,
+  directoryListingSchema,
+  mutationAcceptedSchema,
+  problemDetailsSchema,
+  sessionCreatedSchema,
+  slashCommandAcceptedSchema,
+  slashCommandCatalogSchema,
   type AgentSnapshot,
   type BootstrapResponse,
   type DirectoryListing,
@@ -40,7 +46,13 @@ export function onUnauthorized(handler: UnauthorizedHandler): () => void {
 
 async function decode<T>(response: Response, schema?: ZodType<T>): Promise<T> {
   if (!response.ok) {
-    const problem = (await response.json().catch(() => null)) as ProblemDetails | null;
+    const rawProblem = await response.json().catch(() => null) as unknown;
+    const parsedProblem = rawProblem === null ? null : problemDetailsSchema.safeParse(rawProblem);
+    // A malformed or unparseable error body must not itself throw and mask the real HTTP error,
+    // so fall back to the raw (unchecked) value, and ultimately to a generic message, on parse failure.
+    const problem: ProblemDetails | null = parsedProblem?.success
+      ? parsedProblem.data
+      : (rawProblem as ProblemDetails | null);
     if (response.status === 401) {
       for (const handler of unauthorizedHandlers) handler();
     }
@@ -81,13 +93,18 @@ async function request<T>(
   }
 }
 
+// `pair()`'s response shape isn't a named DTO in protocol.ts, so its schema lives here
+// rather than there — it's still validated so no exported function falls through to
+// decode()'s unchecked-cast fallback.
+const pairResponseSchema = z.object({ csrfToken: z.string() });
+
 export async function pair(token: string, options?: ApiRequestOptions): Promise<{ csrfToken: string }> {
-  return request<{ csrfToken: string }>("/api/v1/auth/pair", {
+  return request("/api/v1/auth/pair", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token }),
-  }, options);
+  }, options, pairResponseSchema);
 }
 
 export async function bootstrap(options?: ApiRequestOptions): Promise<BootstrapResponse> {
@@ -109,6 +126,7 @@ async function mutate<T = MutationAccepted>(
   csrfToken: string,
   body: unknown,
   options?: ApiRequestOptions,
+  schema: ZodType<T> = mutationAcceptedSchema as unknown as ZodType<T>,
 ): Promise<T> {
   return request<T>(path, {
     method: "POST",
@@ -118,7 +136,7 @@ async function mutate<T = MutationAccepted>(
       "X-CSRF-Token": csrfToken,
     },
     body: JSON.stringify(body),
-  }, options);
+  }, options, schema);
 }
 
 export function sendMessage(
@@ -135,17 +153,17 @@ export function sendMessage(
     expectedRevision,
     text,
     images,
-  }, options);
+  }, options, mutationAcceptedSchema);
 }
 
 export async function loadSlashCommandCatalog(
   agentId: string,
   options?: ApiRequestOptions,
 ): Promise<SlashCommandCatalog> {
-  return request<SlashCommandCatalog>(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+  return request(`/api/v1/agents/${encodeURIComponent(agentId)}/commands`, {
     credentials: "same-origin",
     cache: "no-store",
-  }, options);
+  }, options, slashCommandCatalogSchema);
 }
 
 export function executeSlashCommand(
@@ -162,7 +180,7 @@ export function executeSlashCommand(
     expectedRevision,
     name,
     args,
-  }, options);
+  }, options, slashCommandAcceptedSchema);
 }
 
 export function abortAgent(
@@ -174,7 +192,7 @@ export function abortAgent(
   return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/abort`, csrfToken, {
     requestId: crypto.randomUUID(),
     expectedRevision,
-  }, options);
+  }, options, mutationAcceptedSchema);
 }
 
 export function respondToAttention(
@@ -188,15 +206,15 @@ export function respondToAttention(
     requestId: crypto.randomUUID(),
     expectedRevision,
     optionId,
-  }, options);
+  }, options, mutationAcceptedSchema);
 }
 
 export async function listDirectories(path?: string, options?: ApiRequestOptions): Promise<DirectoryListing> {
   const query = path ? `?path=${encodeURIComponent(path)}` : "";
-  return request<DirectoryListing>(`/api/v1/directories${query}`, {
+  return request(`/api/v1/directories${query}`, {
     credentials: "same-origin",
     cache: "no-store",
-  }, options);
+  }, options, directoryListingSchema);
 }
 
 export function createSession(
@@ -210,5 +228,5 @@ export function createSession(
     requestId,
     cwd,
     ...(name ? { name } : {}),
-  }, options);
+  }, options, sessionCreatedSchema);
 }
