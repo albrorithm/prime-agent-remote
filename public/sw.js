@@ -1,5 +1,9 @@
 const CACHE_PREFIX = "prime-agent-shell-";
-const CACHE_NAME = `${CACHE_PREFIX}v4`;
+// Rewritten by scripts/hash-sw.mjs (a postbuild step) with a hash of the
+// built shell, so the cache name always changes when the shell does. This
+// "dev" fallback is only ever seen when sw.js is served unbuilt from public/.
+const BUILD_ID = "dev";
+const CACHE_NAME = `${CACHE_PREFIX}${BUILD_ID}`;
 const STATIC_SHELL = [
   "/manifest.webmanifest",
   "/prime-mark.svg",
