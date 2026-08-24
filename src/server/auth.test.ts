@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { AuthService, MAX_TRACKED_PAIR_CLIENTS } from "./auth.js";
 import type { GatewayConfig } from "./config.js";
+import type { SlidingWindowLimiter } from "./rate-limit.js";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -93,12 +94,15 @@ describe("AuthService", () => {
       for (let index = 0; index < MAX_TRACKED_PAIR_CLIENTS + 20; index += 1) {
         auth.pair(request({}, `100.64.${Math.floor(index / 256)}.${index % 256}`), response().value, "wrong-token");
       }
-      const attempts = (auth as unknown as { pairAttempts: Map<string, number[]> }).pairAttempts;
-      expect(attempts.size).toBe(MAX_TRACKED_PAIR_CLIENTS);
+      const attempts = (auth as unknown as { pairAttempts: SlidingWindowLimiter }).pairAttempts;
+      expect(attempts.trackedKeys).toBe(MAX_TRACKED_PAIR_CLIENTS);
+      // A previously unseen client is refused while the tracking map is full,
+      // even with the correct token.
+      expect(auth.pair(request({}, "100.65.0.1"), response().value, "correct-token")).toBeNull();
 
       vi.advanceTimersByTime(60_001);
       expect(auth.pair(request({}, "100.65.0.1"), response().value, "correct-token")).not.toBeNull();
-      expect(attempts.size).toBe(1);
+      expect(attempts.trackedKeys).toBe(1);
     } finally {
       vi.useRealTimers();
     }

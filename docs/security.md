@@ -42,7 +42,7 @@ The setup token is never stored by the browser application. Production requires 
 - CSP, frame denial, no-referrer, and content-type protections.
 - One MiB default HTTP request limit. Image-message requests have a separate bounded limit sized for three validated images.
 - WebSocket limits of 128 KiB per inbound message, 16 MiB per serialized outbound frame, and 32 MiB of aggregate buffered output.
-- Pairing and mutation rate limits.
+- Sliding-window rate limits: 5 pairing attempts per remote address per minute (failed attempts consume the budget, and over-limit attempts are answered like a wrong token) and 120 mutations per session per minute (`429` with `Retry-After`). Each limiter tracks at most 4,096 keys and refuses new keys at capacity.
 - Text rendering for transcript content; no raw HTML injection.
 
 ## Tailscale

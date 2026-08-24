@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GatewayConfig } from "./config.js";
+import { SlidingWindowLimiter } from "./rate-limit.js";
 
 const SESSION_COOKIE = "prime_web_session";
-const PAIR_ATTEMPT_WINDOW_MS = 60_000;
-const MAX_PAIR_ATTEMPTS_PER_CLIENT = 5;
+export const PAIR_ATTEMPT_WINDOW_MS = 60_000;
+export const MAX_PAIR_ATTEMPTS_PER_CLIENT = 5;
 export const MAX_TRACKED_PAIR_CLIENTS = 4_096;
 export const MAX_ACTIVE_SESSIONS = 4_096;
 
@@ -39,8 +40,12 @@ function parseCookies(header: string | undefined): Record<string, string> {
 
 export class AuthService {
   private readonly sessions = new Map<string, Session>();
-  private readonly pairAttempts = new Map<string, number[]>();
-  private lastFullPruneAt = Number.NEGATIVE_INFINITY;
+  private readonly pairAttempts = new SlidingWindowLimiter(
+    PAIR_ATTEMPT_WINDOW_MS,
+    MAX_PAIR_ATTEMPTS_PER_CLIENT,
+    MAX_TRACKED_PAIR_CLIENTS,
+  );
+  private lastSessionPruneAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly config: GatewayConfig) {}
 
@@ -52,19 +57,12 @@ export class AuthService {
   pair(req: IncomingMessage, res: ServerResponse, token: string): Session | null {
     const key = req.socket.remoteAddress ?? "unknown";
     const now = Date.now();
-    this.prune(now, this.pairAttempts.size >= MAX_TRACKED_PAIR_CLIENTS || this.sessions.size >= MAX_ACTIVE_SESSIONS);
+    this.pruneSessions(now, this.sessions.size >= MAX_ACTIVE_SESSIONS);
 
-    const recent = (this.pairAttempts.get(key) ?? []).filter((time) => now - time < PAIR_ATTEMPT_WINDOW_MS);
-    if (recent.length >= MAX_PAIR_ATTEMPTS_PER_CLIENT) return null;
-    if (!this.pairAttempts.has(key) && this.pairAttempts.size >= MAX_TRACKED_PAIR_CLIENTS) return null;
-    recent.push(now);
-    this.pairAttempts.set(key, recent);
+    // Recorded before the token check so failed guesses burn the budget too.
+    if (!this.pairAttempts.allow(key, now).allowed) return null;
     if (!safeEqual(token, this.config.pairingToken)) return null;
-
-    if (this.sessions.size >= MAX_ACTIVE_SESSIONS) {
-      this.prune(now, true);
-      if (this.sessions.size >= MAX_ACTIVE_SESSIONS) return null;
-    }
+    if (this.sessions.size >= MAX_ACTIVE_SESSIONS) return null;
     const session: Session = {
       id: randomBytes(32).toString("base64url"),
       csrfToken: randomBytes(24).toString("base64url"),
@@ -81,7 +79,7 @@ export class AuthService {
 
   authenticate(req: IncomingMessage): Session | null {
     const now = Date.now();
-    this.prune(now);
+    this.pruneSessions(now);
     const id = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (!id) return null;
     const session = this.sessions.get(id);
@@ -108,16 +106,11 @@ export class AuthService {
       && safeEqual(csrf, session.csrfToken);
   }
 
-  private prune(now: number, force = false): void {
-    if (!force && now - this.lastFullPruneAt < PAIR_ATTEMPT_WINDOW_MS) return;
-    this.lastFullPruneAt = now;
+  private pruneSessions(now: number, force = false): void {
+    if (!force && now - this.lastSessionPruneAt < PAIR_ATTEMPT_WINDOW_MS) return;
+    this.lastSessionPruneAt = now;
     for (const [id, session] of this.sessions) {
       if (session.expiresAt <= now) this.sessions.delete(id);
-    }
-    for (const [key, times] of this.pairAttempts) {
-      const recent = times.filter((time) => now - time < PAIR_ATTEMPT_WINDOW_MS);
-      if (recent.length === 0) this.pairAttempts.delete(key);
-      else if (recent.length !== times.length) this.pairAttempts.set(key, recent);
     }
   }
 }
