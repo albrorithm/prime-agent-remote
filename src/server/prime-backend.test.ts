@@ -33,6 +33,12 @@ interface FixtureState {
   listener: ((event: unknown) => void) | null;
   createError?: string;
   listError: boolean;
+  connectError: boolean;
+  snapshotError: boolean;
+  clientsCreated: number;
+  clientsClosed: number;
+  /** Clients numbered at or below this stay dead, like sockets left over from a daemon restart. */
+  failClientsBelow: number;
   listDelayMs: number;
   listCalls: number;
   activeListRequests: number;
@@ -131,6 +137,11 @@ const fixture: FixtureState = {
   creates: [],
   listener: null,
   listError: false,
+  connectError: false,
+  snapshotError: false,
+  clientsCreated: 0,
+  clientsClosed: 0,
+  failClientsBelow: 0,
   listDelayMs: 0,
   listCalls: 0,
   activeListRequests: 0,
@@ -145,8 +156,10 @@ const fixture: FixtureState = {
 const moduleSource = `
 const state = globalThis.__primeWebFixture;
 export class DaemonClient {
-  async connect() {}
+  constructor() { state.clientsCreated += 1; this.clientNumber = state.clientsCreated; }
+  async connect() { if (state.connectError) throw new Error("private connect failure"); }
   async request(command) {
+    if (this.clientNumber <= state.failClientsBelow) throw new Error("private dead client");
     if (command.type === "create") {
       state.creates.push(command);
       if (state.createError) return { success: false, error: state.createError };
@@ -182,12 +195,13 @@ export class DaemonClient {
       state.activeListRequests -= 1;
     }
   }
-  close() {}
+  close() { state.clientsClosed += 1; }
 }
 const connection = {
   subscribe(listener) { state.listener = listener; return () => { state.listener = null; }; },
   async getInitialSnapshot() {
     state.snapshotCalls += 1;
+    if (state.snapshotError) throw new Error("private snapshot failure");
     state.activeSnapshotRequests += 1;
     state.maxConcurrentSnapshotRequests = Math.max(state.maxConcurrentSnapshotRequests, state.activeSnapshotRequests);
     const snapshot = structuredClone(state.snapshot);
@@ -1345,7 +1359,7 @@ describe("PrimeBackend", () => {
       await Promise.all(waiters);
       expect(fixture.maxConcurrentListRequests).toBe(1);
       expect(fixture.listCalls).toBeGreaterThan(1);
-      expect(Reflect.get(backend, "catalogRefreshWaiters")).toHaveLength(0);
+      expect(Reflect.get(Reflect.get(backend, "catalogQueue") as object, "waiters")).toHaveLength(0);
     } finally {
       fixture.listDelayMs = 0;
       hub.close();
@@ -1427,6 +1441,132 @@ describe("PrimeBackend", () => {
       expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8")).toBeLessThan(4 * 1024 * 1024);
     } finally {
       fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("reconnects after a daemon restart and rebuilds live connections", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = originalSessions.map((session) => structuredClone(session));
+    fixture.listError = false;
+    fixture.connectError = false;
+    fixture.snapshotError = false;
+    fixture.listDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.attachDelayMs = 0;
+    fixture.attachCount = 0;
+    fixture.attachOptions = null;
+    fixture.disposed = 0;
+    fixture.clientsCreated = 0;
+    fixture.clientsClosed = 0;
+    fixture.failClientsBelow = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 15);
+    Reflect.set(backend, "reconnectDelaysMs", [10]);
+    const hub = new EventHub();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      expect(fixture.attachCount).toBe(1);
+      const frames: ServerFrame[] = [];
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => frames.push(frame));
+
+      // Restart: sockets held so far are permanently dead, and while the
+      // daemon is down no new client can connect either.
+      fixture.failClientsBelow = fixture.clientsCreated;
+      fixture.connectError = true;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const lostLogs = () => error.mock.calls.filter((call) =>
+        call[0] === "Prime daemon connection lost; reconnecting with backoff");
+      expect(lostLogs()).toHaveLength(1);
+
+      // Repeated poll failures and failed reconnect attempts stay quiet.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(lostLogs()).toHaveLength(1);
+      expect(fixture.clientsCreated).toBeGreaterThan(1);
+
+      fixture.connectError = false;
+      fixture.sessions[0].activeSessionId = "private-active-restarted";
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(error).toHaveBeenCalledWith("Prime daemon reconnected");
+      expect(fixture.disposed).toBeGreaterThanOrEqual(1);
+      expect(fixture.attachCount).toBe(2);
+      expect(fixture.attachOptions).toMatchObject({ activeSessionId: "private-active-restarted" });
+      expect(frames).toContainEqual(expect.objectContaining({
+        type: "event",
+        envelope: expect.objectContaining({
+          event: expect.objectContaining({ kind: "agent.replaced" }),
+        }),
+      }));
+
+      // New work goes through the replacement client.
+      const snapshot = await backend.agentSnapshot(agentId);
+      expect(snapshot?.messages[0]?.text).toBe("Ready");
+      attached?.detach();
+    } finally {
+      fixture.sessions = originalSessions;
+      fixture.listError = false;
+      fixture.connectError = false;
+      fixture.failClientsBelow = 0;
+      error.mockRestore();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("re-marks a failed connection refresh dirty and recovers by itself", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.listError = false;
+    fixture.connectError = false;
+    fixture.snapshotError = false;
+    fixture.snapshotDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "connectionRefreshRetryDelaysMs", [10]);
+    const hub = new EventHub();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const frames: ServerFrame[] = [];
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => frames.push(frame));
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+
+      fixture.snapshotCalls = 0;
+      fixture.snapshotError = true;
+      listener({ type: "streaming_update" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The failure retries on its own instead of going silently stale...
+      expect(fixture.snapshotCalls).toBeGreaterThanOrEqual(2);
+      // ...and logs the transition once, not every attempt.
+      expect(error.mock.calls.filter((call) =>
+        call[0] === "Prime agent refresh failed; retrying with backoff")).toHaveLength(1);
+
+      fixture.snapshotError = false;
+      (fixture.snapshot.state as Record<string, unknown>).recap = "Recovered refresh detail";
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(error).toHaveBeenCalledWith("Prime agent refresh recovered");
+      const snapshot = await backend.agentSnapshot(agentId);
+      expect(snapshot?.activity[0]).toMatchObject({ detail: "Recovered refresh detail" });
+      expect(frames).toContainEqual(expect.objectContaining({
+        type: "event",
+        envelope: expect.objectContaining({
+          event: expect.objectContaining({ kind: "agent.replaced" }),
+        }),
+      }));
+      attached?.detach();
+    } finally {
+      fixture.snapshot = originalSnapshot;
+      fixture.snapshotError = false;
+      error.mockRestore();
       hub.close();
       await backend.close();
     }

@@ -21,6 +21,7 @@ import {
   BackendConflictError,
   BackendNotFoundError,
   uniqueSessionName,
+  withSerialLock,
   type AttachmentData,
   type AbortInput,
   type AgentBackend,
@@ -37,6 +38,9 @@ const now = new Date().toISOString();
 const DEMO_MAX_AGENTS = 128;
 const DEMO_MAX_TRANSCRIPT_MESSAGES = 256;
 const DEMO_MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
+// Two intentional divergences from the live Prime adapter: demo always reports
+// images: false, and the /model and /effort slash-command options are
+// hardcoded here rather than derived from a provider.
 const fullCapabilities: AgentCapabilities = {
   send: true,
   abort: true,
@@ -523,19 +527,8 @@ export class DemoBackend implements AgentBackend {
     this.commandLocks.clear();
   }
 
-  private async withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.commandLocks.get(agentId) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const queued = previous.catch(() => {}).then(() => gate);
-    this.commandLocks.set(agentId, queued);
-    await previous.catch(() => {});
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.commandLocks.get(agentId) === queued) this.commandLocks.delete(agentId);
-    }
+  private withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    return withSerialLock(this.commandLocks, agentId, operation);
   }
 
   private wakeAgent(summary: AgentSummary, snapshot: AgentSnapshot): void {

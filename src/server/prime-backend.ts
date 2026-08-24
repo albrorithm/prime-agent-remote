@@ -34,7 +34,9 @@ import {
   BackendCapabilityError,
   BackendConflictError,
   BackendNotFoundError,
+  CoalescedRefreshQueue,
   uniqueSessionName,
+  withSerialLock,
   type AttachmentData,
   type AbortInput,
   type AgentBackend,
@@ -195,6 +197,8 @@ interface PrimeDaemonClient {
   connect(timeoutMs?: number): Promise<void>;
   request(command: Record<string, unknown>, timeoutMs?: number): Promise<PrimeResponse>;
   close(): void;
+  /** Newer daemon builds expose an emitter surface; older ones only fail requests. */
+  on?(event: string, listener: (...args: unknown[]) => void): unknown;
 }
 
 interface PrimeModule {
@@ -214,9 +218,7 @@ interface ConnectionRecord {
   activeSessionId: string;
   connection: PrimeConnection;
   unsubscribe: () => void;
-  refreshTimer?: NodeJS.Timeout;
-  refreshPromise?: Promise<void>;
-  refreshDirty: boolean;
+  refreshQueue: CoalescedRefreshQueue;
   disposed: boolean;
   revision: number;
 }
@@ -229,12 +231,6 @@ interface PendingExtension {
   revision: number;
   createdAt: string;
   timer?: NodeJS.Timeout;
-}
-
-interface CatalogRefreshWaiter {
-  generation: number;
-  resolve: () => void;
-  reject: (error: Error) => void;
 }
 
 const ATTACHMENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
@@ -960,14 +956,23 @@ export class PrimeBackend implements AgentBackend {
   private readonly attachmentCache = new Map<string, AttachmentData>();
   private attachmentCacheBytes = 0;
   private pollTimer?: NodeJS.Timeout;
-  private catalogRefreshPromise?: Promise<void>;
-  private catalogRefreshTimer?: NodeJS.Timeout;
-  private readonly catalogRefreshWaiters: CatalogRefreshWaiter[] = [];
-  private catalogRequestedGeneration = 0;
-  private catalogProcessedGeneration = 0;
+  private readonly catalogQueue = new CoalescedRefreshQueue({
+    run: () => this.loadCatalogOnce(),
+    maxBatch: MAX_CATALOG_REFRESH_BATCH,
+    delayMs: 0,
+    onSuccess: (generation) => this.publishCatalogThrough(generation),
+  });
   private catalogPublishGeneration = 0;
   private catalogFingerprint = "";
   private catalogPublishedFingerprint = "";
+  // Overridable in tests; production values balance recovery speed and daemon load.
+  private catalogPollIntervalMs = 2_000;
+  private reconnectDelaysMs: readonly number[] = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+  private connectionRefreshRetryDelaysMs: readonly number[] = [1_000, 2_000, 5_000, 15_000, 30_000];
+  private daemonState: "connected" | "reconnecting" = "connected";
+  private reconnectAttempt = 0;
+  private reconnectTimer?: NodeJS.Timeout;
+  private reconnectPromise?: Promise<void>;
   private closed = false;
 
   constructor(
@@ -986,12 +991,107 @@ export class PrimeBackend implements AgentBackend {
     this.module = loaded as PrimeModule;
     this.client = new this.module.DaemonClient(this.socketOverride || this.module.defaultDaemonSocketPath());
     await this.client.connect(5_000);
+    this.observeClientDisconnect(this.client);
     await this.refreshCatalog(false);
     this.hub.register("catalog", this.catalogState);
     this.catalogPublishedFingerprint = this.catalogFingerprint;
+    // The poll doubles as liveness detection: transitions are logged and drive
+    // reconnection instead of logging every failed refresh.
     this.pollTimer = setInterval(() => {
-      void this.refreshCatalog(true).catch(() => console.error("Prime catalog refresh failed"));
-    }, 2_000);
+      void this.refreshCatalog(true).then(
+        () => this.noteDaemonHealthy(),
+        () => this.noteDaemonFailure(),
+      );
+    }, this.catalogPollIntervalMs);
+  }
+
+  private observeClientDisconnect(client: PrimeDaemonClient): void {
+    if (typeof client.on !== "function") return;
+    const dropped = () => {
+      if (!this.closed && this.client === client) this.noteDaemonFailure();
+    };
+    // Subscribing to "error" also keeps an emitter-based client from crashing
+    // the process on an unhandled error event.
+    try {
+      client.on("close", dropped);
+      client.on("error", dropped);
+    } catch { /* Emitter surface is optional. */ }
+  }
+
+  private noteDaemonFailure(): void {
+    if (this.closed || this.daemonState === "reconnecting") return;
+    this.daemonState = "reconnecting";
+    console.error("Prime daemon connection lost; reconnecting with backoff");
+    this.scheduleReconnect();
+  }
+
+  private noteDaemonHealthy(): void {
+    // Only flip back on our own if no reconnect attempt is mid-flight; an
+    // in-flight attempt finishes with a full connection rebuild anyway.
+    if (this.closed || this.daemonState !== "reconnecting" || this.reconnectPromise) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.daemonState = "connected";
+    this.reconnectAttempt = 0;
+    console.error("Prime daemon connection recovered");
+    // The outage may have swallowed events; refresh what we still hold.
+    for (const record of this.connections.values()) record.refreshQueue.trigger();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer || this.reconnectPromise) return;
+    const delays = this.reconnectDelaysMs;
+    const delay = delays[Math.min(this.reconnectAttempt, delays.length - 1)] ?? 1_000;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      const attempt = this.attemptReconnect();
+      this.reconnectPromise = attempt;
+      void attempt.catch(() => {}).finally(() => {
+        if (this.reconnectPromise === attempt) this.reconnectPromise = undefined;
+        if (!this.closed && this.daemonState === "reconnecting") this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  private async attemptReconnect(): Promise<void> {
+    if (this.closed || this.daemonState !== "reconnecting") return;
+    const replacement = new this.module.DaemonClient(this.socketOverride || this.module.defaultDaemonSocketPath());
+    try {
+      await replacement.connect(5_000);
+      // Prove the socket answers before swapping it in.
+      const probe = await replacement.request({ type: "list", all: true });
+      if (!probe.success) throw new Error("Prime daemon list failed");
+    } catch {
+      try { replacement.close(); } catch { /* Best-effort cleanup. */ }
+      this.reconnectAttempt += 1;
+      return; // The caller reschedules once this attempt settles.
+    }
+    if (this.closed) {
+      try { replacement.close(); } catch { /* Best-effort cleanup. */ }
+      return;
+    }
+    const previous = this.client;
+    this.client = replacement;
+    this.observeClientDisconnect(replacement);
+    try { previous.close(); } catch { /* Best-effort cleanup. */ }
+    this.daemonState = "connected";
+    this.reconnectAttempt = 0;
+    console.error("Prime daemon reconnected");
+    // A daemon restart invalidates every attached stream: rebuild the live
+    // connections so subscribed clients converge on fresh snapshots.
+    const previouslyConnected = [...this.connections.keys()];
+    await Promise.allSettled([...this.connections.values()].map((record) => this.disposeConnection(record)));
+    try {
+      await this.refreshCatalog(true);
+    } catch {
+      return; // The daemon dropped again immediately; the poll re-detects it.
+    }
+    await Promise.allSettled(previouslyConnected.map(async (publicId) => {
+      const activeSessionId = this.rawSummaries.get(publicId)?.activeSessionId;
+      if (activeSessionId) await this.ensureConnection(publicId, activeSessionId);
+    }));
   }
 
   catalog(): CatalogSnapshot {
@@ -1314,7 +1414,8 @@ export class PrimeBackend implements AgentBackend {
     } catch {
       throw new Error("Prime attention response failed");
     } finally {
-      await this.refreshConnection(pending.publicAgentId);
+      // A failed refresh must not mask the outcome of the response itself.
+      await this.refreshConnection(pending.publicAgentId).catch(() => {});
     }
     const revision = this.requiredSnapshot(pending.publicAgentId).revision;
     return { accepted: true, requestId: input.requestId, revision };
@@ -1397,13 +1498,13 @@ export class PrimeBackend implements AgentBackend {
   async close(): Promise<void> {
     this.closed = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.catalogRefreshTimer) clearTimeout(this.catalogRefreshTimer);
-    this.catalogRefreshTimer = undefined;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     await Promise.allSettled([
-      ...(this.catalogRefreshPromise ? [this.catalogRefreshPromise] : []),
+      this.catalogQueue.close(),
+      ...(this.reconnectPromise ? [this.reconnectPromise] : []),
       ...this.connectionPromises.values(),
     ]);
-    this.settleCatalogWaiters(Number.POSITIVE_INFINITY);
     this.connectionPromises.clear();
     for (const pending of this.pendingExtensions.values()) if (pending.timer) clearTimeout(pending.timer);
     this.pendingExtensions.clear();
@@ -1417,48 +1518,9 @@ export class PrimeBackend implements AgentBackend {
 
   private refreshCatalog(publish: boolean): Promise<void> {
     if (this.closed) return Promise.resolve();
-    const generation = ++this.catalogRequestedGeneration;
-    if (publish) this.catalogPublishGeneration = Math.max(this.catalogPublishGeneration, generation);
-    const result = new Promise<void>((resolve, reject) => {
-      this.catalogRefreshWaiters.push({ generation, resolve, reject });
-    });
-    this.startCatalogRefreshBatch();
-    return result;
-  }
-
-  private startCatalogRefreshBatch(): void {
-    if (this.closed || this.catalogRefreshPromise || this.catalogRefreshTimer
-      || this.catalogProcessedGeneration >= this.catalogRequestedGeneration) return;
-    const batch = this.drainCatalogRefreshBatch();
-    this.catalogRefreshPromise = batch;
-    void batch.then(() => {
-      if (this.catalogRefreshPromise !== batch) return;
-      this.catalogRefreshPromise = undefined;
-      if (this.closed || this.catalogProcessedGeneration >= this.catalogRequestedGeneration) return;
-      this.catalogRefreshTimer = setTimeout(() => {
-        this.catalogRefreshTimer = undefined;
-        this.startCatalogRefreshBatch();
-      }, 0);
-    });
-  }
-
-  private async drainCatalogRefreshBatch(): Promise<void> {
-    for (let count = 0; count < MAX_CATALOG_REFRESH_BATCH && !this.closed
-      && this.catalogProcessedGeneration < this.catalogRequestedGeneration; count += 1) {
-      const generation = this.catalogRequestedGeneration;
-      try {
-        await this.loadCatalogOnce();
-        this.catalogProcessedGeneration = generation;
-        this.publishCatalogThrough(generation);
-        this.settleCatalogWaiters(generation);
-      } catch (error) {
-        this.catalogProcessedGeneration = generation;
-        this.settleCatalogWaiters(
-          generation,
-          error instanceof Error ? error : new Error("Prime daemon list failed"),
-        );
-      }
-    }
+    const settled = this.catalogQueue.request();
+    if (publish) this.catalogPublishGeneration = Math.max(this.catalogPublishGeneration, this.catalogQueue.generation);
+    return settled;
   }
 
   private publishCatalogThrough(generation: number): void {
@@ -1469,16 +1531,6 @@ export class PrimeBackend implements AgentBackend {
       this.catalogPublishedFingerprint = this.catalogFingerprint;
     }
     if (this.catalogPublishGeneration <= generation) this.catalogPublishGeneration = 0;
-  }
-
-  private settleCatalogWaiters(generation: number, error?: Error): void {
-    for (let index = this.catalogRefreshWaiters.length - 1; index >= 0; index -= 1) {
-      const waiter = this.catalogRefreshWaiters[index];
-      if (!waiter || waiter.generation > generation) continue;
-      this.catalogRefreshWaiters.splice(index, 1);
-      if (error) waiter.reject(error);
-      else waiter.resolve();
-    }
   }
 
   private async loadCatalogOnce(): Promise<void> {
@@ -1651,9 +1703,18 @@ export class PrimeBackend implements AgentBackend {
       activeSessionId,
       connection,
       revision: this.snapshots.get(publicId)?.revision ?? 0,
-      refreshDirty: false,
       disposed: false,
       unsubscribe: () => {},
+      refreshQueue: new CoalescedRefreshQueue({
+        run: () => this.runConnectionRefresh(record),
+        maxBatch: 4,
+        delayMs: 40,
+        retryDelaysMs: this.connectionRefreshRetryDelaysMs,
+        onFailure: (_error, consecutiveFailures) => {
+          if (consecutiveFailures === 1) console.error("Prime agent refresh failed; retrying with backoff");
+        },
+        onRecovered: () => console.error("Prime agent refresh recovered"),
+      }),
     };
     try {
       record.unsubscribe = connection.subscribe((event) => {
@@ -1723,52 +1784,21 @@ export class PrimeBackend implements AgentBackend {
 
   private queueConnectionRefresh(record: ConnectionRecord): void {
     if (record.disposed || this.connections.get(record.publicId) !== record) return;
-    record.refreshDirty = true;
-    if (record.refreshPromise || record.refreshTimer) return;
-    record.refreshTimer = setTimeout(() => {
-      record.refreshTimer = undefined;
-      void this.startConnectionRefresh(record);
-    }, 40);
+    record.refreshQueue.trigger();
   }
 
   private refreshConnection(publicId: string): Promise<void> {
     const record = this.connections.get(publicId);
     if (!record || record.disposed) return Promise.resolve();
-    record.refreshDirty = true;
-    if (record.refreshTimer) {
-      clearTimeout(record.refreshTimer);
-      record.refreshTimer = undefined;
-    }
-    return this.startConnectionRefresh(record);
+    return record.refreshQueue.request();
   }
 
-  private startConnectionRefresh(record: ConnectionRecord): Promise<void> {
-    if (record.refreshPromise) return record.refreshPromise;
-    const refresh = this.drainConnectionRefreshes(record);
-    record.refreshPromise = refresh;
-    void refresh.then(() => {
-      if (record.refreshPromise !== refresh) return;
-      record.refreshPromise = undefined;
-      if (record.refreshDirty) this.queueConnectionRefresh(record);
-    });
-    return refresh;
-  }
-
-  private async drainConnectionRefreshes(record: ConnectionRecord): Promise<void> {
-    const maximumBatch = 4;
-    for (let count = 0; count < maximumBatch && record.refreshDirty; count += 1) {
-      record.refreshDirty = false;
-      if (record.disposed || this.connections.get(record.publicId) !== record) return;
-      try {
-        const snapshot = validatePrimeSnapshot(await record.connection.getInitialSnapshot());
-        if (record.disposed || this.connections.get(record.publicId) !== record) return;
-        this.applyPrimeSnapshot(record, snapshot, true);
-        await this.refreshCatalog(true);
-      } catch {
-        console.error("Prime agent refresh failed");
-        return;
-      }
-    }
+  private async runConnectionRefresh(record: ConnectionRecord): Promise<void> {
+    if (record.disposed || this.connections.get(record.publicId) !== record) return;
+    const snapshot = validatePrimeSnapshot(await record.connection.getInitialSnapshot());
+    if (record.disposed || this.connections.get(record.publicId) !== record) return;
+    this.applyPrimeSnapshot(record, snapshot, true);
+    await this.refreshCatalog(true);
   }
 
   private applyPrimeSnapshot(record: ConnectionRecord, source: PrimeSnapshot, publish: boolean): void {
@@ -1825,11 +1855,9 @@ export class PrimeBackend implements AgentBackend {
   private async disposeConnection(record: ConnectionRecord): Promise<void> {
     if (record.disposed) return;
     record.disposed = true;
-    record.refreshDirty = false;
-    if (record.refreshTimer) {
-      clearTimeout(record.refreshTimer);
-      record.refreshTimer = undefined;
-    }
+    // Not awaited: an in-flight refresh pass may itself be waiting on a catalog
+    // refresh whose batch is what called this disposal.
+    void record.refreshQueue.close();
     if (this.connections.get(record.publicId) === record) this.connections.delete(record.publicId);
     this.clearPendingExtensions(record.publicId, true);
     try { record.unsubscribe(); } catch { /* Best-effort listener cleanup. */ }
@@ -2020,19 +2048,8 @@ export class PrimeBackend implements AgentBackend {
     };
   }
 
-  private async withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.commandLocks.get(agentId) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const queued = previous.catch(() => {}).then(() => gate);
-    this.commandLocks.set(agentId, queued);
-    await previous.catch(() => {});
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.commandLocks.get(agentId) === queued) this.commandLocks.delete(agentId);
-    }
+  private withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    return withSerialLock(this.commandLocks, agentId, operation);
   }
 
   private advanceSnapshotRevision(agentId: string): number {
