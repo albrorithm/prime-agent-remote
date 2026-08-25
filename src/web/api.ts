@@ -126,6 +126,12 @@ export async function pair(token: string, options?: ApiRequestOptions): Promise<
   }, options, pairResponseSchema);
 }
 
+const signOutResponseSchema = z.object({ signedOut: z.literal(true) });
+
+export async function signOut(csrfToken: string, options?: ApiRequestOptions): Promise<void> {
+  await mutate("/api/v1/auth/logout", csrfToken, {}, options, signOutResponseSchema);
+}
+
 export async function bootstrap(options?: ApiRequestOptions): Promise<BootstrapResponse> {
   return request("/api/v1/bootstrap", {
     credentials: "same-origin",

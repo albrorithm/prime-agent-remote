@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { WebSocket as WebSocketClient } from "ws";
 import type { CellOutput } from "../protocol.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
@@ -133,6 +134,12 @@ async function agentRevision(t: TestGateway, client: PairedClient, agentId: stri
   return ((await response.json()) as { revision: number }).revision;
 }
 
+function openSocket(t: TestGateway, client: PairedClient): WebSocketClient {
+  return new WebSocketClient(`ws://127.0.0.1:${t.port}/ws/v1/events`, {
+    headers: { Origin: ORIGIN, Cookie: client.cookie },
+  });
+}
+
 function rawGet(t: TestGateway, rawPath: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({ host: "127.0.0.1", port: t.port, path: rawPath, method: "GET" }, (response) => {
@@ -208,6 +215,70 @@ function rawGetlessPost(t: TestGateway, path: string, body: string, headers: Rec
     request.end(body);
   });
 }
+
+describe("gateway sign-out", () => {
+  it("403s a sign-out that fails the CSRF check", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const response = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: client.cookie, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(403);
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(200);
+  });
+
+  it("clears the cookie, kills the session, and answers a replay with 401", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const response = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ signedOut: true });
+    expect(response.headers.get("set-cookie")).toBe("prime_web_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(401);
+    const replay = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(replay.status).toBe(401);
+  });
+
+  it("closes every websocket bound to the session that signed out", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const sockets = [openSocket(t, client), openSocket(t, client)];
+    await Promise.all(sockets.map((socket) => once(socket, "open")));
+
+    const response = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(response.status).toBe(200);
+
+    const closes = await Promise.all(sockets.map((socket) => once(socket, "close")));
+    for (const [code] of closes) expect(code).toBe(1008);
+  });
+
+  it("leaves another session's websocket connected", async () => {
+    const t = await startGateway();
+    const [first, second] = [await pairClient(t), await pairClient(t)];
+    const survivor = openSocket(t, second);
+    await once(survivor, "open");
+
+    await fetch(`${t.baseUrl}/api/v1/auth/logout`, { method: "POST", headers: mutationHeaders(first), body: "{}" });
+
+    expect(survivor.readyState).toBe(WebSocketClient.OPEN);
+    survivor.close();
+  });
+});
 
 describe("gateway mutation guards", () => {
   it("403s mutations that fail the CSRF or Origin checks", async () => {

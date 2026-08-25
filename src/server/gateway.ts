@@ -84,6 +84,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   const mutationCache = new MutationCache<unknown>(10 * 60_000);
   const mutationLimiter = deps.mutationLimiter
     ?? new SlidingWindowLimiter(MUTATION_WINDOW_MS, MAX_MUTATIONS_PER_SESSION, MAX_TRACKED_MUTATION_SESSIONS);
+  const sessionSockets = new Map<string, Set<WebSocket>>();
 
   function securityHeaders(res: ServerResponse): void {
     res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");
@@ -266,6 +267,18 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
 
     if (!allowMutation(req, res, session)) return true;
 
+    if (req.method === "POST" && pathname === "/api/v1/auth/logout") {
+      // Deliberately not request-ID deduplicated: the cache is keyed by session
+      // id, and this call destroys that session, so a replay 401s before it
+      // could ever reach a cached entry.
+      await readJson(req);
+      const sockets = [...(sessionSockets.get(session.id) ?? [])];
+      auth.signOut(res, session);
+      for (const ws of sockets) closeWebSocket(ws, 1008, "Signed out");
+      json(res, 200, { signedOut: true });
+      return true;
+    }
+
     if (req.method === "POST" && pathname === "/api/v1/sessions") {
       const parsed = createSessionRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) { problem(res, 400, "Invalid session request"); return true; }
@@ -440,12 +453,18 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     let expiryTimer: NodeJS.Timeout | undefined;
     let cleaned = false;
 
+    const bound = sessionSockets.get(session.id) ?? new Set<WebSocket>();
+    bound.add(ws);
+    sessionSockets.set(session.id, bound);
+
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       if (expiryTimer) clearTimeout(expiryTimer);
       for (const detach of subscriptions.values()) detach();
       subscriptions.clear();
+      bound.delete(ws);
+      if (bound.size === 0) sessionSockets.delete(session.id);
     };
 
     const send = (frame: ServerFrame) => {

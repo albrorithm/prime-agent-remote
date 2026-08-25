@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized } from "./api";
+import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, signOut } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -192,5 +192,33 @@ describe("request safety", () => {
       cwd: "/workspace",
       name: "Example",
     });
+  });
+});
+
+describe("sign out", () => {
+  it("posts an authenticated logout the gateway can attribute to the session", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ signedOut: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(signOut("csrf")).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/auth/logout");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": "csrf" },
+    });
+  });
+
+  it("surfaces a rejected sign-out instead of reporting success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ title: "Origin or CSRF validation failed" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(signOut("stale")).rejects.toThrow("Origin or CSRF validation failed");
   });
 });

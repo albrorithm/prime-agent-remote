@@ -20,6 +20,7 @@ const apiMock = vi.hoisted(() => {
     executeSlashCommand: vi.fn(),
     abortAgent: vi.fn(),
     respondToAttention: vi.fn(),
+    signOut: vi.fn(),
     unauthorized: null as null | (() => void),
   };
 });
@@ -36,6 +37,7 @@ vi.mock("./api", () => ({
   executeSlashCommand: apiMock.executeSlashCommand,
   abortAgent: apiMock.abortAgent,
   respondToAttention: apiMock.respondToAttention,
+  signOut: apiMock.signOut,
   humanizeError: (error: unknown, fallback: string) =>
     error instanceof Error && error.message ? error.message : fallback,
 }));
@@ -163,6 +165,7 @@ beforeEach(() => {
   apiMock.executeSlashCommand.mockReset();
   apiMock.abortAgent.mockReset();
   apiMock.respondToAttention.mockReset();
+  apiMock.signOut.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -362,6 +365,49 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(result.current.catalog.agents).toEqual([]);
     expect(result.current.snapshots).toEqual({});
     expect(result.current.selectedAgentId).toBeNull();
+  });
+
+  it("signs out to the login screen without an expired-session greeting", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => { await result.current.signOut(); });
+
+    expect(apiMock.signOut).toHaveBeenCalledWith("csrf");
+    expect(result.current.authRequired).toBe(true);
+    expect(result.current.hadSession).toBe(false);
+    expect(result.current.snapshots).toEqual({});
+    expect(result.current.csrfToken).toBe("");
+  });
+
+  it("keeps the session when sign-out fails, rather than faking it locally", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    apiMock.signOut.mockRejectedValue(new Error("gateway unreachable"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => { await result.current.signOut(); });
+
+    expect(result.current.authRequired).toBe(false);
+    expect(result.current.error).toContain("gateway unreachable");
+    expect(result.current.selectedSnapshot?.agentId).toBe("agent-a");
+  });
+
+  it("treats a sign-out on an already-dead session as done", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    apiMock.signOut.mockRejectedValue(new apiMock.ApiError(401, "Authentication required"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => { await result.current.signOut(); });
+
+    expect(result.current.authRequired).toBe(true);
+    expect(result.current.hadSession).toBe(false);
+    expect(result.current.error).toBeNull();
   });
 
   it("rolls selection back when its snapshot cannot load", async () => {

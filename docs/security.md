@@ -16,7 +16,8 @@ The gateway currently permits these live operations:
 - request abort;
 - answer supported extension confirmation and selection requests;
 - create a new daemon session in a chosen working directory;
-- list directory names for the new-session picker.
+- list directory names for the new-session picker;
+- explicitly sign out, invalidating the session and clearing its cookie.
 
 Experimental detected extension commands can run with the local capabilities already granted to Prime Agent, while detected prompt and skill commands can create model turns. This expands the paired browser’s trust boundary and retains a catalog-reload race that may turn command text into a model prompt.
 
@@ -33,7 +34,7 @@ A setup token is exchanged for an in-memory gateway session. The browser receive
 - `Secure` when configured for HTTPS;
 - a separate CSRF token returned inside authenticated JSON.
 
-The setup token is never stored by the browser application. Production requires an explicitly configured setup token of at least 32 characters. Sessions expire in memory after the configured TTL. A WebSocket is bound to the session used during its upgrade and is closed when that session expires.
+The setup token is never stored by the browser application. Production requires an explicitly configured setup token of at least 32 characters. Sessions expire in memory after the configured TTL, and an explicit sign-out invalidates the session immediately and clears the cookie with the same attributes it was set with. A WebSocket is bound to the session used during its upgrade and is closed when that session expires or is signed out, including a second tab sharing the session.
 
 ## Browser checks
 
@@ -60,7 +61,7 @@ Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Vali
 Before a broad deployment:
 
 - persist session revocation across gateway restarts if required;
-- add an explicit logout and session-management screen;
+- add a session-management screen listing and revoking other sessions;
 - validate all Prime extension UI request shapes before adding free-text responses;
 - perform a physical-device and reverse-proxy security test;
 - add privacy-minimal push only after authoritative attention transitions are stable.

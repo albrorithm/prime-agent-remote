@@ -54,6 +54,35 @@ describe("AuthService", () => {
     expect(auth.validateMutation(request({ origin: "https://other.example.test", "x-csrf-token": session!.csrfToken }), session!)).toBe(false);
   });
 
+  it("invalidates the session on sign-out and clears the cookie with matching attributes", () => {
+    const auth = new AuthService(config());
+    const paired = response();
+    const session = auth.pair(request({ origin: "https://agent.example.test" }), paired.value, "correct-token")!;
+    const cookiePair = paired.headers.get("set-cookie")!.split(";", 1)[0];
+
+    const cleared = response();
+    auth.signOut(cleared.value, session);
+
+    const cookie = cleared.headers.get("set-cookie")!;
+    expect(cookie).toBe("prime_web_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure");
+    expect(auth.authenticate(request({ cookie: cookiePair }))).toBeNull();
+    expect(auth.isSessionActive(session)).toBe(false);
+    expect(auth.validateMutation(request({
+      origin: "https://agent.example.test",
+      "x-csrf-token": session.csrfToken,
+    }), session)).toBe(false);
+  });
+
+  it("omits Secure from the clearing cookie exactly as pairing does", () => {
+    const auth = new AuthService(config({ secureCookie: false }));
+    const paired = response();
+    const session = auth.pair(request({}, "100.64.0.9"), paired.value, "correct-token")!;
+    const cleared = response();
+    auth.signOut(cleared.value, session);
+    expect(cleared.headers.get("set-cookie")).not.toContain("Secure");
+    expect(paired.headers.get("set-cookie")).not.toContain("Secure");
+  });
+
   it("ignores malformed cookies", () => {
     const auth = new AuthService(config());
     expect(() => auth.authenticate(request({ cookie: "prime_web_session=%ZZ" }))).not.toThrow();

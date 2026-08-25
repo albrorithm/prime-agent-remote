@@ -69,12 +69,16 @@ export class AuthService {
       expiresAt: now + this.config.sessionTtlMs,
     };
     this.sessions.set(session.id, session);
-    const secure = this.config.secureCookie ? "; Secure" : "";
     res.setHeader(
       "Set-Cookie",
-      `${SESSION_COOKIE}=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(1, Math.ceil(this.config.sessionTtlMs / 1000))}${secure}`,
+      this.sessionCookie(encodeURIComponent(session.id), Math.max(1, Math.ceil(this.config.sessionTtlMs / 1000))),
     );
     return session;
+  }
+
+  signOut(res: ServerResponse, session: Session): void {
+    this.sessions.delete(session.id);
+    res.setHeader("Set-Cookie", this.sessionCookie("", 0));
   }
 
   authenticate(req: IncomingMessage): Session | null {
@@ -104,6 +108,13 @@ export class AuthService {
       && this.isAllowedOrigin(req)
       && typeof csrf === "string"
       && safeEqual(csrf, session.csrfToken);
+  }
+
+  // Shared so the clearing cookie cannot drift from the one pair() set: a
+  // browser keeps the original cookie if any attribute differs.
+  private sessionCookie(value: string, maxAgeSeconds: number): string {
+    const secure = this.config.secureCookie ? "; Secure" : "";
+    return `${SESSION_COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
   }
 
   private pruneSessions(now: number, force = false): void {

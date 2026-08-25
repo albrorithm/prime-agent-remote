@@ -126,7 +126,7 @@ interface State {
 
 type Action =
   | { type: "bootstrap"; value: BootstrapResponse }
-  | { type: "auth_required" }
+  | { type: "auth_required"; signedOut?: true }
   | { type: "connection"; value: ConnectionPhase }
   | { type: "catalog"; value: CatalogSnapshot }
   | { type: "snapshot"; value: AgentSnapshot; source?: "http" | "ws"; allowEqualRevision?: boolean }
@@ -205,7 +205,8 @@ function reducer(state: State, action: Action): State {
         ...initialState,
         authRequired: true,
         connection: "offline",
-        hadSession: state.hadSession,
+        // A deliberate sign-out is not an expiry, so Login greets it as a fresh pair.
+        hadSession: action.signedOut ? false : state.hadSession,
       };
     case "connection":
       return {
@@ -313,6 +314,7 @@ interface GatewayContextValue extends State {
   runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
   abort: (agentId?: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
+  signOut: () => Promise<void>;
   reconnect: () => void;
 }
 
@@ -431,7 +433,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  const resetForUnauthorized = useCallback(() => {
+  const resetForUnauthorized = useCallback((signedOut?: true) => {
     initializationGeneration.current += 1;
     sessionGeneration.current += 1;
     lifecycleAbort.current?.abort();
@@ -453,7 +455,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     socketRef.current = null;
     socketGeneration.current += 1;
     socket?.close();
-    dispatch({ type: "auth_required" });
+    dispatch({ type: "auth_required", ...(signedOut ? { signedOut } : {}) });
   }, []);
 
   const connect = useCallback(() => {
@@ -595,7 +597,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       socketRef.current = null;
       replayingStreams.current.clear();
       const closeEvent = event as CloseEvent;
-      if (closeEvent.code === 1008 && /session expired/i.test(closeEvent.reason)) {
+      // 1008 also carries "Invalid protocol frame", which must keep retrying,
+      // so the reason is load-bearing. These two strings are the gateway's
+      // auth-loss closes (src/server/gateway.ts): expiry, and sign-out — which
+      // reaches every tab sharing the session, not just the one that signed out.
+      if (closeEvent.code === 1008 && /session expired|signed out/i.test(closeEvent.reason)) {
         resetForUnauthorized();
         return;
       }
@@ -958,6 +964,20 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [showError],
   );
 
+  const signOut = useCallback(async () => {
+    try {
+      await api.signOut(stateRef.current.csrfToken);
+    } catch (error) {
+      // Anything but a 401 means the server may still honour the cookie, so
+      // clearing local state here would only fake a sign-out.
+      if (!(error instanceof ApiError && error.status === 401)) {
+        showError(humanizeError(error, "Sign out failed"));
+        return;
+      }
+    }
+    resetForUnauthorized(true);
+  }, [resetForUnauthorized, showError]);
+
   const reconnect = useCallback(() => {
     retryCount.current = 0;
     socketRetryBlocked.current = false;
@@ -988,9 +1008,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       runSlashCommand,
       abort,
       respond,
+      signOut,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, signOut, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }
