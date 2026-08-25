@@ -36,3 +36,16 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_SESSION_TTL_MS` | `43200000` (12 hours) | In-memory HTTP and WebSocket session lifetime |
 
 Do not put real credentials in committed dotenv files.
+
+## Install-time theming
+
+`public/manifest.webmanifest` pins `theme_color` and `background_color` to
+`#000000`. Both are read once when the app is installed and cannot be changed
+at runtime, so a single value has to serve both themes. Black is deliberate:
+the product's identity is dark, and a black launch flash ahead of the light
+theme is less jarring than a white one ahead of the dark theme.
+
+The consequence is that a viewer whose OS is set to Light Appearance sees a
+black splash before the app paints its light ground. The `<meta name="theme-color">`
+in `index.html` has no such limit — `public/theme-init.js` corrects it before
+first paint and `applySettings` keeps it on the active theme.
