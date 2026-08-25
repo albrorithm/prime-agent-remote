@@ -10,6 +10,7 @@ import {
 import { ChevronDown, ChevronRight, GitBranch, MoreHorizontal, Users } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { AgentSummary } from "../../protocol";
+import { agentStatus } from "./agent-status";
 import {
   buildVisibleAgentDescendants,
   collectAgentDescendants,
@@ -89,10 +90,6 @@ export function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPositio
     maxHeight: Math.max(1, Math.min(320, placement === "below" ? availableBelow : availableAbove)),
     placement,
   };
-}
-
-function activityLabel(agent: AgentSummary): "Active" | "Idle" {
-  return agent.activity === "working" || agent.lifecycle === "starting" ? "Active" : "Idle";
 }
 
 const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -330,7 +327,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
                       aria-level={row.level}
                       aria-expanded={children.length ? isExpanded : undefined}
                       aria-current={isCurrent ? "true" : undefined}
-                      aria-label={`${row.agent.name}, ${activityLabel(row.agent)}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}${isCurrent ? ", current" : ""}`}
+                      aria-label={`${row.agent.name}, ${agentStatus(row.agent).label}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}${isCurrent ? ", current" : ""}`}
                       tabIndex={focusId === row.agent.id || (!focusId && index === 0) ? 0 : -1}
                       style={{ "--family-depth": row.level - 1 } as CSSProperties}
                       onFocus={() => setFocusId(row.agent.id)}
@@ -353,7 +350,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
                       ) : <span className="family-disclosure-space" />}
                       <span className="family-agent-copy">
                         <strong title={row.agent.name}>{row.agent.name}</strong>
-                        <small>{activityLabel(row.agent)}</small>
+                        <small>{agentStatus(row.agent).label}</small>
                       </span>
                     </div>
                   );

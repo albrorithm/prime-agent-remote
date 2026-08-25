@@ -37,6 +37,23 @@ export class ApiError extends Error {
   }
 }
 
+// Browser fetch failures (offline, DNS, CORS, dev server down) throw a bare
+// TypeError whose message is developer-speak ("Failed to fetch", "fetch
+// failed", "NetworkError when attempting to fetch resource", "Load failed").
+// ApiError messages already come from the gateway's problem-details body
+// (see decode() below) and are human-facing as-is.
+const NETWORK_ERROR_PATTERN = /fetch failed|failed to fetch|networkerror|load failed/i;
+
+/** Turn a thrown value into UI-safe copy instead of letting a raw Error.message through. */
+export function humanizeError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) return error.message || fallback;
+  if (error instanceof Error && NETWORK_ERROR_PATTERN.test(error.message)) {
+    return "Can't reach the gateway. Check your connection and try again.";
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
+}
+
 type UnauthorizedHandler = () => void;
 const unauthorizedHandlers = new Set<UnauthorizedHandler>();
 

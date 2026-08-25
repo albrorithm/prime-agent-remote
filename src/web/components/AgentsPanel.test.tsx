@@ -93,4 +93,40 @@ describe("AgentsPanel", () => {
     render(<AgentsPanel />);
     expect(screen.queryByRole("button", { name: "Close sessions" })).not.toBeInTheDocument();
   });
+
+  it("replaces the mobile FAB with a header button on persistent desktop widths", () => {
+    const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: true,
+        media: "(min-width: 1100px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    try {
+      render(<AgentsPanel />);
+      expect(screen.getByRole("button", { name: "Start a new session" })).not.toHaveClass("new-session-fab");
+      expect(document.querySelector(".new-session-fab")).not.toBeInTheDocument();
+    } finally {
+      if (original) Object.defineProperty(window, "matchMedia", original);
+      else delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia;
+    }
+  });
+
+  it("shows a single close affordance in the new-session flow, not two", async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<AgentsPanel onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Start a new session" }));
+
+    expect(screen.queryByRole("button", { name: "Close sessions" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close new session" })).toBeInTheDocument();
+  });
 });

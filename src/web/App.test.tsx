@@ -96,7 +96,7 @@ describe("mobile shell navigation", () => {
     const user = userEvent.setup();
     render(<App />);
     const shell = screen.getByRole("main");
-    await user.click(screen.getByRole("button", { name: /Open activity/ }));
+    await user.click(screen.getByRole("button", { name: /Open session dashboard/ }));
     expect(shell).toHaveAttribute("data-activity-open", "true");
     await user.click(screen.getByRole("button", { name: "Close session dashboard" }));
     expect(shell).toHaveAttribute("data-activity-open", "false");
@@ -154,7 +154,9 @@ describe("mobile shell navigation", () => {
     expect(globalUi).toHaveClass("is-modal-hidden");
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dismiss hint" })).not.toBeInTheDocument();
-    expect(globalUi).toContainElement(screen.getByText("Demo"));
+    // The demo chip lives in the transcript header now (a static chip, not a
+    // floating overlay), so it inerts along with the rest of the stage.
+    expect(document.querySelector(".conversation-header")).toContainElement(screen.getByText("Demo"));
 
     // Even programmatic focus outside the modal is recovered on the next Tab.
     const hiddenRetry = document.querySelector<HTMLButtonElement>(".connection-banner button")!;

@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { KeyRound, LoaderCircle } from "lucide-react";
+import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 
 export function Login() {
-  const { pair } = useGateway();
+  const { pair, hadSession } = useGateway();
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -16,7 +17,7 @@ export function Login() {
       await pair(token);
       setToken("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Pairing failed");
+      setError(humanizeError(cause, "Pairing failed"));
     } finally {
       setBusy(false);
     }
@@ -28,8 +29,12 @@ export function Login() {
         <div className="login-mark"><KeyRound aria-hidden="true" /></div>
         <div>
           <p className="eyebrow">Prime Agent</p>
-          <h1>Pair this device</h1>
-          <p className="muted">Enter the pairing token shown by the local gateway.</p>
+          <h1>{hadSession ? "Session expired" : "Pair this device"}</h1>
+          <p className="muted">
+            {hadSession
+              ? "Your pairing session ended. Enter the pairing token shown by the local gateway to continue."
+              : "Enter the pairing token shown by the local gateway."}
+          </p>
         </div>
         <label htmlFor="pairing-token">Pairing token</label>
         <input

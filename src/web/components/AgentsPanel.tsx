@@ -1,6 +1,7 @@
 import { Bot, CircleAlert, Plus, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
+import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
 import { AgentTree } from "./AgentTree";
 import { NewSessionPanel } from "./NewSessionPanel";
 
@@ -12,6 +13,7 @@ interface AgentsPanelProps {
 
 export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) {
   const { abort, catalog, selectedAgentId, selectAgent } = useGateway();
+  const persistentDesktop = usePersistentDesktop();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const filtered = useMemo(() => {
@@ -42,14 +44,19 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   };
 
   return (
-    <section className="panel agents-panel" aria-labelledby="agents-heading">
-      <header className="drawer-header">
-        <div className="drawer-title">
-          <img src="/prime-mark.svg" alt="" />
-          <div><p className="eyebrow">Prime Agent</p><h1 id="agents-heading">Sessions</h1></div>
-        </div>
-        {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
-      </header>
+    <section className="panel agents-panel" aria-label="Sessions">
+      {!creating && (
+        <header className="drawer-header">
+          <div className="drawer-title">
+            <img src="/prime-mark.svg" alt="" />
+            <div><p className="eyebrow">Prime Agent</p><h1>Sessions</h1></div>
+          </div>
+          {persistentDesktop && (
+            <button className="icon-button" onClick={() => setCreating(true)} aria-label="Start a new session"><Plus /></button>
+          )}
+          {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
+        </header>
+      )}
       {creating ? (
         <NewSessionPanel
           onClose={() => setCreating(false)}
@@ -76,9 +83,11 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
               <p className="empty-state">No sessions match that search.</p>
             )}
           </div>
-          <button className="new-session-fab" onClick={() => setCreating(true)} aria-label="Start a new session">
-            <Plus />
-          </button>
+          {!persistentDesktop && (
+            <button className="new-session-fab" onClick={() => setCreating(true)} aria-label="Start a new session">
+              <Plus />
+            </button>
+          )}
         </>
       )}
     </section>

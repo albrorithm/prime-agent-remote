@@ -30,7 +30,7 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
       if (mountedRef.current && version === loadVersionRef.current) setListing(nextListing);
     } catch (cause) {
       if (mountedRef.current && version === loadVersionRef.current) {
-        setError(cause instanceof Error ? cause.message : "Could not list that directory");
+        setError(api.humanizeError(cause, "Could not list that directory"));
       }
     } finally {
       if (mountedRef.current && version === loadVersionRef.current) setLoading(false);
@@ -72,7 +72,10 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
           <FolderPlus aria-hidden="true" />
           <div><p className="eyebrow">Prime Agent</p><h2 id="new-session-heading">New session</h2></div>
         </div>
-        <button className="icon-button drawer-close" onClick={onClose} aria-label="Close new session"><X /></button>
+        {/* Deliberately not `.drawer-close`: that class hides at ≥1100px (the whole
+            Sessions panel is persistent there), but this backs out of just the
+            New session sub-view, which desktop still needs a way to do. */}
+        <button className="icon-button" onClick={onClose} aria-label="Close new session"><X /></button>
       </header>
 
       <nav className="directory-crumbs" aria-label="Directory ancestry">
@@ -112,7 +115,7 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
 
       <div className="new-session-form" data-gesture-exclusion>
         <div className="new-session-path">
-          <code>{listing?.path ?? "…"}</code>
+          <code title={listing?.path}>{listing?.path ?? "…"}</code>
           <button
             className="icon-button"
             onClick={() => setShowHidden((value) => !value)}

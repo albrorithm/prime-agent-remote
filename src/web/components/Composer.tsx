@@ -1,4 +1,4 @@
-import { Command, Image, Plus, Send, Square, Wrench } from "lucide-react";
+import { Image, Plus, Send, Square, SquareSlash, Wrench } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -222,7 +222,7 @@ export function Composer() {
           aria-label="Composer options"
           onKeyDown={optionsMenu.onOptionsMenuKeyDown}
         >
-          <button role="menuitem" data-menu-index="0" tabIndex={optionsMenu.optionsMenuIndex === 0 ? 0 : -1} onFocus={() => optionsMenu.setOptionsMenuIndex(0)} onClick={slashMenu.startSlashCommand}><Command /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
+          <button role="menuitem" data-menu-index="0" tabIndex={optionsMenu.optionsMenuIndex === 0 ? 0 : -1} onFocus={() => optionsMenu.setOptionsMenuIndex(0)} onClick={slashMenu.startSlashCommand}><SquareSlash /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
           <button role="menuitem" data-menu-index="1" tabIndex={optionsMenu.optionsMenuIndex === 1 ? 0 : -1} onFocus={() => optionsMenu.setOptionsMenuIndex(1)} onClick={attachments.chooseImages} disabled={!canAttachImages || attachments.preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
           <button role="menuitem" data-menu-index="2" tabIndex={-1} disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
         </div>

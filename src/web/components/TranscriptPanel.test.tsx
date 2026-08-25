@@ -86,6 +86,35 @@ describe("compact transcript entries", () => {
     expect(screen.getByLabelText("bash tool complete: npm test, ↑ 2 ↓ 12 lines · 1.2s")).toBeInTheDocument();
   });
 
+  it("expands a thinking row to its full text when presentation.full is bounded and populated", async () => {
+    const user = userEvent.setup();
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "thinking-full",
+          text: "Planning focused checks",
+          presentation: { kind: "thinking", full: "Planning focused checks across the auth module, the session store, and the retry ladder before touching any code." },
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/retry ladder/)).not.toBeVisible();
+    await user.click(screen.getByText("Planning focused checks"));
+    expect(screen.getByText(/retry ladder/)).toBeVisible();
+  });
+
+  it("does not add an expand affordance when there is no distinct full text", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{ ...base, id: "thinking-plain", text: "Planning focused checks", presentation: { kind: "thinking", full: "Planning focused checks" } }}
+      />,
+    );
+    expect(document.querySelector("details.thinking-disclosure")).not.toBeInTheDocument();
+  });
+
   it("dispatches python rows to the expandable cell row", () => {
     render(
       <TranscriptEntry
@@ -587,5 +616,44 @@ describe("turn grouping in the panel", () => {
     await user.click(screen.getByRole("button", { name: "Close search" }));
     expect(view.container.querySelector(".turn-group")).not.toBeNull();
     expect(view.container.querySelector("details.turn-work")).not.toBeNull();
+  });
+
+  it("clears search state when the selected agent changes", async () => {
+    const user = userEvent.setup();
+    setState(turnMessages());
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Search transcript" }));
+    await user.type(screen.getByRole("textbox", { name: "Search this transcript" }), "helper");
+    expect(screen.getByText("2 matches")).toBeInTheDocument();
+
+    const otherAgent = agent("agent-b", null, 0);
+    gatewayMock.state = {
+      ...gatewayMock.state!,
+      selectedAgent: otherAgent,
+      selectedSnapshot: { revision: 1, agentId: "agent-b", messages: [], attention: [] },
+    };
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.queryByRole("textbox", { name: "Search this transcript" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Search transcript" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Search transcript" }));
+    expect(screen.getByRole("textbox", { name: "Search this transcript" })).toHaveValue("");
+  });
+
+  it("offers a Clear search action when a search has no matches", async () => {
+    const user = userEvent.setup();
+    setState(turnMessages());
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Search transcript" }));
+    await user.type(screen.getByRole("textbox", { name: "Search this transcript" }), "nonexistent-term");
+
+    expect(screen.getByText("No messages match that search.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+
+    expect(screen.getByRole("textbox", { name: "Search this transcript" })).toHaveValue("");
+    expect(screen.queryByText("No messages match that search.")).not.toBeInTheDocument();
   });
 });

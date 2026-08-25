@@ -519,11 +519,11 @@ describe("Composer", () => {
     await waitFor(() => expect(stop).toBeEnabled());
   });
 
-  it("persists drafts to session storage for reload recovery", async () => {
+  it("persists drafts to local storage for reload recovery", async () => {
     const user = userEvent.setup();
     render(<Composer />);
     await user.type(screen.getByRole("textbox", { name: "Message Agent" }), "survives reload");
-    expect(sessionStorage.getItem("prime-web-drafts")).toContain("survives reload");
+    expect(localStorage.getItem("prime-web-drafts")).toContain("survives reload");
   });
   it("prevents unsupported file drops and announces the validation error", () => {
     render(<Composer />);
@@ -555,7 +555,7 @@ describe("Composer", () => {
   });
 
   it("validates stored draft values before using them", () => {
-    sessionStorage.setItem("prime-web-drafts", JSON.stringify({
+    localStorage.setItem("prime-web-drafts", JSON.stringify({
       "agent-1": 42,
       "other-agent": "valid draft",
       "__proto__": "ignored",

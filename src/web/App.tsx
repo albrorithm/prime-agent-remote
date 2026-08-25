@@ -8,10 +8,10 @@ import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useGateway } from "./gateway-store";
 import { useDrawerGesture } from "./hooks/useDrawerGesture";
 import { useInstalledViewportRecovery } from "./hooks/useInstalledViewportRecovery";
+import { usePersistentDesktop } from "./hooks/usePersistentDesktop";
 
 const FOCUSABLE = 'button:not([disabled]):not([tabindex="-1"]), a[href]:not([tabindex="-1"]), input:not([disabled]):not([hidden]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
 const HINT_KEY = "prime-web-gesture-hint";
-const PERSISTENT_DESKTOP_QUERY = "(min-width: 1100px)";
 
 function isAvailableFocusTarget(target: HTMLElement | null): target is HTMLElement {
   if (!target?.isConnected || target === document.body || target === document.documentElement) return false;
@@ -28,27 +28,6 @@ function isAvailableFocusTarget(target: HTMLElement | null): target is HTMLEleme
 
 function availableFocusTargets(container: HTMLElement): HTMLElement[] {
   return [...container.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(isAvailableFocusTarget);
-}
-
-function usePersistentDesktop(): boolean {
-  const [persistent, setPersistent] = useState(() =>
-    typeof window !== "undefined"
-      && typeof window.matchMedia === "function"
-      && window.matchMedia(PERSISTENT_DESKTOP_QUERY).matches,
-  );
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia(PERSISTENT_DESKTOP_QUERY);
-    const update = () => setPersistent(query.matches);
-    update();
-    if (typeof query.addEventListener === "function") query.addEventListener("change", update);
-    else query.addListener?.(update);
-    return () => {
-      if (typeof query.removeEventListener === "function") query.removeEventListener("change", update);
-      else query.removeListener?.(update);
-    };
-  }, []);
-  return persistent;
 }
 
 function GestureHint() {
@@ -193,7 +172,6 @@ export function App() {
       >
         <ConnectionBanner />
         {gateway.connection === "live" && <GestureHint />}
-        {gateway.backend === "demo" && <div className="demo-badge">Demo</div>}
       </div>
 
       <button

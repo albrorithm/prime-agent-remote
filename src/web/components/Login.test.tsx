@@ -3,14 +3,26 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Login } from "./Login";
 
-const gatewayMock = vi.hoisted(() => ({ pair: vi.fn() }));
+const gatewayMock = vi.hoisted(() => ({ pair: vi.fn(), hadSession: false }));
 vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock }));
 
 beforeEach(() => {
   gatewayMock.pair = vi.fn();
+  gatewayMock.hadSession = false;
 });
 
 describe("Login", () => {
+  it("prompts for a fresh pairing on a true first pair", () => {
+    render(<Login />);
+    expect(screen.getByRole("heading", { name: "Pair this device" })).toBeInTheDocument();
+  });
+
+  it("frames the prompt as a session expiry when a prior session existed", () => {
+    gatewayMock.hadSession = true;
+    render(<Login />);
+    expect(screen.getByRole("heading", { name: "Session expired" })).toBeInTheDocument();
+  });
+
   it("disables submit until a token is entered", async () => {
     const user = userEvent.setup();
     render(<Login />);

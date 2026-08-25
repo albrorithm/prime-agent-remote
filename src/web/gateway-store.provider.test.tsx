@@ -36,6 +36,8 @@ vi.mock("./api", () => ({
   executeSlashCommand: apiMock.executeSlashCommand,
   abortAgent: apiMock.abortAgent,
   respondToAttention: apiMock.respondToAttention,
+  humanizeError: (error: unknown, fallback: string) =>
+    error instanceof Error && error.message ? error.message : fallback,
 }));
 
 import {
@@ -276,6 +278,74 @@ describe("GatewayProvider recovery and state ownership", () => {
 
     act(() => { vi.advanceTimersByTime(1_000); });
     expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("re-initializes after 2 consecutive socket failures and routes a 401 to pairing", async () => {
+    apiMock.bootstrap
+      .mockResolvedValueOnce(bootstrap([summary("agent-a")]))
+      .mockRejectedValueOnce(new apiMock.ApiError(401, "Session expired"));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    vi.useFakeTimers();
+
+    // First consecutive failure: still just a plain socket retry.
+    act(() => MockWebSocket.instances[0].close(1006, "abnormal closure"));
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(apiMock.bootstrap).toHaveBeenCalledTimes(1);
+
+    // Second consecutive failure: re-runs the HTTP bootstrap instead of only
+    // retrying the socket, which is what can observe a 401 at all.
+    act(() => MockWebSocket.instances[1].close(1006, "abnormal closure"));
+    act(() => { vi.advanceTimersByTime(2_000); });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMock.bootstrap).toHaveBeenCalledTimes(2);
+    expect(result.current.authRequired).toBe(true);
+  });
+
+  it("keeps retrying without a false auth-required when the escalated bootstrap succeeds but the socket still fails", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    vi.useFakeTimers();
+
+    act(() => MockWebSocket.instances[0].close(1006, "abnormal closure"));
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    act(() => MockWebSocket.instances[1].close(1006, "abnormal closure"));
+    act(() => { vi.advanceTimersByTime(2_000); });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(3);
+    expect(result.current.authRequired).toBe(false);
+
+    // The socket keeps failing even though bootstrap is healthy; the retry
+    // ladder must keep producing new attempts rather than stalling.
+    const latest = MockWebSocket.instances.at(-1)!;
+    act(() => latest.close(1006, "abnormal closure"));
+    act(() => { vi.advanceTimersByTime(4_000); });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(4);
+    expect(result.current.authRequired).toBe(false);
   });
 
   it("clears all private state when the central 401 handler runs", async () => {

@@ -50,7 +50,7 @@ describe("forward subagent breadcrumb", () => {
     await user.click(trigger);
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("dialog", { name: "Subagents" })).toBeInTheDocument();
-    expect(screen.getByRole("treeitem", { name: "research, Active, 1 direct subagent" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "research, Working, 1 direct subagent" })).toBeInTheDocument();
     expect(screen.getByRole("treeitem", { name: "review, Idle" })).toBeInTheDocument();
     expect(screen.getByText("research")).toHaveAttribute("title", "research");
     expect(screen.queryByRole("treeitem", { name: /example/ })).not.toBeInTheDocument();
@@ -148,7 +148,7 @@ describe("sibling breadcrumb for leaf agents", () => {
 
     expect(screen.getByRole("dialog", { name: "Siblings" })).toBeInTheDocument();
     expect(screen.getByRole("tree", { name: "Siblings of review" })).toBeInTheDocument();
-    expect(screen.getByRole("treeitem", { name: "research, Active, 1 direct subagent" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "research, Working, 1 direct subagent" })).toBeInTheDocument();
     const currentRow = screen.getByRole("treeitem", { name: "review, Idle, current" });
     expect(currentRow).toHaveAttribute("aria-current", "true");
 

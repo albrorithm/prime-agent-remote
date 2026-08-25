@@ -1,4 +1,4 @@
-import { ArrowDown, Ban, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
+import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -210,6 +210,19 @@ export function TranscriptEntry({
 }) {
   const presentation = message.presentation;
   if (presentation?.kind === "thinking") {
+    const full = presentation.full && presentation.full !== message.text ? presentation.full : null;
+    if (full) {
+      return (
+        <details className="thinking-disclosure" data-gesture-exclusion>
+          <summary className={`timeline-row thinking ${message.state}`} aria-label={`Thinking: ${message.text}. Expand for the full thought.`}>
+            <Brain aria-hidden="true" />
+            <strong className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></strong>
+            <ChevronDown className="thinking-chevron" aria-hidden="true" />
+          </summary>
+          <p className="thinking-full">{full}</p>
+        </details>
+      );
+    }
     return (
       <div className={`timeline-row thinking ${message.state}`} role="note" aria-label={`Thinking: ${message.text}`}>
         <Brain aria-hidden="true" />
@@ -288,7 +301,7 @@ export function TranscriptEntry({
 }
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
-  const { selectedAgent, selectedSnapshot, pendingMessages, catalog, selectAgent } = useGateway();
+  const { selectedAgent, selectedSnapshot, pendingMessages, catalog, selectAgent, backend } = useGateway();
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const messageCount = selectedSnapshot?.messages.length ?? 0;
@@ -333,6 +346,14 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     setSearchOpen(false);
     setQuery("");
   }
+
+  // Search is scoped to whichever transcript is on screen — carrying a query
+  // or an open search box across an agent switch would silently search (or
+  // look like it's searching) the wrong conversation.
+  useEffect(() => {
+    setSearchOpen(false);
+    setQuery("");
+  }, [selectedAgent?.id]);
 
   const normalizedQuery = query.trim().toLowerCase();
   const searching = searchOpen && Boolean(normalizedQuery);
@@ -405,6 +426,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
             <span className="agent-status-chip-label" aria-hidden="true">{selectedStatus?.label ?? "No agent selected"}</span>
           </span>
         )}
+        {backend === "demo" && <span className="demo-badge">Demo</span>}
         <button
           className={`icon-button search-trigger ${searchOpen ? "active" : ""}`}
           onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
@@ -413,7 +435,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
         >
           {searchOpen ? <X /> : <Search />}
         </button>
-        <button className="icon-button activity-trigger" onClick={onOpenActivity} aria-label={`Open activity${childCount ? `, ${childCount} subagents` : ""}`}>
+        <button className="icon-button activity-trigger" onClick={onOpenActivity} aria-label={`Open session dashboard${childCount ? `, ${childCount} subagents` : ""}`}>
           <ListTree />
           {childCount > 0 && <span>{childCount}</span>}
         </button>
@@ -460,7 +482,12 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                   {visibleMessages!.map((message) => (
                     <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} searchTerm={normalizedQuery} onImageLoad={handleTranscriptImageLoad} />
                   ))}
-                  {!visibleMessages!.length && <div className="empty-transcript"><p>No messages match that search.</p></div>}
+                  {!visibleMessages!.length && (
+                    <div className="empty-transcript">
+                      <p>No messages match that search.</p>
+                      <button type="button" onClick={() => setQuery("")}>Clear search</button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="message-list" role="log" aria-live="off">

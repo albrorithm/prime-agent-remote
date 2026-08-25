@@ -25,7 +25,7 @@ import type {
 } from "../protocol";
 import { PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
 import * as api from "./api";
-import { ApiError } from "./api";
+import { ApiError, humanizeError } from "./api";
 import type { PreparedImage } from "./image-attachments";
 
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
@@ -114,6 +114,14 @@ interface State {
   pending: Record<string, PendingMessage[]>;
   selectedAgentId: string | null;
   error: string | null;
+  // True once the socket has gone offline at least once this app lifetime, so
+  // the connection banner can tell a fresh cold start ("Connecting…") apart
+  // from a drop-and-retry ("Reconnecting…"). Reset on a fresh auth cycle.
+  hasReconnected: boolean;
+  // True once a bootstrap has ever succeeded this app lifetime. Survives the
+  // `auth_required` reset (unlike the rest of state) so Login can tell "you
+  // were paired and your session expired" apart from a true first-time pair.
+  hadSession: boolean;
 }
 
 type Action =
@@ -142,6 +150,8 @@ const initialState: State = {
   pending: {},
   selectedAgentId: null,
   error: null,
+  hasReconnected: false,
+  hadSession: false,
 };
 
 function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
@@ -187,6 +197,7 @@ function reducer(state: State, action: Action): State {
           ? state.selectedAgentId
           : first,
         error: null,
+        hadSession: true,
       };
     }
     case "auth_required":
@@ -194,9 +205,14 @@ function reducer(state: State, action: Action): State {
         ...initialState,
         authRequired: true,
         connection: "offline",
+        hadSession: state.hadSession,
       };
     case "connection":
-      return { ...state, connection: action.value };
+      return {
+        ...state,
+        connection: action.value,
+        hasReconnected: state.hasReconnected || action.value === "offline",
+      };
     case "catalog":
       if (action.value.revision < state.catalog.revision) return state;
       return { ...state, catalog: action.value };
@@ -327,6 +343,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const lifecycleAbort = useRef<AbortController | null>(null);
   const selectionGeneration = useRef(0);
   const socketRetryBlocked = useRef(false);
+  // Holds the latest `initialize` so the socket-retry scheduler (defined before
+  // `initialize` exists) can call it without a circular useCallback dependency.
+  const initializeRef = useRef<() => Promise<void>>(async () => {});
   stateRef.current = state;
 
   useEffect(() => {
@@ -449,9 +468,16 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       socket = new WebSocket(socketUrl());
     } catch (error) {
       dispatch({ type: "connection", value: "offline" });
-      showError(error instanceof Error ? error.message : "Could not open the realtime connection");
-      const delay = Math.min(30_000, 1_000 * 2 ** retryCount.current++);
-      reconnectTimer.current = window.setTimeout(() => connect(), delay);
+      showError(humanizeError(error, "Could not open the realtime connection"));
+      const attempt = retryCount.current++;
+      const delay = Math.min(30_000, 1_000 * 2 ** attempt);
+      // After 2+ consecutive failures, re-run the HTTP bootstrap instead of just
+      // retrying the socket — that is what surfaces a 401 (session expired) and
+      // routes to pairing instead of spinning forever on a dead connection.
+      reconnectTimer.current = window.setTimeout(() => {
+        if (attempt + 1 >= 2) void initializeRef.current();
+        else connect();
+      }, delay);
       return;
     }
     socketRef.current = socket;
@@ -580,8 +606,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         showPersistentError("Realtime data is too large. Reduce this session's transcript, then retry.");
         return;
       }
-      const delay = Math.min(30_000, 1_000 * 2 ** retryCount.current++);
-      reconnectTimer.current = window.setTimeout(() => connect(), delay);
+      const attempt = retryCount.current++;
+      const delay = Math.min(30_000, 1_000 * 2 ** attempt);
+      reconnectTimer.current = window.setTimeout(() => {
+        if (attempt + 1 >= 2) void initializeRef.current();
+        else connect();
+      }, delay);
     });
     openTimer = window.setTimeout(() => {
       if (!isCurrent() || socket.readyState !== WebSocket.CONNECTING) return;
@@ -624,11 +654,18 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         return;
       }
       dispatch({ type: "connection", value: "offline" });
-      showError(error instanceof Error ? error.message : "Could not start the app");
+      showError(humanizeError(error, "Could not start the app"));
     } finally {
       if (lifecycleAbort.current === controller) lifecycleAbort.current = null;
     }
   }, [attach, connect, loadAgentHttp, resetForUnauthorized, showError, updateSocketPhase]);
+
+  // Written from an effect (not during render) so a discarded StrictMode /
+  // concurrent render can never leave a stale `initialize` behind — the retry
+  // timer that reads this only ever fires after commit anyway.
+  useEffect(() => {
+    initializeRef.current = initialize;
+  }, [initialize]);
 
   useEffect(() => {
     manuallyClosed.current = false;
@@ -718,7 +755,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (selection !== selectionGeneration.current) return;
         dispatch({ type: "select", value: previous });
         if (!(error instanceof ApiError && error.status === 401)) {
-          showError(error instanceof Error ? error.message : "Could not open agent");
+          showError(humanizeError(error, "Could not open agent"));
         }
       }
     },
@@ -768,7 +805,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         result = await api.createSession(current.csrfToken, cwd, name, requestId);
       } catch (error) {
         if (!(error instanceof ApiError && error.status === 401)) {
-          showError(error instanceof Error ? error.message : "Could not create the session");
+          showError(humanizeError(error, "Could not create the session"));
         }
         throw error;
       }
@@ -783,9 +820,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         // The create mutation is committed. Hydration can be retried and must not
         // make the caller report that creation itself failed.
         if (!(error instanceof ApiError && error.status === 401)) {
-          showError(error instanceof Error
-            ? `Session created, but it could not be opened: ${error.message}`
-            : "Session created, but it could not be opened");
+          showError(`Session created, but it could not be opened: ${humanizeError(error, "unknown error")}`);
         }
       }
       return result.agentId;
@@ -837,7 +872,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         showError(null);
       } catch (error) {
         if (!echoAlreadyPresent) dispatch({ type: "pending_remove", agentId: id, id: pendingMessage.id });
-        showError(error instanceof Error ? error.message : "Message failed");
+        showError(humanizeError(error, "Message failed"));
         throw error;
       }
     },
@@ -860,7 +895,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         showError(null);
         return result.result;
       } catch (error) {
-        showError(error instanceof Error ? error.message : "Command failed");
+        showError(humanizeError(error, "Command failed"));
         throw error;
       }
     },
@@ -895,7 +930,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       showError(null);
     } catch (error) {
       if (generation === sessionGeneration.current) {
-        showError(error instanceof Error ? error.message : "Stop failed");
+        showError(humanizeError(error, "Stop failed"));
       }
       throw error;
     }
@@ -915,7 +950,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         showError(null);
       } catch (error) {
         if (!(error instanceof ApiError && error.status === 401)) {
-          showError(error instanceof Error ? error.message : "Response failed");
+          showError(humanizeError(error, "Response failed"));
         }
         throw error;
       }

@@ -14,6 +14,8 @@ const apiMock = vi.hoisted(() => ({
 vi.mock("../api", () => ({
   listDirectories: (...args: Parameters<typeof apiMock.listDirectories>) => apiMock.listDirectories(...args),
   createSession: (...args: Parameters<typeof apiMock.createSession>) => apiMock.createSession(...args),
+  humanizeError: (error: unknown, fallback: string) =>
+    error instanceof Error && error.message ? error.message : fallback,
 }));
 
 const homeListing: DirectoryListing = {
