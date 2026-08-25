@@ -19,6 +19,7 @@
     "smoke": "npm run build && node scripts/smoke.mjs"
   },
   "dependencies": {
+    "lowlight": "^3.3.0",
     "lucide-react": "^0.468.0",
     "marked": "^18.0.10",
     "react": "^19.0.0",

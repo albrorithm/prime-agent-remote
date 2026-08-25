@@ -2,6 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { memo, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { Marked, Tokenizer, type Token, type TokenizerExtension, type Tokens } from "marked";
 import { latexToUnicode } from "../latex";
+import { SyntaxHighlight } from "./SyntaxHighlight";
 
 export interface TextBlock {
   kind: "text";
@@ -560,7 +561,7 @@ function renderProse(text: string, segmentStart: number): ReactNode {
   );
 }
 
-const MemoizedCodeBlock = memo(function CodeBlockView({
+export const MemoizedCodeBlock = memo(function CodeBlockView({
   lang,
   code,
   streaming,
@@ -591,7 +592,7 @@ const MemoizedCodeBlock = memo(function CodeBlockView({
           </button>
         )}
       </figcaption>
-      <pre><code>{code}</code></pre>
+      <pre><SyntaxHighlight lang={lang} code={code} /></pre>
     </figure>
   );
 });

@@ -246,10 +246,74 @@ describe("DemoBackend", () => {
     }
   });
 
-  // WS10 (demo parity) fabricates fixtures for every TranscriptPresentation
-  // kind — python cells, thinking-with-full, refine, notice, error — plus a
-  // populated dashboard. Until it lands, the demo transcript has no
-  // presentations, so full parity cannot be asserted here.
-  it.todo("covers every TranscriptPresentation kind in the demo snapshots (WS10)");
+  it("covers every TranscriptPresentation kind in the demo snapshots (WS10)", async () => {
+    // Derive the kind list from the protocol schema itself (rather than a
+    // hand-copied literal list) so a future presentation kind fails this
+    // test until it's demoed, instead of silently going unchecked.
+    const messageSchema = (agentSnapshotSchema.shape.messages as unknown as { element: PresentationHost }).element;
+    const presentationUnion = (messageSchema.shape.presentation as unknown as { unwrap(): DiscriminatedUnion }).unwrap();
+    const expectedKinds = presentationUnion.options.map((option) => option.shape.kind.value);
+    expect(expectedKinds.sort()).toEqual(["error", "notice", "python", "refine", "thinking", "tool"]);
+
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const seenKinds = new Set<string>();
+      for (const summary of backend.catalog().agents) {
+        const snapshot = await backend.agentSnapshot(summary.id);
+        for (const message of snapshot?.messages ?? []) {
+          if (message.presentation) seenKinds.add(message.presentation.kind);
+        }
+      }
+      for (const kind of expectedKinds) {
+        expect(seenKinds.has(kind), `missing demo fixture for presentation kind "${kind}"`).toBe(true);
+      }
+
+      // Dashboard richness (SessionDashboard fixture, point 6 of the WS10 brief).
+      const mobile = await backend.agentSnapshot("root-mobile");
+      expect(mobile?.dashboard).toMatchObject({
+        status: expect.any(String),
+        needsInput: false,
+        contextUsage: expect.objectContaining({ tokens: expect.any(Number) }),
+      });
+      expect(mobile?.dashboard?.children.length).toBeGreaterThan(0);
+      expect(mobile?.dashboard?.refines.length).toBeGreaterThan(0);
+      const childProtocol = await backend.agentSnapshot("child-protocol");
+      expect(childProtocol?.dashboard?.needsInput).toBe(true);
+
+      // turnId grouping: the seeded transcript spans several settled turns
+      // plus a live one, including a turn opened by a slash command.
+      const turnIds = (mobile?.messages ?? []).map((message) => message.turnId).filter(Boolean);
+      expect(new Set(turnIds).size).toBeGreaterThanOrEqual(4);
+      const slashTurn = mobile?.messages.find((message) => message.text === "/refine");
+      expect(slashTurn?.turnId).toBe(slashTurn?.id);
+
+      // The cellId whose full sections come back via cellOutput().
+      const truncatedCell = mobile?.messages.find(
+        (message) => message.presentation?.kind === "python" && message.presentation.codeTruncated,
+      );
+      expect(truncatedCell?.presentation).toMatchObject({ kind: "python", cellId: expect.any(String) });
+      const cellId = truncatedCell?.presentation?.kind === "python" ? truncatedCell.presentation.cellId : undefined;
+      const full = cellId ? backend.cellOutput(cellId) : null;
+      expect(full?.truncated).toBe(false);
+      expect(full?.code?.length ?? 0).toBeGreaterThan(truncatedCell?.presentation?.kind === "python" ? (truncatedCell.presentation.code?.length ?? 0) : 0);
+
+      // Live streaming python cell.
+      const liveCell = mobile?.messages.find((message) => message.presentation?.kind === "python" && message.presentation.status === "running");
+      expect(liveCell?.state).toBe("streaming");
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
 
 });
+
+interface DiscriminatedUnion {
+  options: Array<{ shape: { kind: { value: string } } }>;
+}
+
+interface PresentationHost {
+  shape: { presentation: { unwrap(): DiscriminatedUnion } };
+}

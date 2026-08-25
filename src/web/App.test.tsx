@@ -98,7 +98,7 @@ describe("mobile shell navigation", () => {
     const shell = screen.getByRole("main");
     await user.click(screen.getByRole("button", { name: /Open activity/ }));
     expect(shell).toHaveAttribute("data-activity-open", "true");
-    await user.click(screen.getByRole("button", { name: "Close activity" }));
+    await user.click(screen.getByRole("button", { name: "Close session dashboard" }));
     expect(shell).toHaveAttribute("data-activity-open", "false");
     expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });

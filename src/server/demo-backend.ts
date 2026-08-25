@@ -12,6 +12,8 @@ import type {
   MutationAccepted,
   SessionCreated,
   SessionDashboard,
+  SessionDashboardChild,
+  SessionDashboardRefine,
   SlashCommandAccepted,
   SlashCommandCatalog,
   SlashCommandResult,
@@ -36,6 +38,12 @@ import type { EventHub } from "./event-hub.js";
 import { builtinSlashCommandEntries, detectedSlashCommandEntries, parseHeartbeatArgs } from "./slash-command-catalog.js";
 
 const now = new Date().toISOString();
+const NOW_MS = Date.parse(now);
+/** Deterministic, past-anchored timestamp for seeded demo fixtures — the old activity pane's sin was stamping everything "now". */
+function minutesAgo(minutes: number): string {
+  return new Date(NOW_MS - minutes * 60_000).toISOString();
+}
+
 const DEMO_MAX_AGENTS = 128;
 const DEMO_MAX_TRANSCRIPT_MESSAGES = 256;
 const DEMO_MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
@@ -90,6 +98,7 @@ const initialAgents: AgentSummary[] = [
     name: "Protocol designer",
     description: "Testing snapshot and replay semantics",
     activity: "working",
+    needsInput: true,
   }),
   agent({
     id: "child-review",
@@ -125,21 +134,499 @@ const initialAgents: AgentSummary[] = [
   }),
 ];
 
+// Full (untruncated) sections for the one demo cell that ships with truncated
+// flags, served back by `cellOutput` the way GET /api/v1/cells/:cellId serves
+// the live Prime adapter's cache.
+const BUDGET_AUDIT_CELL_ID = "cell_demo_budget_audit";
+const BUDGET_AUDIT_FULL_CODE = `import json
+from pathlib import Path
+
+def audit_transcript_budget(path="session.jsonl"):
+    total_chars = 0
+    kinds: dict[str, int] = {}
+    for line in Path(path).read_text().splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        kind = entry.get("type", "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        total_chars += len(line)
+    return {
+        "total_chars": total_chars,
+        "by_kind": kinds,
+        "over_budget": total_chars > 2 * 1024 * 1024,
+    }
+
+audit_transcript_budget()`;
+const BUDGET_AUDIT_FULL_STDOUT = `Scanned 4,812 transcript lines across 6 sessions.
+Largest single message: 38,201 chars (assistant/text).
+prime-agent.refinement entries: 3
+custom notices: 5`;
+const BUDGET_AUDIT_FULL_RESULT = "{'total_chars': 1893440, 'by_kind': {'message': 4021, 'custom': 12, 'compaction': 2}, 'over_budget': False}";
+
+const budgetAuditCellOutput: CellOutput = {
+  cellId: BUDGET_AUDIT_CELL_ID,
+  code: BUDGET_AUDIT_FULL_CODE,
+  stdout: BUDGET_AUDIT_FULL_STDOUT,
+  result: BUDGET_AUDIT_FULL_RESULT,
+  truncated: false,
+};
+
+/**
+ * The primary demo transcript: several settled turns (including one opened by
+ * a session slash command) plus one live streaming turn, exercising every
+ * TranscriptPresentation kind the protocol declares.
+ */
+function buildMobileTranscript(): TranscriptMessage[] {
+  return [
+    // Turn A (settled): thinking + a successful python cell.
+    {
+      id: "mobile-a-user",
+      role: "user",
+      text: "Add a syntax-highlighted view for the python cells in the transcript, and separate stdout from the return value so we're not guessing which is which.",
+      state: "complete",
+      createdAt: minutesAgo(58),
+      turnId: "mobile-a-user",
+    },
+    {
+      id: "mobile-a-thinking",
+      role: "assistant",
+      text: "Deciding how to separate stdout from the return value in the cell renderer",
+      state: "complete",
+      createdAt: minutesAgo(57),
+      turnId: "mobile-a-user",
+      presentation: {
+        kind: "thinking",
+        full: "The cell currently mashes stdout and the return value together in one preview string. If I split them into their own labeled sections, the diff view stays legible even when a script prints progress lines before returning a dict. I'll reuse the existing code-block renderer and just feed it the code fence — no need for a bespoke highlighter.",
+      },
+    },
+    {
+      id: "mobile-a-cell",
+      role: "assistant",
+      text: "render_python_cell(cell)",
+      state: "complete",
+      createdAt: minutesAgo(57),
+      turnId: "mobile-a-user",
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "complete",
+        preview: "render_python_cell(cell)",
+        meta: "↑ 6 ↓ 2 lines · 420ms",
+        code: `def render_python_cell(cell):
+    highlighted = highlight(cell.code, "python")
+    return f"<pre>{highlighted}</pre>"
+
+render_python_cell(cell)`,
+        stdout: "Rendered 1 cell\n",
+        result: "'<pre><span class=\"hljs-keyword\">def</span> render_python_cell...</pre>'",
+        durationMs: 420,
+      },
+    },
+    {
+      id: "mobile-a-answer",
+      role: "assistant",
+      text: "Added a syntax-highlighted renderer for python cells — code now renders through the same highlighter as prose fences, and stdout is kept in its own section apart from the return value so the two aren't run together.",
+      state: "complete",
+      createdAt: minutesAgo(56),
+      turnId: "mobile-a-user",
+    },
+
+    // Turn B (settled, opened by a session slash command): a completed /refine.
+    {
+      id: "mobile-b-refine-cmd",
+      role: "user",
+      text: "/refine",
+      state: "complete",
+      createdAt: minutesAgo(51),
+      turnId: "mobile-b-refine-cmd",
+    },
+    {
+      id: "mobile-b-refine-result",
+      role: "system",
+      text: "Tightened prompt guidance for python-cell previews and added a skill note about diff rendering.",
+      state: "complete",
+      createdAt: minutesAgo(50),
+      turnId: "mobile-b-refine-cmd",
+      presentation: {
+        kind: "refine",
+        status: "complete",
+        summary: "Tightened prompt guidance for python-cell previews and added a skill note about diff rendering.",
+        scope: "local",
+        edits: [
+          {
+            action: "update",
+            kind: "prompt",
+            title: "python cell preview rules",
+            reason: "Clarify when to prefer the return value over stdout in the one-line preview.",
+            applied: true,
+          },
+          {
+            action: "create",
+            kind: "skill",
+            title: "unified-diff rendering",
+            reason: "Document the diff format contract so review tooling stays in sync.",
+            applied: true,
+          },
+          {
+            action: "update",
+            kind: "memory",
+            title: "transcript truncation caps",
+            reason: "Record the 16k code / 6k stdout caps for future refines.",
+            applied: false,
+            error: "Memory file was locked by a concurrent refine.",
+          },
+        ],
+      },
+    },
+
+    // Turn B2 (settled, slash-command opened): a failed /refine.
+    {
+      id: "mobile-b2-refine-cmd",
+      role: "user",
+      text: "/refine",
+      state: "complete",
+      createdAt: minutesAgo(48),
+      turnId: "mobile-b2-refine-cmd",
+    },
+    {
+      id: "mobile-b2-refine-result",
+      role: "system",
+      text: "Refine failed",
+      state: "failed",
+      createdAt: minutesAgo(47),
+      turnId: "mobile-b2-refine-cmd",
+      presentation: {
+        kind: "refine",
+        status: "failed",
+        summary: "Refine failed",
+        error: "Skill file conflicted with a concurrent edit from another session.",
+      },
+    },
+
+    // Turn C (settled): thinking, a generic (non-python) tool row, and a python cell with diffs.
+    {
+      id: "mobile-c-user",
+      role: "user",
+      text: "Refactor the buffer trimming logic in demo-backend.ts and clean up the duplicate helper — run the tests after.",
+      state: "complete",
+      createdAt: minutesAgo(44),
+      turnId: "mobile-c-user",
+    },
+    {
+      id: "mobile-c-thinking",
+      role: "assistant",
+      text: "Locating the duplicate trimming helper before touching the loop",
+      state: "complete",
+      createdAt: minutesAgo(43),
+      turnId: "mobile-c-user",
+      presentation: {
+        kind: "thinking",
+        full: "Two call sites walk the message list looking for a removable index with almost identical predicates. Pulling that into one findOldestRemovable helper means the size cap and the age cap can't drift out of sync the next time either changes.",
+      },
+    },
+    {
+      id: "mobile-c-tool",
+      role: "system",
+      text: "npm test",
+      state: "complete",
+      createdAt: minutesAgo(43),
+      turnId: "mobile-c-user",
+      presentation: {
+        kind: "tool",
+        label: "bash",
+        status: "complete",
+        meta: "↑ 1 ↓ 14 lines · 4.2s",
+      },
+    },
+    {
+      id: "mobile-c-cell",
+      role: "assistant",
+      text: "apply_patch(diff)",
+      state: "complete",
+      createdAt: minutesAgo(43),
+      turnId: "mobile-c-user",
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "complete",
+        preview: "apply_patch(diff)",
+        meta: "↑ 2 lines · 900ms",
+        code: `patch("src/server/demo-backend.ts", trim_fix)
+patch("src/server/demo-backend.test.ts", trim_test_fix)`,
+        diffs: [
+          {
+            path: "src/server/demo-backend.ts",
+            oldStr: `    while (snapshot.messages.length > DEMO_MAX_TRANSCRIPT_MESSAGES || chars > DEMO_MAX_TRANSCRIPT_TEXT_CHARS) {
+      const removableIndex = snapshot.messages.findIndex((message, index) =>
+        index < snapshot.messages.length - 2 && !protectedMessages.has(message));
+      if (removableIndex < 0) break;`,
+            newStr: `    while (snapshot.messages.length > DEMO_MAX_TRANSCRIPT_MESSAGES || chars > DEMO_MAX_TRANSCRIPT_TEXT_CHARS) {
+      const removableIndex = findOldestRemovable(snapshot.messages, protectedMessages);
+      if (removableIndex < 0) break;`,
+            startLine: 565,
+          },
+          {
+            path: "src/server/demo-backend.test.ts",
+            oldStr: `    expect(snapshot.messages.length).toBeLessThanOrEqual(256);
+    expect(snapshot.messages.reduce((total, message) => total + message.text.length, 0))
+      .toBeLessThanOrEqual(2 * 1024 * 1024);`,
+            newStr: `    expect(snapshot.messages.length).toBeLessThanOrEqual(DEMO_MAX_TRANSCRIPT_MESSAGES);
+    expect(snapshot.messages.reduce((total, message) => total + message.text.length, 0))
+      .toBeLessThanOrEqual(DEMO_MAX_TRANSCRIPT_TEXT_CHARS);`,
+            startLine: 156,
+          },
+        ],
+        durationMs: 900,
+      },
+    },
+    {
+      id: "mobile-c-answer",
+      role: "assistant",
+      text: "Extracted the removable-message scan into a shared findOldestRemovable helper — both trim loops call it now, and the full suite passes (42 passed).",
+      state: "complete",
+      createdAt: minutesAgo(42),
+      turnId: "mobile-c-user",
+    },
+
+    // Turn D (settled): a failed python cell followed by a normal answer.
+    {
+      id: "mobile-d-user",
+      role: "user",
+      text: "Optimize the loop that formats duration strings so it handles negative values.",
+      state: "complete",
+      createdAt: minutesAgo(36),
+      turnId: "mobile-d-user",
+    },
+    {
+      id: "mobile-d-cell",
+      role: "assistant",
+      text: "format_duration(-1500)",
+      state: "failed",
+      createdAt: minutesAgo(35),
+      turnId: "mobile-d-user",
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "failed",
+        preview: "format_duration(-1500)",
+        meta: "↑ 5 lines · 90ms · ValueError",
+        code: `def format_duration(ms):
+    if ms < 0:
+        raise ValueError(f"duration must be non-negative, got {ms}")
+    return f"{ms}ms" if ms < 1000 else f"{ms / 1000:.1f}s"
+
+format_duration(-1500)`,
+        error: {
+          ename: "ValueError",
+          evalue: "duration must be non-negative, got -1500",
+          traceback: `Traceback (most recent call last):
+  File "<cell>", line 5, in <module>
+    format_duration(-1500)
+  File "<cell>", line 3, in format_duration
+    raise ValueError(f"duration must be non-negative, got {ms}")
+ValueError: duration must be non-negative, got -1500`,
+        },
+        durationMs: 90,
+      },
+    },
+    {
+      id: "mobile-d-answer",
+      role: "assistant",
+      text: "That raises for negative input — clamp the duration to zero before formatting rather than raising. Want me to patch it?",
+      state: "complete",
+      createdAt: minutesAgo(35),
+      turnId: "mobile-d-user",
+    },
+
+    // Turn E (settled): a turn that fails outright — the row the old
+    // projection dropped entirely (zero rows for a failed empty-content turn).
+    {
+      id: "mobile-e-user",
+      role: "user",
+      text: "Summarize today's context-usage report.",
+      state: "complete",
+      createdAt: minutesAgo(30),
+      turnId: "mobile-e-user",
+    },
+    {
+      id: "mobile-e-error",
+      role: "assistant",
+      text: "The response failed before producing an answer.",
+      state: "failed",
+      createdAt: minutesAgo(30),
+      turnId: "mobile-e-user",
+      presentation: { kind: "error", label: "Turn failed" },
+    },
+
+    // Turn F (settled): a compaction notice, a rollback refine, and a
+    // truncated python cell whose full sections are served via cellOutput.
+    {
+      id: "mobile-f-user",
+      role: "user",
+      text: "Keep going — continue the refactor and compact context if you need to.",
+      state: "complete",
+      createdAt: minutesAgo(22),
+      turnId: "mobile-f-user",
+    },
+    {
+      id: "mobile-f-notice",
+      role: "system",
+      text: "Compacted the last 41 exchanges to stay under the context budget.",
+      state: "complete",
+      createdAt: minutesAgo(20),
+      turnId: "mobile-f-user",
+      presentation: { kind: "notice", label: "Context compacted", tone: "info" },
+    },
+    {
+      id: "mobile-f-refine-rollback",
+      role: "system",
+      text: "Rolled back the local prompt edit from the last refine — it regressed the python-cell preview wording.",
+      state: "complete",
+      createdAt: minutesAgo(19),
+      turnId: "mobile-f-user",
+      presentation: {
+        kind: "refine",
+        status: "complete",
+        summary: "Rolled back the local prompt edit from the last refine — it regressed the python-cell preview wording.",
+        scope: "local",
+        rollback: true,
+      },
+    },
+    {
+      id: "mobile-f-cell",
+      role: "assistant",
+      text: "audit_transcript_budget()",
+      state: "complete",
+      createdAt: minutesAgo(17),
+      turnId: "mobile-f-user",
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "complete",
+        preview: "audit_transcript_budget()",
+        meta: "↑ 18 ↓ 4 lines · 3.1s",
+        code: BUDGET_AUDIT_FULL_CODE.split("\n").slice(0, 6).join("\n"),
+        codeTruncated: true,
+        stdout: `${BUDGET_AUDIT_FULL_STDOUT.split("\n")[0]}\n`,
+        stdoutTruncated: true,
+        result: `${BUDGET_AUDIT_FULL_RESULT.slice(0, 48)}…`,
+        resultTruncated: true,
+        durationMs: 3100,
+        cellId: BUDGET_AUDIT_CELL_ID,
+      },
+    },
+    {
+      id: "mobile-f-answer",
+      role: "assistant",
+      text: "Audited the transcript budget after compaction — we're well under the 2 MiB cap, so nothing else to trim right now.",
+      state: "complete",
+      createdAt: minutesAgo(16),
+      turnId: "mobile-f-user",
+    },
+
+    // Live turn: streaming python cell, code still arriving.
+    {
+      id: "mobile-live-user",
+      role: "user",
+      text: "One more thing — show me it recovering from a kernel restart.",
+      state: "complete",
+      createdAt: minutesAgo(1),
+      turnId: "mobile-live-user",
+    },
+    {
+      id: "mobile-live-cell",
+      role: "assistant",
+      text: "restart_kernel_and_replay()",
+      state: "streaming",
+      createdAt: minutesAgo(0),
+      turnId: "mobile-live-user",
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "running",
+        preview: "restart_kernel_and_replay()",
+        code: `def restart_kernel_and_replay():
+    kernel.restart()
+    for cell in queued_cells:
+`,
+      },
+    },
+  ];
+}
+
+/** Session-dashboard refine history derived from the transcript's own refine rows (never invented separately). */
+function refineHistoryFromMessages(messages: readonly TranscriptMessage[]): SessionDashboardRefine[] {
+  const rows: SessionDashboardRefine[] = [];
+  for (const message of messages) {
+    if (message.presentation?.kind !== "refine") continue;
+    const presentation = message.presentation;
+    rows.push({
+      id: message.id,
+      status: presentation.status,
+      summary: presentation.summary,
+      ...(presentation.scope ? { scope: presentation.scope } : {}),
+      ...(presentation.rollback ? { rollback: true } : {}),
+      createdAt: message.createdAt,
+    });
+  }
+  return rows;
+}
+
+/** Full SessionDashboard fixture for the primary demo agent (root-mobile). */
+function mobileDashboard(messages: readonly TranscriptMessage[]): SessionDashboard {
+  const children: SessionDashboardChild[] = [
+    {
+      id: "root-mobile:child:protocol",
+      agentId: "child-protocol",
+      name: "Protocol designer",
+      status: "running",
+      toolName: "ipython",
+      durationMs: 812_000,
+      toolUseCount: 14,
+      tokenCount: 52_000,
+      recap: "Testing snapshot and replay semantics against the widened schema.",
+    },
+    {
+      id: "root-mobile:child:review",
+      agentId: "child-review",
+      name: "Security reviewer",
+      status: "running",
+      durationMs: 340_000,
+      toolUseCount: 6,
+      tokenCount: 21_000,
+      recap: "Waiting on a confirm dialog before deleting the stale build cache.",
+    },
+  ];
+  return {
+    status: "responding",
+    recap: "Building syntax highlighting, refine surfacing, and transcript budget auditing for the mobile transcript view.",
+    needsInput: false,
+    contextUsage: { tokens: 148_000, contextWindow: 200_000, percent: 74 },
+    children,
+    refines: refineHistoryFromMessages(messages),
+  };
+}
+
 function initialSnapshot(summary: AgentSummary): AgentSnapshot {
+  if (summary.id === "root-mobile") {
+    const messages = buildMobileTranscript();
+    return { revision: 1, agentId: summary.id, messages, dashboard: mobileDashboard(messages), attention: [] };
+  }
   const messages: TranscriptMessage[] = [
     {
       id: `${summary.id}-welcome-user`,
       role: "user",
       text: summary.parentId ? summary.description ?? "Handle the delegated task." : "Build a reliable mobile interface for Prime Agent.",
       state: "complete",
-      createdAt: now,
+      createdAt: minutesAgo(120),
     },
     {
       id: `${summary.id}-welcome-assistant`,
       role: "assistant",
       text: summary.activity === "blocked" ? "An extension dialog is waiting for your response." : "I’m working through the task. Live events will appear here.",
       state: "complete",
-      createdAt: now,
+      createdAt: minutesAgo(118),
     },
   ];
   const attention: AttentionRequest[] = summary.attention
@@ -148,25 +635,28 @@ function initialSnapshot(summary: AgentSummary): AgentSnapshot {
           id: "attention-demo-dialog",
           agentId: summary.id,
           kind: "dialog",
-          title: "Proceed with the proposed change?",
-          detail: "Demo mode never performs this action. This card exercises the extension dialog flow.",
+          title: "Confirm before deleting the stale build cache?",
+          detail: "The active extension is asking to confirm before it proceeds. Demo mode never performs the underlying action — this card exercises the extension dialog flow.",
           revision: 1,
           options: [
             { id: "__demo_cancel__", label: "Decline", tone: "danger" },
             { id: "confirm", label: "Confirm", tone: "safe" },
           ],
-          createdAt: now,
+          createdAt: minutesAgo(6),
         },
       ]
     : [];
   return { revision: 1, agentId: summary.id, messages, dashboard: demoDashboard(summary), attention };
 }
 
-// Minimal honest dashboard stub; a later workstream builds real demo parity.
+/** Minimal honest dashboard stub for the agents that don't ship the rich fixture. */
 function demoDashboard(summary: AgentSummary): SessionDashboard {
   return {
     status: summary.lifecycle === "inactive" ? "inactive" : summary.activity === "working" ? "responding" : "idle",
-    needsInput: false,
+    needsInput: summary.needsInput === true,
+    ...(summary.needsInput
+      ? { recap: "Waiting on you to confirm whether replay should include dropped events before continuing." }
+      : {}),
     children: [],
     refines: [],
   };
@@ -195,6 +685,7 @@ export class DemoBackend implements AgentBackend {
   private hub!: EventHub;
   private readonly catalogState: CatalogSnapshot = { revision: 1, agents: structuredClone(initialAgents) };
   private readonly snapshots = new Map(initialAgents.map((item) => [item.id, initialSnapshot(item)]));
+  private readonly cellOutputs = new Map<string, CellOutput>([[BUDGET_AUDIT_CELL_ID, budgetAuditCellOutput]]);
   private readonly timers = new Map<string, NodeJS.Timeout[]>();
   private readonly models = new Map<string, { provider: string; modelId: string }>();
   private readonly efforts = new Map<string, string>();
@@ -221,8 +712,9 @@ export class DemoBackend implements AgentBackend {
     return null;
   }
 
-  cellOutput(_id: string): CellOutput | null {
-    return null;
+  cellOutput(id: string): CellOutput | null {
+    const cached = this.cellOutputs.get(id);
+    return cached ? structuredClone(cached) : null;
   }
 
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
@@ -242,12 +734,14 @@ export class DemoBackend implements AgentBackend {
       this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_updated", payload: superseded }, snapshot);
     }
     const createdAt = new Date().toISOString();
+    const turnId = input.requestId;
     const userMessage: TranscriptMessage = {
       id: input.requestId,
       role: "user",
       text: input.text,
       state: "complete",
       createdAt,
+      turnId,
     };
     const assistantId = randomUUID();
     const assistantMessage: TranscriptMessage = {
@@ -256,6 +750,7 @@ export class DemoBackend implements AgentBackend {
       text: "",
       state: "streaming",
       createdAt,
+      turnId,
     };
     snapshot.messages.push(userMessage, assistantMessage);
     const trimmed = this.trimTranscript(snapshot);
@@ -343,12 +838,14 @@ export class DemoBackend implements AgentBackend {
     if (SESSION_SLASH_COMMAND_NAMES.includes(input.name as typeof SESSION_SLASH_COMMAND_NAMES[number])) {
       const createdAt = new Date().toISOString();
       const commandText = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+      const turnId = input.requestId;
       const commandMessage: TranscriptMessage = {
         id: input.requestId,
         role: "user",
         text: commandText,
         state: "complete",
         createdAt,
+        turnId,
       };
       const resultMessage: TranscriptMessage = {
         id: randomUUID(),
@@ -356,6 +853,7 @@ export class DemoBackend implements AgentBackend {
         text: `/${input.name} accepted.`,
         state: "complete",
         createdAt,
+        turnId,
       };
       snapshot.messages.push(commandMessage, resultMessage);
       const trimmed = this.trimTranscript(snapshot);

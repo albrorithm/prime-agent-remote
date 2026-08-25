@@ -2,6 +2,7 @@ import { z, type ZodType } from "zod";
 import {
   agentSnapshotSchema,
   bootstrapResponseSchema,
+  cellOutputSchema,
   directoryListingSchema,
   mutationAcceptedSchema,
   problemDetailsSchema,
@@ -10,6 +11,7 @@ import {
   slashCommandCatalogSchema,
   type AgentSnapshot,
   type BootstrapResponse,
+  type CellOutput,
   type DirectoryListing,
   type ImageAttachmentInput,
   type MutationAccepted,
@@ -119,6 +121,14 @@ export async function loadAgent(agentId: string, options?: ApiRequestOptions): P
     credentials: "same-origin",
     cache: "no-store",
   }, options, agentSnapshotSchema);
+}
+
+/** Full, untruncated sections of a python cell that was inlined with caps. */
+export async function loadCellOutput(cellId: string, options?: ApiRequestOptions): Promise<CellOutput> {
+  return request(`/api/v1/cells/${encodeURIComponent(cellId)}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  }, options, cellOutputSchema);
 }
 
 async function mutate<T = MutationAccepted>(

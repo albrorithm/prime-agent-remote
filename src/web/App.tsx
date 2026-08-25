@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { ActivityPanel } from "./components/ActivityPanel";
 import { AgentsPanel } from "./components/AgentsPanel";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { Login } from "./components/Login";
+import { SessionDashboard } from "./components/SessionDashboard";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useGateway } from "./gateway-store";
 import { useDrawerGesture } from "./hooks/useDrawerGesture";
@@ -232,7 +232,7 @@ export function App() {
 
       <button
         className="shell-scrim activity-scrim"
-        aria-label="Close activity"
+        aria-label="Close session dashboard"
         aria-hidden="true"
         tabIndex={-1}
         onClick={() => setActivityOpen(false)}
@@ -240,13 +240,13 @@ export function App() {
       <aside
         className="activity-drawer"
         ref={activityRef}
-        aria-label="Agent activity"
+        aria-label="Session dashboard"
         role={activityModal ? "dialog" : undefined}
         aria-modal={activityModal ? "true" : undefined}
         aria-hidden={!persistentDesktop && !activityModal ? "true" : undefined}
         inert={!persistentDesktop && !activityModal ? true : undefined}
       >
-        <ActivityPanel onClose={() => setActivityOpen(false)} onNavigate={() => setActivityOpen(false)} />
+        <SessionDashboard onClose={() => setActivityOpen(false)} onNavigate={() => setActivityOpen(false)} />
       </aside>
     </main>
   );
