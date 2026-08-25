@@ -600,3 +600,32 @@ button.dashboard-child:hover { background: #131313; }
 .dashboard-refine-copy strong { overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
 .dashboard-refine-copy small { color: var(--muted); font-size: 10px; text-transform: capitalize; }
 .dashboard-refines time { padding-top: 1px; color: var(--muted-2); font: 500 9px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+
+/* === TurnGroup (ws2) === */
+/* The group is a flex column so its children keep the exact message-list
+   behaviors (user bubbles align-self: flex-end, timeline rows stretch). */
+.turn-group { display: flex; min-width: 0; flex-direction: column; gap: 20px; }
+/* Never display:flex on the <details> element itself — it breaks closed-state hiding. */
+.turn-work { min-width: 0; align-self: stretch; }
+.turn-summary { display: flex; min-height: 34px; min-width: 0; align-items: center; gap: 7px; margin: -6px 0; color: var(--muted); font: 560 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; list-style: none; cursor: pointer; }
+.turn-summary::-webkit-details-marker { display: none; }
+.turn-chevron { width: 14px; height: 14px; flex: 0 0 14px; transition: transform 140ms ease; }
+.turn-work[open] > .turn-summary .turn-chevron { transform: rotate(90deg); }
+.turn-summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-work[data-state="live"] .turn-summary-text { color: #d0d0d0; }
+.turn-summary-meta { flex: 0 0 auto; overflow: hidden; color: var(--muted-2); text-overflow: ellipsis; white-space: nowrap; }
+.turn-work-rows { display: flex; min-width: 0; flex-direction: column; gap: 20px; padding: 12px 0 6px 21px; }
+
+.timeline-row.notice { color: var(--muted-2); white-space: normal; }
+.timeline-row.notice .timeline-preview { color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+
+.error-row { display: flex; align-self: stretch; min-width: 0; gap: 9px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--tone-danger) 35%, var(--border)); border-radius: 10px; background: var(--panel-soft); }
+.error-row > svg { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 2px; color: var(--tone-danger); }
+.error-row-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.error-row-copy strong { color: var(--tone-danger); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.error-row-copy p { margin: 0; color: #e9a0a6; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+
+@media (max-width: 1099px) {
+  .turn-summary { font-size: 14px; line-height: 1.45; }
+  .turn-chevron { width: 16px; height: 16px; flex-basis: 16px; }
+}

@@ -1,4 +1,4 @@
-import { ArrowDown, Ban, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
+import { ArrowDown, Ban, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -10,7 +10,10 @@ import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { ImageViewer } from "./ImageViewer";
 import { MessageContent } from "./MessageContent";
+import { PythonCellRow } from "./PythonCellRow";
+import { RefineRow } from "./RefineRow";
 import { SwitchHapticButton } from "./SwitchHapticButton";
+import { groupIntoTurns, TurnGroup } from "./TurnGroup";
 import { agentStatus, type AgentStatusTone } from "./agent-status";
 import { collectAgentDescendants } from "./agent-tree-utils";
 
@@ -214,6 +217,33 @@ export function TranscriptEntry({
       </div>
     );
   }
+  if (presentation?.kind === "python") {
+    return <PythonCellRow message={message} presentation={presentation} />;
+  }
+  if (presentation?.kind === "refine") {
+    return <RefineRow presentation={presentation} />;
+  }
+  if (presentation?.kind === "notice") {
+    return (
+      <div className={`timeline-row notice ${presentation.tone}`} role="note" aria-label={`${presentation.label}: ${message.text}`}>
+        <Info aria-hidden="true" />
+        <strong className="timeline-label">{presentation.label}</strong>
+        <span className="timeline-separator" aria-hidden="true">·</span>
+        <span className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></span>
+      </div>
+    );
+  }
+  if (presentation?.kind === "error") {
+    return (
+      <div className="error-row" role="note" aria-label={`${presentation.label}: ${message.text}`}>
+        <OctagonAlert aria-hidden="true" />
+        <div className="error-row-copy">
+          <strong>{presentation.label}</strong>
+          <p><HighlightedText text={message.text} term={searchTerm ?? ""} /></p>
+        </div>
+      </div>
+    );
+  }
   if (presentation?.kind === "tool") {
     const meta = presentation.meta ? `, ${presentation.meta}` : "";
     return (
@@ -309,6 +339,14 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const visibleMessages: TranscriptMessage[] | null = searching && selectedSnapshot
     ? selectedSnapshot.messages.filter((message) => message.text.toLowerCase().includes(normalizedQuery))
     : null;
+
+  // Every daemon tick full-replaces the messages array, so array identity is
+  // the correct (and only meaningful) memo key.
+  const snapshotMessages = selectedSnapshot?.messages;
+  const turnItems = useMemo(() => groupIntoTurns(snapshotMessages ?? []), [snapshotMessages]);
+  const lastItem = turnItems.at(-1);
+  const lastTurnKey = lastItem?.kind === "turn" ? lastItem.key : null;
+  const sessionRecap = selectedSnapshot?.dashboard?.recap;
 
   return (
     <section className="panel transcript-panel" aria-labelledby="transcript-heading">
@@ -426,8 +464,18 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                 </div>
               ) : (
                 <div className="message-list" role="log" aria-live="off">
-                  {selectedSnapshot.messages.map((message) => (
-                    <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
+                  {turnItems.map((item) => item.kind === "turn" ? (
+                    <TurnGroup
+                      key={item.key}
+                      turnId={item.turnId}
+                      rows={item.rows}
+                      recap={item.key === lastTurnKey ? sessionRecap : undefined}
+                      renderRow={(message) => (
+                        <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
+                      )}
+                    />
+                  ) : (
+                    <TranscriptEntry key={item.key} message={item.row} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
                   ))}
                   {pendingMessages.map((message) => (
                     <article key={message.id} className="message user pending" aria-label="Sending">

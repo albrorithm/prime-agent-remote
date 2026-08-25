@@ -13,7 +13,10 @@ type GatewayMockState = Pick<
 const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }));
 
 vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock.state }));
-vi.mock("./MessageContent", () => ({ MessageContent: ({ text }: { text: string }) => <p>{text}</p> }));
+vi.mock("./MessageContent", () => ({
+  MessageContent: ({ text }: { text: string }) => <p>{text}</p>,
+  MemoizedCodeBlock: ({ code }: { code: string }) => <pre>{code}</pre>,
+}));
 vi.mock("./Composer", () => ({ Composer: () => <div /> }));
 vi.mock("./GoalStrip", () => ({ GoalStrip: () => <div /> }));
 vi.mock("./AttentionCard", () => ({ AttentionCard: () => <div /> }));
@@ -81,6 +84,72 @@ describe("compact transcript entries", () => {
     expect(screen.queryByText("Thinking…")).not.toBeInTheDocument();
     expect(screen.getByText("Planning focused checks")).toMatchObject({ tagName: "STRONG" });
     expect(screen.getByLabelText("bash tool complete: npm test, ↑ 2 ↓ 12 lines · 1.2s")).toBeInTheDocument();
+  });
+
+  it("dispatches python rows to the expandable cell row", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "cell",
+          text: "run_checks()",
+          presentation: { kind: "python", lang: "python", status: "complete", preview: "run_checks()", meta: "420ms", code: "run_checks()", durationMs: 420 },
+        }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "python cell complete: run_checks(), 420ms" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("dispatches refine rows to the refine renderer", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "refine",
+          role: "system",
+          text: "Tightened prompt guidance",
+          presentation: { kind: "refine", status: "complete", summary: "Tightened prompt guidance", scope: "local" },
+        }}
+      />,
+    );
+    expect(screen.getByRole("group", { name: "Refine complete, Tightened prompt guidance, local scope" })).toBeInTheDocument();
+  });
+
+  it("renders notice rows as labeled system lines", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "notice",
+          role: "system",
+          text: "Compacted the last 41 exchanges.",
+          presentation: { kind: "notice", label: "Context compacted", tone: "info" },
+        }}
+      />,
+    );
+    const notice = screen.getByRole("note", { name: "Context compacted: Compacted the last 41 exchanges." });
+    expect(notice).toBeInTheDocument();
+    expect(within(notice).getByText("Context compacted")).toBeInTheDocument();
+  });
+
+  it("renders error rows with their label and full text", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "error",
+          state: "failed",
+          text: "The response failed before producing an answer.",
+          presentation: { kind: "error", label: "Turn failed" },
+        }}
+      />,
+    );
+    const error = screen.getByRole("note", { name: "Turn failed: The response failed before producing an answer." });
+    expect(within(error).getByText("The response failed before producing an answer.")).toBeInTheDocument();
   });
 
   it("renders attachment metadata through the authenticated image route", () => {
@@ -421,4 +490,102 @@ describe("agent switching resets scroll state", () => {
     expect(screen.queryByRole("dialog", { name: "Ancestors" })).not.toBeInTheDocument();
   });
 
+});
+
+describe("turn grouping in the panel", () => {
+  function turnMessages(): TranscriptMessage[] {
+    return [
+      {
+        id: "legacy",
+        role: "system",
+        text: "Session resumed from an earlier save.",
+        state: "complete",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "u1",
+        role: "user",
+        text: "Refactor the trimming helper.",
+        state: "complete",
+        createdAt: "2026-01-01T00:01:00.000Z",
+        turnId: "u1",
+      },
+      {
+        id: "tool1",
+        role: "system",
+        text: "npm test",
+        state: "complete",
+        createdAt: "2026-01-01T00:02:00.000Z",
+        turnId: "u1",
+        presentation: { kind: "tool", label: "bash", status: "complete", meta: "4.2s" },
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        text: "Refactored the helper and the suite passes.",
+        state: "complete",
+        createdAt: "2026-01-01T00:03:00.000Z",
+        turnId: "u1",
+      },
+    ];
+  }
+
+  function setState(messages: TranscriptMessage[], recap?: string) {
+    const selectedAgent = agent("agent-a", null, 0);
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [selectedAgent] },
+      selectedAgent,
+      selectedSnapshot: {
+        revision: 1,
+        agentId: "agent-a",
+        messages,
+        attention: [],
+        ...(recap !== undefined
+          ? { dashboard: { status: "idle" as const, recap, needsInput: false, children: [], refines: [] } }
+          : {}),
+      },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+  }
+
+  it("groups consecutive turnId rows and leaves legacy rows flat", () => {
+    setState(turnMessages());
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const list = view.container.querySelector(".message-list")!;
+    const group = list.querySelector(":scope > .turn-group")!;
+    expect(group).not.toBeNull();
+    expect(group.querySelector("details.turn-work")).not.toBeNull();
+    expect(screen.getByText("1 step")).toBeInTheDocument();
+
+    // The legacy row renders as a direct sibling, outside any group.
+    const legacy = screen.getByText("Session resumed from an earlier save.").closest("article")!;
+    expect(legacy.closest(".turn-group")).toBeNull();
+    expect(legacy.parentElement).toBe(list);
+  });
+
+  it("uses the dashboard recap for the latest settled turn's collapsed summary", () => {
+    setState(turnMessages(), "Refactored the trimming helper end to end");
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByText("Refactored the trimming helper end to end")).toBeInTheDocument();
+    expect(screen.getByText("1 step")).toBeInTheDocument();
+  });
+
+  it("search mode renders a flat list and clearing the search restores grouping", async () => {
+    const user = userEvent.setup();
+    setState(turnMessages());
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(view.container.querySelector(".turn-group")).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Search transcript" }));
+    await user.type(screen.getByRole("textbox", { name: "Search this transcript" }), "helper");
+
+    expect(view.container.querySelector(".turn-group")).toBeNull();
+    expect(view.container.querySelector("details.turn-work")).toBeNull();
+    expect(screen.getByText("2 matches")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close search" }));
+    expect(view.container.querySelector(".turn-group")).not.toBeNull();
+    expect(view.container.querySelector("details.turn-work")).not.toBeNull();
+  });
 });
