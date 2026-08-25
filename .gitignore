@@ -12,3 +12,4 @@ coverage/
 .ui-harness/
 *.log
 /start-live.local.sh
+.playwright-mcp/
