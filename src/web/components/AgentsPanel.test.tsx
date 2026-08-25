@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
+import { SettingsProvider } from "../settings";
 import { AgentsPanel } from "./AgentsPanel";
 
 function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
@@ -32,6 +33,8 @@ const gatewayMock = vi.hoisted(() => ({
   catalog: { revision: 1, agents: [] as AgentSummary[] },
   selectedAgentId: null as string | null,
   selectAgent: vi.fn(),
+  backend: "demo" as "demo" | "prime" | null,
+  signOut: vi.fn(),
 }));
 vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock }));
 
@@ -40,7 +43,13 @@ beforeEach(() => {
   gatewayMock.catalog = { revision: 1, agents: [root, child, other] };
   gatewayMock.selectedAgentId = null;
   gatewayMock.selectAgent = vi.fn().mockResolvedValue(undefined);
+  gatewayMock.backend = "demo";
+  gatewayMock.signOut = vi.fn().mockResolvedValue(undefined);
 });
+
+function renderPanel(props: Parameters<typeof AgentsPanel>[0] = {}) {
+  return render(<SettingsProvider><AgentsPanel {...props} /></SettingsProvider>);
+}
 
 describe("AgentsPanel", () => {
   it("shows attention and working counts across all agents", () => {
@@ -128,5 +137,41 @@ describe("AgentsPanel", () => {
 
     expect(screen.queryByRole("button", { name: "Close sessions" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close new session" })).toBeInTheDocument();
+  });
+
+  it("opens settings from the drawer header and takes over the panel", async () => {
+    const user = userEvent.setup();
+    renderPanel({ visible: true });
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    // The sub-view replaces the list and its header, exactly as new-session does.
+    expect(screen.queryByPlaceholderText("Search sessions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close sessions" })).not.toBeInTheDocument();
+  });
+
+  it("returns to the session list when settings is closed", async () => {
+    const user = userEvent.setup();
+    renderPanel({ visible: true });
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+
+    expect(screen.getByPlaceholderText("Search sessions")).toBeInTheDocument();
+  });
+
+  it("leaves settings when the drawer closes, so reopening lands on the sessions list", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<SettingsProvider><AgentsPanel visible /></SettingsProvider>);
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+    rerender(<SettingsProvider><AgentsPanel visible={false} /></SettingsProvider>);
+    rerender(<SettingsProvider><AgentsPanel visible /></SettingsProvider>);
+
+    expect(screen.getByPlaceholderText("Search sessions")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
   });
 });

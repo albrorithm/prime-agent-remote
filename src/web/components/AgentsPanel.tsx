@@ -1,5 +1,5 @@
 import { Bot, CircleAlert, Plus, Search, Settings, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
 import { AgentTree } from "./AgentTree";
@@ -18,6 +18,12 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Settings is a detour, not work in progress, so closing the drawer should
+  // leave it. `creating` deliberately survives: it holds a chosen directory and
+  // a typed name that would be destructive to discard behind a swipe.
+  useEffect(() => {
+    if (!visible) setSettingsOpen(false);
+  }, [visible]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return catalog.agents;
