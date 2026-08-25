@@ -37,7 +37,12 @@
   --on-accent: #000;
   --hover: rgba(255, 255, 255, .035);
   --focus-ring: rgba(255, 255, 255, .08);
-  --scrim: rgba(0, 0, 0, .94);
+  /* Three depths, not one: the header bar sits lightest over content, the
+     composer a touch heavier, the full-screen viewer heaviest. Collapsing
+     these loses the elevation cue between them. */
+  --scrim: rgba(0, 0, 0, .9);
+  --scrim-raised: rgba(0, 0, 0, .94);
+  --scrim-full: rgba(0, 0, 0, .96);
   /* Modal scrims dim what is behind them, so this one stays dark in both
      themes — a light wash at .68 would wash the drawer out, not recede it. */
   --scrim-modal: #000;
@@ -113,7 +118,9 @@
      surface, black-alpha is what shades a light one. */
   --hover: rgba(26, 24, 21, .045);
   --focus-ring: rgba(26, 24, 21, .16);
-  --scrim: rgba(249, 247, 243, .92);
+  --scrim: rgba(249, 247, 243, .9);
+  --scrim-raised: rgba(249, 247, 243, .94);
+  --scrim-full: rgba(249, 247, 243, .96);
   --scrim-modal: #2a2620;
   --shadow: rgba(60, 54, 44, .16);
   --shadow-deep: rgba(60, 54, 44, .24);
@@ -351,7 +358,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .message-images.multiple img { height: clamp(100px, 24vw, 190px); object-fit: cover; }
 .message-image-unavailable { display: grid; min-height: 96px; place-content: center; justify-items: center; gap: 8px; padding: 12px; border: 1px dashed var(--border-emphasis); border-radius: 9px; color: var(--muted); background: var(--panel-soft); font-size: 11px; }
 .message-image-unavailable button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--border-emphasis); border-radius: 99px; color: var(--text); background: var(--panel-raised-4); font-size: 11px; font-weight: 700; }
-.image-viewer { position: fixed; z-index: 120; inset: 0; display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0,1fr); padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom)); color: var(--text); background: var(--scrim); backdrop-filter: blur(18px); overscroll-behavior: contain; }
+.image-viewer { position: fixed; z-index: 120; inset: 0; display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; grid-template-rows: auto minmax(0,1fr); padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom)); color: var(--text); background: var(--scrim-full); backdrop-filter: blur(18px); overscroll-behavior: contain; }
 .image-viewer-toolbar { z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 10px; }
 .image-viewer-action { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); font-size: 13px; font-weight: 700; line-height: 1; text-decoration: none; }
 .image-viewer-action:hover { border-color: var(--border-active); background: var(--panel-raised-4); }
@@ -429,7 +436,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .goal-progress > div { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 99px; background: var(--border); }
 .goal-progress > div > span { display: block; height: 100%; background: var(--accent); }
 
-.composer { position: relative; display: grid; grid-template-columns: 40px minmax(0,1fr) 44px; flex: 0 0 auto; align-items: end; gap: 7px; padding: 9px 10px max(9px, var(--composer-safe-bottom)); border-top: 1px solid var(--border-soft); background: var(--scrim); backdrop-filter: blur(18px); }
+.composer { position: relative; display: grid; grid-template-columns: 40px minmax(0,1fr) 44px; flex: 0 0 auto; align-items: end; gap: 7px; padding: 9px 10px max(9px, var(--composer-safe-bottom)); border-top: 1px solid var(--border-soft); background: var(--scrim-raised); backdrop-filter: blur(18px); }
 .composer-options-trigger { display: grid; width: 40px; height: 44px; place-items: center; padding: 0; border: 0; border-radius: 50%; color: var(--muted); background: transparent; }
 .composer-options-trigger:hover, .composer-options-trigger[aria-expanded="true"] { color: var(--text); background: var(--panel-raised-3); }
 .composer-options-trigger svg { width: 19px; height: 19px; }
