@@ -31,7 +31,7 @@ describe("ActivityPanel", () => {
     const starting = agent("starting child", root.id, "starting");
     gatewayMock.current = {
       selectedAgent: root,
-      selectedSnapshot: { revision: 1, agentId: root.id, messages: [], activity: [], attention: [] },
+      selectedSnapshot: { revision: 1, agentId: root.id, messages: [], attention: [] },
       catalog: { revision: 1, agents: [root, failed, starting] },
       selectAgent: vi.fn(),
     };

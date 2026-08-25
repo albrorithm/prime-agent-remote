@@ -2,15 +2,16 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { SESSION_SLASH_COMMAND_NAMES } from "../protocol.js";
 import type {
-  ActivityItem,
   AgentCapabilities,
   AgentSnapshot,
   AgentSummary,
   AttentionRequest,
   CatalogSnapshot,
+  CellOutput,
   DirectoryListing,
   MutationAccepted,
   SessionCreated,
+  SessionDashboard,
   SlashCommandAccepted,
   SlashCommandCatalog,
   SlashCommandResult,
@@ -96,9 +97,9 @@ const initialAgents: AgentSummary[] = [
     parentId: "root-mobile",
     depth: 1,
     name: "Security reviewer",
-    description: "Waiting for an approval decision",
+    description: "Waiting for a dialog response",
     activity: "blocked",
-    attention: "approval",
+    attention: "dialog",
     unreadCount: 1,
   }),
   agent({
@@ -136,38 +137,39 @@ function initialSnapshot(summary: AgentSummary): AgentSnapshot {
     {
       id: `${summary.id}-welcome-assistant`,
       role: "assistant",
-      text: summary.activity === "blocked" ? "I reviewed the requested action and need your approval before continuing." : "I’m working through the task. Live events will appear here.",
+      text: summary.activity === "blocked" ? "An extension dialog is waiting for your response." : "I’m working through the task. Live events will appear here.",
       state: "complete",
-      createdAt: now,
-    },
-  ];
-  const activity: ActivityItem[] = [
-    {
-      id: `${summary.id}-activity`,
-      kind: summary.parentId ? "child" : "status",
-      title: summary.activity === "blocked" ? "Waiting for input" : summary.activity === "working" ? "Agent is working" : "Agent is idle",
-      status: summary.activity === "blocked" ? "waiting" : summary.activity === "working" ? "running" : "complete",
       createdAt: now,
     },
   ];
   const attention: AttentionRequest[] = summary.attention
     ? [
         {
-          id: "attention-demo-approval",
+          id: "attention-demo-dialog",
           agentId: summary.id,
-          kind: "approval",
-          title: "Allow the proposed command?",
-          detail: "Demo mode never executes this command. This card exercises the approval flow.",
+          kind: "dialog",
+          title: "Proceed with the proposed change?",
+          detail: "Demo mode never performs this action. This card exercises the extension dialog flow.",
           revision: 1,
           options: [
-            { id: "deny", label: "Deny", tone: "danger" },
-            { id: "allow-once", label: "Allow once", tone: "safe" },
+            { id: "__demo_cancel__", label: "Decline", tone: "danger" },
+            { id: "confirm", label: "Confirm", tone: "safe" },
           ],
           createdAt: now,
         },
       ]
     : [];
-  return { revision: 1, agentId: summary.id, messages, activity, attention };
+  return { revision: 1, agentId: summary.id, messages, dashboard: demoDashboard(summary), attention };
+}
+
+// Minimal honest dashboard stub; a later workstream builds real demo parity.
+function demoDashboard(summary: AgentSummary): SessionDashboard {
+  return {
+    status: summary.lifecycle === "inactive" ? "inactive" : summary.activity === "working" ? "responding" : "idle",
+    needsInput: false,
+    children: [],
+    refines: [],
+  };
 }
 
 const demoTree = new Map<string, ListedChild[]>([
@@ -216,6 +218,10 @@ export class DemoBackend implements AgentBackend {
   }
 
   attachment(_id: string): AttachmentData | null {
+    return null;
+  }
+
+  cellOutput(_id: string): CellOutput | null {
     return null;
   }
 
@@ -516,7 +522,7 @@ export class DemoBackend implements AgentBackend {
     });
     this.catalogState.agents.push(summary);
     this.catalogState.revision += 1;
-    this.snapshots.set(id, { revision: 1, agentId: id, messages: [], activity: [], attention: [] });
+    this.snapshots.set(id, { revision: 1, agentId: id, messages: [], dashboard: demoDashboard(summary), attention: [] });
     this.hub.register(`agent:${id}`, this.snapshots.get(id)!);
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
     return { requestId: input.requestId, agentId: id };
@@ -538,13 +544,7 @@ export class DemoBackend implements AgentBackend {
     summary.capabilities = { ...fullCapabilities, resume: false };
     summary.updatedAt = new Date().toISOString();
     snapshot.revision += 1;
-    snapshot.activity = [{
-      id: `${summary.id}-activity`,
-      kind: "status",
-      title: "Agent is idle",
-      status: "complete",
-      createdAt: summary.updatedAt,
-    }];
+    snapshot.dashboard = demoDashboard(summary);
     this.catalogState.revision += 1;
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
     this.hub.publish(`agent:${summary.id}`, { kind: "agent.replaced", payload: snapshot }, snapshot);

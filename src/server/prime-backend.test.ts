@@ -284,7 +284,7 @@ afterEach(() => {
 });
 
 describe("projectPrimeTranscript", () => {
-  it("projects compact thinking and tool rows without forwarding tool output", () => {
+  it("projects rich thinking and python rows without forwarding daemon content duplicates", () => {
     const messages = projectPrimeTranscript([
       { role: "user", content: "Run the checks", timestamp: 1 },
       {
@@ -312,13 +312,24 @@ describe("projectPrimeTranscript", () => {
     expect(messages[1]).toMatchObject({
       role: "assistant",
       text: "Inspecting the repository",
-      presentation: { kind: "thinking" },
+      presentation: { kind: "thinking", full: "Initial notes\n\n**Inspecting the repository**" },
     });
     expect(messages[2]).toMatchObject({
       role: "assistant",
       text: "print(…)",
-      presentation: { kind: "tool", label: "python", status: "complete", meta: "↑ 1 ↓ 1 lines" },
+      presentation: {
+        kind: "python",
+        lang: "python",
+        status: "complete",
+        preview: "print(…)",
+        meta: "↑ 1 ↓ 1 lines",
+        code: "print('details')",
+        cellId: expect.stringMatching(/^cell_/),
+      },
     });
+    // The result carried only content blocks (daemon duplicates of details);
+    // with no structured details, no output section is forwarded.
+    expect(messages[2].presentation).not.toHaveProperty("stdout");
     expect(messages[3]).toMatchObject({
       role: "system",
       text: "npm verify",
@@ -373,7 +384,7 @@ describe("projectPrimeTranscript", () => {
       role: "assistant",
       text: "waiting for code",
       state: "streaming",
-      presentation: { kind: "tool", label: "python", status: "running" },
+      presentation: { kind: "python", lang: "python", status: "running", preview: "waiting for code" },
     });
   });
   it("projects session commands as user rows and sanitizes failures", () => {
@@ -420,6 +431,88 @@ describe("projectPrimeTranscript", () => {
     ]);
     expect(JSON.stringify(messages)).not.toContain("private internal detail");
   });
+
+  it("emits an error row for a failed turn instead of zero rows", () => {
+    const messages = projectPrimeTranscript([
+      { role: "user", content: "Do the thing", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Provider exploded at /Users/private-person/repo",
+        timestamp: 2,
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      state: "failed",
+      presentation: { kind: "error", label: "Turn failed" },
+      turnId: messages[0].id,
+    });
+    expect(messages[1].text).toContain("Provider exploded");
+    expect(messages[1].text).not.toContain("/Users/");
+
+    const withoutDetail = projectPrimeTranscript([
+      { role: "assistant", content: [], stopReason: "error", timestamp: 3 },
+    ]);
+    expect(withoutDetail[0]).toMatchObject({ text: "The response failed.", state: "failed" });
+
+    // A still-streaming failed candidate stays quiet until the turn settles.
+    const streaming = projectPrimeTranscript([], {
+      role: "assistant", content: [], stopReason: "error", errorMessage: "x", timestamp: 4,
+    });
+    expect(streaming.filter((row) => row.presentation?.kind === "error")).toHaveLength(0);
+  });
+
+  it("assigns turn ids at user prompts and session commands, inherited by streaming rows", () => {
+    const messages = projectPrimeTranscript([
+      { role: "system", content: "Welcome", timestamp: 1 },
+      { role: "user", content: "First ask", timestamp: 2 },
+      { role: "assistant", content: [{ type: "text", text: "Answer" }], timestamp: 3 },
+      {
+        role: "custom",
+        customType: "session_slash_command",
+        content: "/refine",
+        display: true,
+        details: { command: { name: "refine", text: "/refine" } },
+        timestamp: 4,
+      },
+      {
+        role: "custom",
+        customType: "session_slash_command_result",
+        content: "Refined continual harness state: 1 edit applied.",
+        display: true,
+        details: { command: { name: "refine", text: "/refine" }, success: true },
+        timestamp: 5,
+      },
+    ], { role: "assistant", content: "Streaming reply", timestamp: 6 });
+
+    expect(messages).toHaveLength(6);
+    expect(messages[0].turnId).toBeUndefined();
+    expect(messages[1].turnId).toBe(messages[1].id);
+    expect(messages[2].turnId).toBe(messages[1].id);
+    expect(messages[3]).toMatchObject({ role: "user", text: "/refine" });
+    expect(messages[3].turnId).toBe(messages[3].id);
+    expect(messages[4].turnId).toBe(messages[3].id);
+    expect(messages[5]).toMatchObject({ state: "streaming", turnId: messages[3].id });
+  });
+
+  it("counts presentation bytes into the transcript budget", () => {
+    const code = "x".repeat(15_000);
+    const source = Array.from({ length: 150 }, (_, index) => ({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `budget-${index}`, name: "ipython", arguments: { code } }],
+      timestamp: index + 1,
+    }));
+    const messages = projectPrimeTranscript(source);
+    // 150 rows of tiny preview text but ~15KB presentations must overflow the
+    // 2MiB budget; a text-only count would keep every row.
+    expect(messages.length).toBeLessThan(150);
+    expect(messages.length).toBeGreaterThan(100);
+    expect(messages.at(-1)?.presentation).toMatchObject({ kind: "python", code });
+  });
 });
 
 describe("PrimeBackend", () => {
@@ -460,12 +553,17 @@ describe("PrimeBackend", () => {
       expect(backend.catalog().agents.find((agent) => agent.id !== summary.id)?.name)
         .toBe("Refine the mobile session drawer behavior");
 
-      const [snapshot, initialCommandCatalog] = await Promise.all([
+      const [initialSnapshot, initialCommandCatalog] = await Promise.all([
         backend.agentSnapshot(summary.id),
         backend.slashCommandCatalog(summary.id),
       ]);
       fixture.snapshotDelayMs = 0;
       expect(fixture.attachCount).toBe(1);
+      // Context stats land asynchronously right after the first projection and
+      // advance the revision; settle before capturing the mutation baseline.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const snapshot = await backend.agentSnapshot(summary.id);
+      expect(snapshot?.messages).toEqual(initialSnapshot?.messages);
       expect(snapshot?.messages[0].text).toBe("Ready");
       expect(snapshot?.messages[1]).toMatchObject({
         role: "user",
@@ -473,9 +571,13 @@ describe("PrimeBackend", () => {
         attachments: [{ id: expect.stringMatching(/^image_/), type: "image", mimeType: "image/jpeg" }],
       });
       expect(JSON.stringify(snapshot)).not.toContain("/9j/");
-      expect(JSON.stringify(snapshot)).not.toContain("Investigate every internal detail");
-      expect(snapshot?.activity.find((item) => item.kind === "child")).toMatchObject({
-        title: "Subagent",
+      expect(JSON.stringify(snapshot)).not.toContain("private-child-id");
+      expect(snapshot?.dashboard).toMatchObject({ status: "idle", needsInput: true });
+      expect(snapshot?.dashboard?.contextUsage).toEqual({ tokens: 5_000, contextWindow: 100_000, percent: 5 });
+      expect(snapshot?.dashboard?.children).toHaveLength(1);
+      expect(snapshot?.dashboard?.children[0]).toMatchObject({
+        id: expect.not.stringContaining("private-child-id"),
+        name: expect.stringContaining("Investigate every internal detail"),
         status: "running",
       });
       const attachmentId = snapshot?.messages[1].attachments?.[0]?.id;
@@ -707,8 +809,9 @@ describe("PrimeBackend", () => {
       });
       await new Promise((resolve) => setTimeout(resolve, 70));
       const withAttention = await backend.agentSnapshot(summary.id);
-      expect(withAttention?.attention[0]).toMatchObject({ id: "request-1", kind: "approval", title: "Approve?" });
-      expect(backend.catalog().agents[0].attention).toBe("approval");
+      expect(withAttention?.attention[0]).toMatchObject({ id: "request-1", kind: "dialog", title: "Approve?" });
+      expect(withAttention?.attention[0].options.map((option) => option.label)).toEqual(["Decline", "Confirm"]);
+      expect(backend.catalog().agents[0].attention).toBe("dialog");
 
       await expect(backend.resolveAttention({
         attentionId: "request-1",
@@ -757,6 +860,9 @@ describe("PrimeBackend", () => {
     await backend.initialize(hub);
     try {
       const summary = backend.catalog().agents[0];
+      await backend.agentSnapshot(summary.id);
+      // Let the async context-stats revision bump land before capturing revisions.
+      await new Promise((resolve) => setTimeout(resolve, 20));
       const snapshot = await backend.agentSnapshot(summary.id);
       const execute = () => backend.executeSlashCommand({
         agentId: summary.id,
@@ -1008,16 +1114,21 @@ describe("PrimeBackend", () => {
         { role: "assistant", text: "The drawer needs an overflow lock." },
       ]);
       expect(messages[2].presentation).toEqual({
-        kind: "tool",
-        label: "python",
+        kind: "python",
+        lang: "python",
         status: "complete",
+        preview: "print(…)",
         meta: "↑ 1 ↓ 1 lines · 12ms",
+        code: "print('drawer')",
+        // Output panels ship verbatim-but-bounded from details (D2/D3).
+        stdout: "private tool output",
+        durationMs: 12,
+        cellId: expect.stringMatching(/^cell_/),
       });
       expect(messages[5].attachments).toEqual([
         { id: expect.stringMatching(/^image_/), type: "image", mimeType: "image/jpeg" },
       ]);
       expect(JSON.stringify(messages)).not.toContain(savedImageData);
-      expect(JSON.stringify(messages)).not.toContain("private tool output");
       expect(messages.every((message) => !message.id.includes("private"))).toBe(true);
       const liveSource: unknown[] = [];
       for (const entry of entries) {
@@ -1061,7 +1172,7 @@ describe("PrimeBackend", () => {
       expect(messages[0]).toMatchObject({
         text: "run_check()",
         state: "complete",
-        presentation: { kind: "tool", label: "python", status: "unknown" },
+        presentation: { kind: "python", status: "unknown", code: "run_check()" },
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1327,8 +1438,10 @@ describe("PrimeBackend", () => {
       const snapshot = await backend.agentSnapshot(backend.catalog().agents[0].id);
       expect(snapshot?.messages).toHaveLength(1_000);
       expect(snapshot?.messages[0].createdAt).toBe("1970-01-01T00:00:00.000Z");
-      expect(snapshot?.activity).toHaveLength(251);
-      expect(snapshot?.activity[0]).toMatchObject({ title: "Agent is idle", detail: "r".repeat(4_000) });
+      expect(snapshot?.dashboard).toMatchObject({ status: "idle", needsInput: false, recap: "r".repeat(4_000) });
+      expect(snapshot?.dashboard?.children).toHaveLength(250);
+      expect(snapshot?.dashboard?.children.every((child) =>
+        child.name.length <= 80 && child.status === "running")).toBe(true);
     } finally {
       fixture.sessions = originalSessions;
       fixture.snapshot = originalSnapshot;
@@ -1555,7 +1668,7 @@ describe("PrimeBackend", () => {
 
       expect(error).toHaveBeenCalledWith("Prime agent refresh recovered");
       const snapshot = await backend.agentSnapshot(agentId);
-      expect(snapshot?.activity[0]).toMatchObject({ detail: "Recovered refresh detail" });
+      expect(snapshot?.dashboard?.recap).toBe("Recovered refresh detail");
       expect(frames).toContainEqual(expect.objectContaining({
         type: "event",
         envelope: expect.objectContaining({
@@ -1567,6 +1680,330 @@ describe("PrimeBackend", () => {
       fixture.snapshot = originalSnapshot;
       fixture.snapshotError = false;
       error.mockRestore();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("caps python cell sections, flags truncation, and serves full output through the cell cache", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.snapshot.messages = [
+      { role: "user", content: "Run the analysis", timestamp: "2026-01-01T00:00:00.000Z" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "cell-call-1", name: "ipython", arguments: { code: "c".repeat(17_000) } }],
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+      {
+        role: "toolResult",
+        toolCallId: "cell-call-1",
+        content: [{ type: "text", text: "duplicate of stdout" }],
+        details: {
+          status: "error",
+          durationMs: 2_500,
+          stdout: "s".repeat(7_000),
+          stderr: "e".repeat(5_000),
+          result: "r".repeat(5_000),
+          error: { ename: "ValueError", evalue: "boom", traceback: "T".repeat(7_000) },
+          diffs: Array.from({ length: 12 }, (_, index) => ({
+            path: `src/file-${index}.ts`,
+            oldStr: "o".repeat(4_500),
+            newStr: "n".repeat(4_500),
+            startLine: 3,
+          })),
+          kernelRestarted: true,
+        },
+        timestamp: "2026-01-01T00:00:04.000Z",
+      },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      const snapshot = await backend.agentSnapshot(agentId);
+      const row = snapshot!.messages.find((message) => message.presentation?.kind === "python");
+      expect(row).toBeDefined();
+      expect(row?.turnId).toBe(snapshot!.messages[0].id);
+      expect(row?.state).toBe("failed");
+      const presentation = row!.presentation as Extract<NonNullable<typeof row.presentation>, { kind: "python" }>;
+      expect(presentation).toMatchObject({
+        lang: "python",
+        status: "failed",
+        codeTruncated: true,
+        stdoutTruncated: true,
+        stderrTruncated: true,
+        resultTruncated: true,
+        diffsTruncated: true,
+        durationMs: 2_500,
+        kernelRestarted: true,
+      });
+      expect(presentation.code?.length).toBe(16_000);
+      expect(presentation.stdout?.length).toBe(6_000);
+      expect(presentation.stderr?.length).toBe(4_000);
+      expect(presentation.result?.length).toBe(4_000);
+      expect(presentation.error).toMatchObject({ ename: "ValueError", evalue: "boom", tracebackTruncated: true });
+      expect(presentation.error?.traceback?.length).toBe(6_000);
+      expect(presentation.diffs).toHaveLength(10);
+      expect(presentation.diffs?.every((diff) =>
+        diff.oldStr.length === 4_000 && diff.newStr.length === 4_000 && diff.truncated === true)).toBe(true);
+
+      const cellId = presentation.cellId;
+      expect(cellId).toMatch(/^cell_/);
+      const full = backend.cellOutput(cellId!);
+      expect(full).toMatchObject({ cellId, truncated: false });
+      expect(full?.code?.length).toBe(17_000);
+      expect(full?.stdout?.length).toBe(7_000);
+      expect(full?.stderr?.length).toBe(5_000);
+      expect(full?.result?.length).toBe(5_000);
+      expect(full?.traceback?.length).toBe(7_000);
+      expect(backend.cellOutput("cell_unknown")).toBeNull();
+    } finally {
+      fixture.snapshot = originalSnapshot;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("enriches live refine outcomes and materializes unmatched ones as their own rows", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.snapshot.messages = [
+      { role: "user", content: "Please refine", timestamp: "2026-01-01T00:00:00.000Z" },
+      {
+        role: "custom",
+        customType: "session_slash_command",
+        content: "/refine",
+        display: true,
+        details: { command: { name: "refine", text: "/refine" } },
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+      {
+        role: "custom",
+        customType: "session_slash_command_result",
+        content: "Refined continual harness state: 1 edit applied.",
+        display: true,
+        details: { command: { name: "refine", text: "/refine" }, success: true },
+        timestamp: "2026-01-01T00:00:02.000Z",
+      },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "session_event",
+        event: {
+          type: "refine_complete",
+          result: {
+            id: "refinement-live",
+            summary: "Captured drawer-testing guidance",
+            rationale: "private rationale",
+            scope: "global",
+            appliedEdits: [
+              { id: "edit-1", action: "create", kind: "memory", title: "Drawer overflow", applied: true },
+              { id: "edit-2", action: "explode", kind: "memory", applied: true },
+            ],
+          },
+        },
+      });
+      listener({
+        type: "session_event",
+        event: { type: "refine_failed", error: "Planner crashed at /Users/private-person/venv" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      const snapshot = await backend.agentSnapshot(agentId);
+      const refines = snapshot!.messages.filter((message) => message.presentation?.kind === "refine");
+      expect(refines).toHaveLength(2);
+      // The /refine result row is enriched with the live outcome's details;
+      // edits with unknown shapes are dropped rather than guessed at.
+      expect(refines[0]).toMatchObject({
+        text: "Captured drawer-testing guidance",
+        presentation: {
+          kind: "refine",
+          status: "complete",
+          summary: "Captured drawer-testing guidance",
+          scope: "global",
+          edits: [{ action: "create", kind: "memory", title: "Drawer overflow", applied: true }],
+        },
+      });
+      // The failed outcome has no slash rows to pair with, so it gets its own row.
+      expect(refines[1]).toMatchObject({
+        role: "system",
+        state: "failed",
+        presentation: { kind: "refine", status: "failed", summary: "Refine failed" },
+      });
+      expect(JSON.stringify(refines[1])).not.toContain("/Users/");
+      expect(JSON.stringify(snapshot)).not.toContain("private rationale");
+      expect(snapshot?.dashboard?.refines.map((refine) => refine.status)).toEqual(["complete", "failed"]);
+      expect(snapshot?.dashboard?.refines[0]).toMatchObject({
+        id: refines[0].id,
+        summary: "Captured drawer-testing guidance",
+        scope: "global",
+      });
+    } finally {
+      fixture.snapshot = originalSnapshot;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("shows an in-progress refine row for a trailing /refine command", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.snapshot.messages = [
+      { role: "user", content: "Tune yourself up", timestamp: "2026-01-01T00:00:00.000Z" },
+      {
+        role: "custom",
+        customType: "session_slash_command",
+        content: "/refine",
+        display: true,
+        details: { command: { name: "refine", text: "/refine" } },
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      const snapshot = await backend.agentSnapshot(agentId);
+      const last = snapshot!.messages.at(-1);
+      const command = snapshot!.messages.at(-2);
+      expect(command).toMatchObject({ role: "user", text: "/refine" });
+      expect(last).toMatchObject({
+        role: "system",
+        state: "streaming",
+        turnId: command!.turnId,
+        presentation: { kind: "refine", status: "running" },
+      });
+      expect(snapshot?.dashboard?.refines).toMatchObject([{ status: "running" }]);
+    } finally {
+      fixture.snapshot = originalSnapshot;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("projects refine rows from saved sessions, enriching /refine results with persisted details", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prime-mobile-refine-"));
+    const sessionFile = join(directory, "session.jsonl");
+    try {
+      const refinement = {
+        id: "refinement-1",
+        summary: "Tightened the drawer-testing prompt",
+        rationale: "private rationale",
+        expectedOutcome: "Better drawer coverage",
+        appliedEdits: [
+          { id: "edit-1", action: "update", kind: "prompt", title: "Drawer testing", reason: "Missing overflow cases", applied: true },
+          { id: "edit-2", action: "bogus", kind: "prompt", applied: true },
+        ],
+        harnessStatePath: "/private/harness-state.json",
+        scope: "local",
+      };
+      const entries = [
+        {
+          type: "custom_message",
+          customType: "session_slash_command",
+          content: "/refine",
+          display: true,
+          details: { command: { name: "refine", text: "/refine" } },
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          type: "custom_message",
+          customType: "session_slash_command_result",
+          content: "Refined continual harness state: 1 edit applied.",
+          display: true,
+          details: { command: { name: "refine", text: "/refine" }, success: true },
+          timestamp: "2026-01-01T00:00:05.000Z",
+        },
+        { type: "custom", customType: "prime-agent.refinement", data: refinement, timestamp: "2026-01-01T00:00:06.000Z" },
+        {
+          type: "custom",
+          customType: "prime-agent.refinement",
+          data: { ...refinement, id: "refinement-2", summary: "Rolled back the prompt change", rollbackOf: "refinement-1" },
+          timestamp: "2026-01-01T00:10:00.000Z",
+        },
+      ];
+      await writeFile(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+
+      const messages = await projectSavedSessionTranscript(sessionFile);
+      const refines = messages.filter((message) => message.presentation?.kind === "refine");
+      expect(refines).toHaveLength(2);
+      expect(refines[0]).toMatchObject({
+        role: "system",
+        text: "Tightened the drawer-testing prompt",
+        turnId: messages[0].id,
+        presentation: {
+          kind: "refine",
+          status: "complete",
+          summary: "Tightened the drawer-testing prompt",
+          scope: "local",
+          edits: [{ action: "update", kind: "prompt", title: "Drawer testing", reason: "Missing overflow cases", applied: true }],
+        },
+      });
+      // A persisted refinement with no slash rows (auto-refine) becomes its own row.
+      expect(refines[1]).toMatchObject({
+        role: "system",
+        presentation: { kind: "refine", status: "complete", rollback: true, summary: "Rolled back the prompt change" },
+      });
+      expect(JSON.stringify(messages)).not.toContain("private rationale");
+      expect(JSON.stringify(messages)).not.toContain("harness-state.json");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("assembles the dashboard and throttles context-stat probes to one per 20 seconds", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    const originalStats = fixture.sessionStats;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    (fixture.snapshot.state as Record<string, unknown>).isCompacting = true;
+    fixture.sessionStats = { contextUsage: { tokens: 1_000, contextWindow: 100_000, percent: 1 } };
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      await vi.advanceTimersByTimeAsync(10);
+
+      const first = await backend.agentSnapshot(agentId);
+      expect(first?.dashboard).toMatchObject({ status: "compacting", needsInput: true });
+      expect(first?.dashboard?.recap).toBeUndefined();
+      expect(first?.dashboard?.contextUsage).toEqual({ tokens: 1_000, contextWindow: 100_000, percent: 1 });
+
+      // A refresh inside the 20s window reuses the cached stats.
+      fixture.sessionStats = { contextUsage: { tokens: 2_000, contextWindow: 100_000, percent: 2 } };
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({ type: "streaming_update" });
+      await vi.advanceTimersByTimeAsync(500);
+      expect((await backend.agentSnapshot(agentId))?.dashboard?.contextUsage)
+        .toEqual({ tokens: 1_000, contextWindow: 100_000, percent: 1 });
+
+      // Once the window has passed, the next refresh probes again.
+      await vi.advanceTimersByTimeAsync(20_000);
+      listener({ type: "streaming_update" });
+      await vi.advanceTimersByTimeAsync(500);
+      expect((await backend.agentSnapshot(agentId))?.dashboard?.contextUsage)
+        .toEqual({ tokens: 2_000, contextWindow: 100_000, percent: 2 });
+    } finally {
+      vi.useRealTimers();
+      fixture.snapshot = originalSnapshot;
+      fixture.sessionStats = originalStats;
       hub.close();
       await backend.close();
     }

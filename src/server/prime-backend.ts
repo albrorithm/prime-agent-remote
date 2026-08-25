@@ -11,24 +11,32 @@ import {
   SESSION_SLASH_COMMAND_NAMES,
 } from "../protocol.js";
 import type {
-  ActivityItem,
   AgentCapabilities,
   AgentGoal,
   AgentSnapshot,
   AgentSummary,
   AttentionRequest,
   CatalogSnapshot,
+  CellOutput,
   DirectoryListing,
   ImageAttachmentInput,
   TranscriptAttachment,
   MutationAccepted,
+  RefineEditAction,
+  RefineEditKind,
+  SessionContextUsage,
   SessionCreated,
+  SessionDashboard,
+  SessionDashboardChild,
+  SessionDashboardRefine,
   SlashCommandAccepted,
   SlashCommandCatalog,
   SlashCommandCatalogEntry,
   SlashCommandOption,
   SlashCommandResult,
   TranscriptMessage,
+  TranscriptPresentation,
+  TranscriptToolStatus,
 } from "../protocol.js";
 import {
   BackendCapabilityError,
@@ -130,6 +138,11 @@ interface PrimeSnapshot {
     label: string;
     status: string;
     activity?: { kind: string; toolName?: string };
+    durationMs?: number;
+    answerPreview?: string;
+    toolUseCount?: number;
+    tokenCount?: number;
+    recap?: string;
     error?: string;
   }>;
 }
@@ -213,6 +226,15 @@ interface PrimeModule {
   defaultDaemonSocketPath(): string;
 }
 
+type RefinePresentation = Extract<TranscriptPresentation, { kind: "refine" }>;
+type PythonPresentation = Extract<TranscriptPresentation, { kind: "python" }>;
+
+interface StoredRefine {
+  key: string;
+  createdAt: string;
+  presentation: RefinePresentation;
+}
+
 interface ConnectionRecord {
   publicId: string;
   activeSessionId: string;
@@ -221,6 +243,10 @@ interface ConnectionRecord {
   refreshQueue: CoalescedRefreshQueue;
   disposed: boolean;
   revision: number;
+  /** Refine outcomes observed live on this connection, in arrival order. */
+  refines: StoredRefine[];
+  contextStats?: { fetchedAt: number; value?: SessionContextUsage };
+  contextStatsPending?: Promise<void>;
 }
 
 interface PendingExtension {
@@ -246,6 +272,21 @@ const MAX_PENDING_EXTENSIONS_PER_AGENT = 8;
 const MAX_PENDING_EXTENSIONS_GLOBAL = 128;
 const MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_MESSAGE_CHARS = 120_000;
+const THINKING_FULL_MAX_CHARS = 16_000;
+const PYTHON_CODE_MAX_CHARS = 16_000;
+const PYTHON_STDOUT_MAX_CHARS = 6_000;
+const PYTHON_STDERR_MAX_CHARS = 4_000;
+const PYTHON_RESULT_MAX_CHARS = 4_000;
+const PYTHON_TRACEBACK_MAX_CHARS = 6_000;
+const PYTHON_DIFF_MAX_COUNT = 10;
+const PYTHON_DIFF_SIDE_MAX_CHARS = 4_000;
+const CELL_SECTION_MAX_CHARS = 512 * 1024;
+const CELL_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const REFINE_EDITS_MAX = 10;
+const MAX_STORED_REFINES = 20;
+const MAX_DASHBOARD_REFINES = 20;
+const CONTEXT_STATS_MIN_INTERVAL_MS = 20_000;
+const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 const STABLE_DATE_FALLBACK = "1970-01-01T00:00:00.000Z";
 const DIRECT_SLASH_COMMAND_NAME_SET = new Set<string>(DIRECT_SLASH_COMMAND_NAMES);
 const EXPLICIT_SLASH_COMMAND_NAMES = new Set<string>([
@@ -454,6 +495,9 @@ function validatePrimeSnapshot(value: unknown): PrimeSnapshot {
     lastReason: boundedString(goalRecord.lastReason, 1_000, true),
     lastError: boundedString(goalRecord.lastError, 1_000, true),
   } : undefined;
+  const integer = (input: unknown) => typeof input === "number" && Number.isFinite(input) && input >= 0
+    ? Math.trunc(input)
+    : undefined;
   const children = Array.isArray(record.children) ? record.children.slice(0, MAX_SNAPSHOT_CHILDREN).flatMap((value) => {
     const child = primeRecord(value);
     const id = boundedId(child?.id);
@@ -466,6 +510,11 @@ function validatePrimeSnapshot(value: unknown): PrimeSnapshot {
       label: safeLabel(child.label, "Subagent", 120),
       status: boundedString(child.status, 40) ?? "unknown",
       ...(kind ? { activity: { kind, toolName: boundedString(activity?.toolName, 120) } } : {}),
+      durationMs: numeric(child.durationMs),
+      answerPreview: boundedString(child.answerPreview, 500),
+      toolUseCount: integer(child.toolUseCount),
+      tokenCount: integer(child.tokenCount),
+      recap: boundedString(child.recap, 500),
       error: boundedString(child.error, 1_000),
     }];
   }) : [];
@@ -595,12 +644,269 @@ function boundedToolResult(result: PrimeRecord): PrimeRecord {
   };
 }
 
+type CellSink = (cell: CellOutput) => void;
+
+export function cellOutputId(toolCallId: string): string {
+  return `cell_${createHash("sha256").update(`cell:${toolCallId}`).digest("base64url").slice(0, 18)}`;
+}
+
+interface CappedSection {
+  text: string;
+  truncated: boolean;
+}
+
+function cappedSection(value: unknown, maxChars: number): CappedSection | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  return { text: value.slice(0, maxChars), truncated: value.length > maxChars };
+}
+
+function tracebackText(error: PrimeRecord | undefined): string {
+  if (Array.isArray(error?.traceback)) {
+    return error.traceback.filter((line): line is string => typeof line === "string").join("\n");
+  }
+  return typeof error?.traceback === "string" ? error.traceback : "";
+}
+
+function buildCellOutput(id: string, code: string, details: PrimeRecord | undefined, traceback: string): CellOutput {
+  const sections: Array<[keyof CellOutput & string, unknown]> = [
+    ["code", code],
+    ["stdout", details?.stdout],
+    ["stderr", details?.stderr],
+    ["result", details?.result],
+    ["traceback", traceback],
+  ];
+  let truncated = false;
+  const cell: CellOutput = { cellId: id, truncated: false };
+  for (const [key, value] of sections) {
+    const section = cappedSection(value, CELL_SECTION_MAX_CHARS);
+    if (!section) continue;
+    (cell as Record<string, unknown>)[key] = section.text;
+    truncated ||= section.truncated;
+  }
+  cell.truncated = truncated;
+  return cell;
+}
+
+/** Rich python-cell presentation rendered from raw daemon details (content duplicates skipped). */
+function pythonPresentation(
+  call: PrimeRecord,
+  result: PrimeRecord | undefined,
+  summary: { text: string; status: TranscriptToolStatus; meta?: string },
+  callId: string | undefined,
+  cellSink?: CellSink,
+): PythonPresentation {
+  const args = primeRecord(call.arguments);
+  const rawCode = typeof args?.code === "string" ? args.code : "";
+  const bashCell = /^(?:(?:[ \t]*\r?\n)*[ \t]*)%%bash\b/.test(rawCode);
+  const details = primeRecord(result?.details);
+  const error = primeRecord(details?.error);
+  const rawTraceback = tracebackText(error);
+  const code = cappedSection(rawCode, PYTHON_CODE_MAX_CHARS);
+  const stdout = cappedSection(details?.stdout, PYTHON_STDOUT_MAX_CHARS);
+  const stderr = cappedSection(details?.stderr, PYTHON_STDERR_MAX_CHARS);
+  const resultSection = cappedSection(details?.result, PYTHON_RESULT_MAX_CHARS);
+  const traceback = cappedSection(rawTraceback, PYTHON_TRACEBACK_MAX_CHARS);
+  const rawDiffs = Array.isArray(details?.diffs) ? details.diffs : [];
+  const diffs = rawDiffs.slice(0, PYTHON_DIFF_MAX_COUNT).flatMap((value) => {
+    const diff = primeRecord(value);
+    const path = boundedString(diff?.path, 1_024);
+    if (!diff || !path) return [];
+    const oldStr = typeof diff.oldStr === "string" ? diff.oldStr : "";
+    const newStr = typeof diff.newStr === "string" ? diff.newStr : "";
+    const startLine = typeof diff.startLine === "number" && Number.isInteger(diff.startLine) && diff.startLine > 0
+      ? diff.startLine
+      : undefined;
+    const truncated = oldStr.length > PYTHON_DIFF_SIDE_MAX_CHARS || newStr.length > PYTHON_DIFF_SIDE_MAX_CHARS;
+    return [{
+      path,
+      oldStr: oldStr.slice(0, PYTHON_DIFF_SIDE_MAX_CHARS),
+      newStr: newStr.slice(0, PYTHON_DIFF_SIDE_MAX_CHARS),
+      ...(startLine !== undefined ? { startLine } : {}),
+      ...(truncated ? { truncated: true } : {}),
+    }];
+  });
+  const ename = boundedString(error?.ename, 120) ?? boundedString(details?.errorEname, 120);
+  const evalue = boundedString(error?.evalue, 400);
+  const id = callId ? cellOutputId(callId) : undefined;
+  if (id && cellSink) cellSink(buildCellOutput(id, rawCode, details, rawTraceback));
+  return {
+    kind: "python",
+    lang: bashCell ? "bash" : "python",
+    status: summary.status,
+    preview: summary.text,
+    ...(summary.meta ? { meta: summary.meta } : {}),
+    ...(code ? { code: code.text, ...(code.truncated ? { codeTruncated: true } : {}) } : {}),
+    ...(stdout ? { stdout: stdout.text, ...(stdout.truncated ? { stdoutTruncated: true } : {}) } : {}),
+    ...(stderr ? { stderr: stderr.text, ...(stderr.truncated ? { stderrTruncated: true } : {}) } : {}),
+    ...(resultSection ? { result: resultSection.text, ...(resultSection.truncated ? { resultTruncated: true } : {}) } : {}),
+    ...(ename ? {
+      error: {
+        ename,
+        ...(evalue ? { evalue } : {}),
+        ...(traceback ? { traceback: traceback.text, ...(traceback.truncated ? { tracebackTruncated: true } : {}) } : {}),
+      },
+    } : {}),
+    ...(diffs.length ? { diffs, ...(rawDiffs.length > PYTHON_DIFF_MAX_COUNT ? { diffsTruncated: true } : {}) } : {}),
+    ...(numeric(details?.durationMs) !== undefined ? { durationMs: numeric(details?.durationMs) } : {}),
+    ...(details?.kernelRestarted === true ? { kernelRestarted: true } : {}),
+    ...(id ? { cellId: id } : {}),
+  };
+}
+
+const REFINE_EDIT_ACTIONS: readonly RefineEditAction[] = ["create", "update", "delete"];
+const REFINE_EDIT_KINDS: readonly RefineEditKind[] = ["prompt", "memory", "skill", "subagent"];
+
+function refineEditAction(value: unknown): RefineEditAction | undefined {
+  return REFINE_EDIT_ACTIONS.find((action) => action === value);
+}
+
+function refineEditKind(value: unknown): RefineEditKind | undefined {
+  return REFINE_EDIT_KINDS.find((kind) => kind === value);
+}
+
+/** Bounded refine presentation from a daemon RefinementResult (no before/after entry bodies). */
+function refinePresentationFromResult(data: PrimeRecord): RefinePresentation {
+  const scope = data.scope === "global" ? "global" as const : data.scope === "local" ? "local" as const : undefined;
+  const edits = Array.isArray(data.appliedEdits) ? data.appliedEdits.slice(0, REFINE_EDITS_MAX).flatMap((value) => {
+    const edit = primeRecord(value);
+    const action = refineEditAction(edit?.action);
+    const kind = refineEditKind(edit?.kind);
+    if (!edit || !action || !kind) return [];
+    const title = boundedString(edit.title, 400);
+    const reason = boundedString(edit.reason, 800);
+    const error = boundedString(edit.error, 800);
+    return [{
+      action,
+      kind,
+      ...(title ? { title: sanitizeTranscriptPreview(title, 120) } : {}),
+      ...(reason ? { reason: sanitizeTranscriptPreview(reason, 200) } : {}),
+      applied: edit.applied === true,
+      ...(error ? { error: sanitizeTranscriptPreview(error, 200) } : {}),
+    }];
+  }) : [];
+  return {
+    kind: "refine",
+    status: "complete",
+    summary: boundedString(data.summary, 1_000) ?? "Refined continual harness state.",
+    ...(scope ? { scope } : {}),
+    ...(data.rollbackOf ? { rollback: true } : {}),
+    ...(edits.length ? { edits } : {}),
+  };
+}
+
+function assistantErrorRow(record: PrimeRecord, index: number): TranscriptMessage | null {
+  if (record.stopReason !== "error") return null;
+  const message = boundedString(record.errorMessage, 4_000);
+  return {
+    id: messageIdentity(record, index, "error"),
+    role: "assistant",
+    text: message ? sanitizeTranscriptPreview(message, 400) : "The response failed.",
+    state: "failed",
+    createdAt: messageCreatedAt(record),
+    presentation: { kind: "error", label: "Turn failed" },
+  };
+}
+
+/** Id of the row that opens a turn, when this source record starts one (D1). */
+function turnOpenerId(record: PrimeRecord, index: number): string | undefined {
+  if (record.role === "user") return messageIdentity(record, index);
+  if (record.role === "custom" && record.customType === "session_slash_command" && record.display === true) {
+    const command = sessionSlashCommand(record);
+    if (command && messageText(record) === command.text) return messageIdentity(record, index, "session-command");
+  }
+  return undefined;
+}
+
+function presentationChars(message: TranscriptMessage): number {
+  return message.presentation ? JSON.stringify(message.presentation).length : 0;
+}
+
+function messageChars(message: TranscriptMessage): number {
+  return message.text.length + presentationChars(message);
+}
+
+function refineHistory(messages: readonly TranscriptMessage[]): SessionDashboardRefine[] {
+  const rows: SessionDashboardRefine[] = [];
+  for (const message of messages) {
+    if (message.presentation?.kind !== "refine") continue;
+    const presentation = message.presentation;
+    rows.push({
+      id: message.id,
+      status: presentation.status,
+      summary: presentation.summary,
+      ...(presentation.scope ? { scope: presentation.scope } : {}),
+      ...(presentation.rollback ? { rollback: true } : {}),
+      createdAt: message.createdAt,
+    });
+  }
+  return rows.slice(-MAX_DASHBOARD_REFINES);
+}
+
+/**
+ * Enrich the projected /refine outcome rows with the details captured from
+ * live refine_complete/refine_failed events, and materialize outcomes that
+ * have no slash-command rows (auto-refine applies).
+ */
+function applyLiveRefines(stored: readonly StoredRefine[], messages: TranscriptMessage[]): void {
+  for (const status of ["complete", "failed"] as const) {
+    const rows = messages.filter((message) =>
+      message.presentation?.kind === "refine" && message.presentation.status === status);
+    const records = stored.filter((item) => item.presentation.status === status);
+    // Pair from the tail so bounded head-drops on either side cannot skew alignment.
+    for (let offset = 1; offset <= Math.min(rows.length, records.length); offset += 1) {
+      const row = rows[rows.length - offset]!;
+      const record = records[records.length - offset]!;
+      row.presentation = record.presentation;
+      if (status === "complete") row.text = record.presentation.summary;
+    }
+    // Outcomes beyond the paired tail (e.g. auto-refine, which writes no slash
+    // rows) become their own rows, ordered by their arrival time.
+    for (const record of records.slice(0, Math.max(0, records.length - rows.length))) {
+      const row: TranscriptMessage = {
+        id: opaqueId(`refine:${record.key}`),
+        role: "system",
+        text: record.presentation.summary,
+        state: record.presentation.status === "failed" ? "failed" : "complete",
+        createdAt: record.createdAt,
+        presentation: record.presentation,
+      };
+      let position = messages.length;
+      while (position > 0 && (messages[position - 1]?.createdAt ?? "") > record.createdAt) position -= 1;
+      const previous = messages[position - 1];
+      if (previous?.turnId) row.turnId = previous.turnId;
+      messages.splice(position, 0, row);
+    }
+  }
+  bracketRunningRefine(messages);
+}
+
+/** A trailing /refine command with no outcome row yet shows as an in-progress refine. */
+function bracketRunningRefine(messages: TranscriptMessage[]): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.presentation?.kind === "refine") return;
+    if (message.role === "user" && (message.text === "/refine" || message.text.startsWith("/refine "))) {
+      messages.push({
+        id: opaqueId(`${message.id}:refine-running`),
+        role: "system",
+        text: "Refine in progress",
+        state: "streaming",
+        createdAt: message.createdAt,
+        ...(message.turnId ? { turnId: message.turnId } : {}),
+        presentation: { kind: "refine", status: "running", summary: "Refine in progress" },
+      });
+      return;
+    }
+  }
+}
+
 function projectMessage(
   message: unknown,
   index: number,
   streaming: boolean,
   toolResults: ReadonlyMap<string, PrimeRecord>,
   imageSink?: ImageAttachmentSink,
+  cellSink?: CellSink,
 ): TranscriptMessage[] {
   const record = primeRecord(message);
   if (!record) return [];
@@ -643,6 +949,38 @@ function projectMessage(
         "session-command-result",
       );
       if (item && !success) item.state = "failed";
+      if (item && command.name === "refine") {
+        item.presentation = { kind: "refine", status: success ? "complete" : "failed", summary: item.text };
+      }
+      return item ? [item] : [];
+    }
+    if (record.customType === "compaction_outcome") {
+      const details = primeRecord(record.details);
+      const outcome = details?.outcome;
+      const item = plainMessage(record, index, "system", messageText(record), streaming, "notice");
+      if (item) {
+        item.presentation = {
+          kind: "notice",
+          label: outcome === "failed" ? "Compaction failed" : outcome === "cancelled" ? "Compaction cancelled" : "Compaction skipped",
+          tone: outcome === "failed" ? "danger" : outcome === "cancelled" ? "warning" : "info",
+        };
+      }
+      return item ? [item] : [];
+    }
+    if (record.customType === "rlm_child_failure" || record.customType === "rlm_child_terminal_notice") {
+      const details = primeRecord(record.details);
+      const failure = record.customType === "rlm_child_failure";
+      const item = plainMessage(record, index, "system", messageText(record), streaming, "notice");
+      if (item) {
+        item.presentation = {
+          kind: "notice",
+          label: failure
+            ? "Subagent failed"
+            : details?.kind === "cancelled" ? "Subagent cancelled" : "Subagent finished without replying",
+          tone: failure ? "danger" : "warning",
+        };
+        if (failure) item.state = "failed";
+      }
       return item ? [item] : [];
     }
   }
@@ -679,13 +1017,18 @@ function projectMessage(
         const item = plainMessage(record, index, "assistant", "", streaming, `image:${partIndex}`, attachments);
         if (item) entries.push(item);
       } else if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+        const fullSource = part.thinking.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
         entries.push({
           id: messageIdentity(record, index, `thinking:${partIndex}`),
           role: "assistant",
-          text: thinkingRecap(part.thinking.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)),
+          text: thinkingRecap(fullSource),
           state: streaming ? "streaming" : "complete",
           createdAt: messageCreatedAt(record),
-          presentation: { kind: "thinking" },
+          presentation: {
+            kind: "thinking",
+            full: fullSource.slice(0, THINKING_FULL_MAX_CHARS),
+            ...(fullSource.length > THINKING_FULL_MAX_CHARS ? { truncated: true } : {}),
+          },
         });
       } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
@@ -695,16 +1038,21 @@ function projectMessage(
           result ? boundedToolResult(result) : undefined,
           streaming && !result,
         );
+        const presentation: TranscriptPresentation = part.name === "ipython"
+          ? pythonPresentation(part, result, summary, callId, cellSink)
+          : { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta };
         entries.push({
           id: callId ? opaqueId(callId) : messageIdentity(record, index, `tool:${partIndex}`),
           role: "assistant",
           text: summary.text,
           state: summary.status === "failed" ? "failed" : summary.status === "running" ? "streaming" : "complete",
           createdAt: messageCreatedAt(record),
-          presentation: { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta },
+          presentation,
         });
       }
     });
+    const errorRow = streaming ? null : assistantErrorRow(record, index);
+    if (errorRow) entries.push(errorRow);
     return entries;
   }
 
@@ -714,7 +1062,15 @@ function projectMessage(
   else return [];
   const attachments = projectImageAttachments(record.content, imageSink);
   const item = plainMessage(record, index, role, messageText(record), streaming, undefined, attachments);
-  return item ? [item] : [];
+  if (item && rawRole === "compactionSummary") {
+    item.presentation = { kind: "notice", label: "Context compacted", tone: "info" };
+  } else if (item && rawRole === "branchSummary") {
+    item.presentation = { kind: "notice", label: "Returned from a branch", tone: "info" };
+  }
+  const entries = item ? [item] : [];
+  const errorRow = rawRole === "assistant" && !streaming ? assistantErrorRow(record, index) : null;
+  if (errorRow) entries.push(errorRow);
+  return entries;
 }
 
 function collectToolResults(messages: readonly unknown[]): Map<string, PrimeRecord> {
@@ -740,28 +1096,44 @@ export function projectPrimeTranscript(
   messages: unknown[],
   streamingMessage?: unknown,
   imageSink?: ImageAttachmentSink,
+  cellSink?: CellSink,
 ): TranscriptMessage[] {
   const boundedSource = messages.slice(-MAX_SNAPSHOT_MESSAGES);
   const sourceOffset = messages.length - boundedSource.length;
   const toolResults = collectToolResults(boundedSource);
-  const projected = boundedSource.flatMap((message, index) =>
-    projectMessage(message, sourceOffset + index, false, toolResults, imageSink));
+  let turnId: string | undefined;
+  const projected: TranscriptMessage[] = [];
+  const append = (message: unknown, index: number, streaming: boolean): TranscriptMessage[] => {
+    const record = primeRecord(message);
+    const opener = record ? turnOpenerId(record, index) : undefined;
+    if (opener) turnId = opener;
+    const rows = projectMessage(message, index, streaming, toolResults, imageSink, cellSink);
+    for (const row of rows) {
+      if (turnId) row.turnId = turnId;
+      projected.push(row);
+    }
+    return rows;
+  };
+  boundedSource.forEach((message, index) => append(message, sourceOffset + index, false));
   if (streamingMessage) {
-    const streaming = projectMessage(streamingMessage, messages.length, true, toolResults, imageSink);
-    if (streaming.length) projected.push(...streaming);
-    else {
+    const streaming = append(streamingMessage, messages.length, true);
+    if (!streaming.length) {
       const record = primeRecord(streamingMessage) ?? { role: "assistant" };
       const placeholder = plainMessage(record, messages.length, "assistant", "", true, "placeholder");
-      if (placeholder) projected.push(placeholder);
+      if (placeholder) {
+        if (turnId) placeholder.turnId = turnId;
+        projected.push(placeholder);
+      }
     }
   }
-  let totalTextChars = 0;
+  let totalChars = 0;
   for (const message of projected) {
     message.text = message.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
-    totalTextChars += message.text.length;
+    totalChars += messageChars(message);
   }
-  while (projected.length > MAX_SNAPSHOT_MESSAGES || totalTextChars > MAX_TRANSCRIPT_TEXT_CHARS) {
-    totalTextChars -= projected.shift()?.text.length ?? 0;
+  while (projected.length > MAX_SNAPSHOT_MESSAGES || totalChars > MAX_TRANSCRIPT_TEXT_CHARS) {
+    const removed = projected.shift();
+    totalChars -= removed ? messageChars(removed) : 0;
   }
   return ensureUniqueMessageIds(projected);
 }
@@ -783,6 +1155,7 @@ function conciseTitle(value: unknown, maxChars = 80): string | undefined {
 export async function projectSavedSessionTranscript(
   sessionFile: string,
   imageSink?: ImageAttachmentSink,
+  cellSink?: CellSink,
 ): Promise<TranscriptMessage[]> {
   try {
     const file = await stat(sessionFile);
@@ -792,18 +1165,22 @@ export async function projectSavedSessionTranscript(
     const decoder = new StringDecoder("utf8");
     const messages: TranscriptMessage[] = [];
     const savedTools = new Map<string, { call: PrimeRecord; message: TranscriptMessage }>();
-    let totalTextChars = 0;
+    // Successful /refine result rows awaiting their persisted RefinementResult entry.
+    const pendingRefines: TranscriptMessage[] = [];
+    let totalChars = 0;
     let currentLine = "";
     let droppingLine = false;
     let skipPartialFirstLine = start > 0;
     let index = 0;
+    let turnId: string | undefined;
 
     const appendProjected = (projected: TranscriptMessage) => {
       projected.text = projected.text.slice(0, SAVED_TRANSCRIPT_MAX_MESSAGE_CHARS);
       messages.push(projected);
-      totalTextChars += projected.text.length;
-      while (messages.length > SAVED_TRANSCRIPT_MAX_MESSAGES || totalTextChars > SAVED_TRANSCRIPT_MAX_TEXT_CHARS) {
-        totalTextChars -= messages.shift()?.text.length ?? 0;
+      totalChars += messageChars(projected);
+      while (messages.length > SAVED_TRANSCRIPT_MAX_MESSAGES || totalChars > SAVED_TRANSCRIPT_MAX_TEXT_CHARS) {
+        const removed = messages.shift();
+        totalChars -= removed ? messageChars(removed) : 0;
       }
     };
 
@@ -816,6 +1193,31 @@ export async function projectSavedSessionTranscript(
       }
       if (!entry) return;
       const parsedTimestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : entry.timestamp;
+      if (entry.type === "custom" && entry.customType === REFINEMENT_CUSTOM_TYPE) {
+        const data = primeRecord(entry.data);
+        if (data) {
+          const presentation = refinePresentationFromResult(data);
+          const pending = pendingRefines.shift();
+          if (pending) {
+            const previous = messageChars(pending);
+            pending.presentation = presentation;
+            pending.text = presentation.summary;
+            if (messages.includes(pending)) totalChars += messageChars(pending) - previous;
+          } else {
+            appendProjected({
+              id: opaqueId(`refine:${typeof data.id === "string" ? data.id : index}`),
+              role: "system",
+              text: presentation.summary,
+              state: "complete",
+              createdAt: toIso(entry.timestamp),
+              ...(turnId ? { turnId } : {}),
+              presentation,
+            });
+          }
+        }
+        index += 1;
+        return;
+      }
       const source = entry.type === "message"
         ? primeRecord(entry.message)
         : entry.type === "compaction" && typeof entry.summary === "string"
@@ -841,7 +1243,7 @@ export async function projectSavedSessionTranscript(
       if (hydrated.role === "toolResult" && typeof hydrated.toolCallId === "string") {
         const pending = savedTools.get(hydrated.toolCallId);
         if (pending) {
-          const previousLength = pending.message.text.length;
+          const previous = messageChars(pending.message);
           const summary = summarizeToolCall(
             boundedToolCall(pending.call),
             boundedToolResult(hydrated),
@@ -849,16 +1251,26 @@ export async function projectSavedSessionTranscript(
           );
           pending.message.text = summary.text;
           pending.message.state = summary.status === "failed" ? "failed" : "complete";
-          pending.message.presentation = { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta };
-          if (messages.includes(pending.message)) totalTextChars += pending.message.text.length - previousLength;
+          pending.message.presentation = pending.call.name === "ipython"
+            ? pythonPresentation(pending.call, hydrated, summary, hydrated.toolCallId, cellSink)
+            : { kind: "tool", label: summary.label, status: summary.status, meta: summary.meta };
+          if (messages.includes(pending.message)) totalChars += messageChars(pending.message) - previous;
           savedTools.delete(hydrated.toolCallId);
         }
         index += 1;
         return;
       }
 
-      const projected = projectMessage(hydrated, index, false, new Map(), imageSink);
-      for (const item of projected) appendProjected(item);
+      const opener = turnOpenerId(hydrated, index);
+      if (opener) turnId = opener;
+      const projected = projectMessage(hydrated, index, false, new Map(), imageSink, cellSink);
+      for (const item of projected) {
+        if (turnId) item.turnId = turnId;
+        appendProjected(item);
+        if (item.presentation?.kind === "refine" && item.presentation.status === "complete") {
+          pendingRefines.push(item);
+        }
+      }
       if (hydrated.role === "assistant" && Array.isArray(hydrated.content)) {
         for (const rawPart of hydrated.content.slice(0, MAX_MESSAGE_PARTS)) {
           const part = primeRecord(rawPart);
@@ -896,8 +1308,9 @@ export async function projectSavedSessionTranscript(
     for await (const chunk of stream) consumeChunk(decoder.write(chunk as Buffer));
     consumeChunk(decoder.end(), true);
     for (const pending of savedTools.values()) {
-      if (pending.message.presentation?.kind === "tool" && pending.message.presentation.status === "waiting") {
-        pending.message.presentation = { ...pending.message.presentation, status: "unknown" };
+      const presentation = pending.message.presentation;
+      if ((presentation?.kind === "tool" || presentation?.kind === "python") && presentation.status === "waiting") {
+        pending.message.presentation = { ...presentation, status: "unknown" };
       }
     }
     return ensureUniqueMessageIds(messages);
@@ -932,6 +1345,26 @@ function projectGoal(source: PrimeSnapshot["state"]["goal"]): AgentGoal | undefi
   };
 }
 
+function cellOutputBytes(cell: CellOutput): number {
+  return (cell.code?.length ?? 0)
+    + (cell.stdout?.length ?? 0)
+    + (cell.stderr?.length ?? 0)
+    + (cell.result?.length ?? 0)
+    + (cell.traceback?.length ?? 0)
+    + 64;
+}
+
+function dashboardContextUsage(stats: PrimeSessionStats): SessionContextUsage | undefined {
+  const usage: SessionContextUsage = {
+    ...(numeric(stats.contextUsage?.tokens) !== undefined ? { tokens: numeric(stats.contextUsage?.tokens) } : {}),
+    ...(numeric(stats.contextUsage?.contextWindow) !== undefined
+      ? { contextWindow: numeric(stats.contextUsage?.contextWindow) }
+      : {}),
+    ...(numeric(stats.contextUsage?.percent) !== undefined ? { percent: numeric(stats.contextUsage?.percent) } : {}),
+  };
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
 function resolveModuleSpecifier(specifier: string): string {
   if (specifier.startsWith(".") || path.isAbsolute(specifier)) {
     return pathToFileURL(path.resolve(process.cwd(), specifier)).href;
@@ -955,6 +1388,8 @@ export class PrimeBackend implements AgentBackend {
   private readonly pendingExtensions = new Map<string, PendingExtension>();
   private readonly attachmentCache = new Map<string, AttachmentData>();
   private attachmentCacheBytes = 0;
+  private readonly cellCache = new Map<string, CellOutput>();
+  private cellCacheBytes = 0;
   private pollTimer?: NodeJS.Timeout;
   private readonly catalogQueue = new CoalescedRefreshQueue({
     run: () => this.loadCatalogOnce(),
@@ -1116,6 +1551,14 @@ export class PrimeBackend implements AgentBackend {
     this.attachmentCache.delete(id);
     this.attachmentCache.set(id, cached);
     return cached;
+  }
+
+  cellOutput(id: string): CellOutput | null {
+    const cached = this.cellCache.get(id);
+    if (!cached) return null;
+    this.cellCache.delete(id);
+    this.cellCache.set(id, cached);
+    return structuredClone(cached);
   }
 
   async sendMessage(input: SendMessageInput): Promise<MutationAccepted> {
@@ -1513,6 +1956,8 @@ export class PrimeBackend implements AgentBackend {
     this.commandLocks.clear();
     this.attachmentCache.clear();
     this.attachmentCacheBytes = 0;
+    this.cellCache.clear();
+    this.cellCacheBytes = 0;
     this.client?.close();
   }
 
@@ -1617,7 +2062,8 @@ export class PrimeBackend implements AgentBackend {
       hasActiveWork || (summary.lifecycle !== "draft" && summary.activity === "working")
     );
     const pending = [...this.pendingExtensions.values()].find((request) => request.publicAgentId === id);
-    const attention = pending?.method === "confirm" ? "approval" : pending ? "question" : null;
+    const attention = pending?.method === "confirm" ? "dialog" as const : pending ? "question" as const : null;
+    const needsInput = Boolean(summary.activeSessionId) && summary.taskState === "needs_input";
     const lifecycle = !summary.activeSessionId
       ? "inactive"
       : summary.workerState === "failed"
@@ -1640,6 +2086,7 @@ export class PrimeBackend implements AgentBackend {
       lifecycle,
       activity: attention ? "blocked" : working ? "working" : "idle",
       attention,
+      ...(needsInput ? { needsInput: true } : {}),
       unreadCount: attention ? 1 : 0,
       childCount: 0,
       createdAt: toIso(summary.created || summary.lastActivityAt || summary.modified),
@@ -1704,6 +2151,7 @@ export class PrimeBackend implements AgentBackend {
       connection,
       revision: this.snapshots.get(publicId)?.revision ?? 0,
       disposed: false,
+      refines: [],
       unsubscribe: () => {},
       refreshQueue: new CoalescedRefreshQueue({
         run: () => this.runConnectionRefresh(record),
@@ -1771,6 +2219,31 @@ export class PrimeBackend implements AgentBackend {
         this.publishAttentionAdded(requestId, pending);
       }
     }
+    if (event.type === "session_event") {
+      const inner = primeRecord(event.event);
+      if (inner?.type === "refine_complete") {
+        const result = primeRecord(inner.result);
+        if (result) {
+          this.recordRefine(record, {
+            key: boundedId(result.id) ?? `refine-${record.refines.length}`,
+            createdAt: new Date().toISOString(),
+            presentation: refinePresentationFromResult(result),
+          });
+        }
+      } else if (inner?.type === "refine_failed") {
+        const detail = boundedString(inner.error, 800);
+        this.recordRefine(record, {
+          key: `refine-failed-${record.refines.length}`,
+          createdAt: new Date().toISOString(),
+          presentation: {
+            kind: "refine",
+            status: "failed",
+            summary: "Refine failed",
+            ...(detail ? { error: sanitizeTranscriptPreview(detail, 200) } : {}),
+          },
+        });
+      }
+    }
     if (event.type === "closed") {
       this.clearPendingExtensions(record.publicId, true);
       void this.disposeConnection(record).then(
@@ -1803,38 +2276,48 @@ export class PrimeBackend implements AgentBackend {
 
   private applyPrimeSnapshot(record: ConnectionRecord, source: PrimeSnapshot, publish: boolean): void {
     record.revision += 1;
-    const messages = projectPrimeTranscript(source.messages, source.streamingMessage, (image) => this.cacheImage(image));
-    const status: ActivityItem = {
-      id: `${record.publicId}:status`,
-      kind: "status",
-      title: source.state.isStreaming
-        ? "Agent is responding"
-        : source.state.isCompacting
-          ? "Compacting context"
-          : source.state.isBashRunning
-            ? "Running a command"
-            : "Agent is idle",
-      detail: source.state.recap,
-      status: source.state.isStreaming || source.state.isCompacting || source.state.isBashRunning ? "running" : "complete",
-      createdAt: new Date().toISOString(),
-    };
-    const childActivity: ActivityItem[] = (source.children ?? []).map((child) => {
+    const messages = projectPrimeTranscript(
+      source.messages,
+      source.streamingMessage,
+      (image) => this.cacheImage(image),
+      (cell) => this.cacheCell(cell),
+    );
+    applyLiveRefines(record.refines, messages);
+    const children: SessionDashboardChild[] = (source.children ?? []).map((child) => {
       const agentId = child.activeSessionId ? this.publicByActive.get(child.activeSessionId) : undefined;
       const agentName = agentId ? this.catalogState.agents.find((agent) => agent.id === agentId)?.name : undefined;
+      const status = child.status === "queued" || child.status === "running" || child.status === "done"
+        || child.status === "error" || child.status === "cancelled"
+        ? child.status
+        : "unknown";
       return {
         id: `${record.publicId}:child:${opaqueId(child.id)}`,
-        kind: "child",
-        title: agentName ?? "Subagent",
-        detail: child.status === "error"
-          ? "Subagent failed"
-          : child.activity?.toolName
-            ? sanitizeTranscriptPreview(child.activity.toolName, 48)
-            : undefined,
-        status: child.status === "error" ? "failed" : child.status === "done" ? "complete" : child.status === "queued" ? "waiting" : "running",
-        createdAt: new Date().toISOString(),
-        agentId,
+        ...(agentId ? { agentId } : {}),
+        name: agentName ?? sanitizeTranscriptPreview(child.label, 80),
+        status,
+        ...(child.activity?.toolName ? { toolName: sanitizeTranscriptPreview(child.activity.toolName, 48) } : {}),
+        ...(child.durationMs !== undefined ? { durationMs: child.durationMs } : {}),
+        ...(child.answerPreview ? { answerPreview: sanitizeTranscriptPreview(child.answerPreview, 200) } : {}),
+        ...(child.toolUseCount !== undefined ? { toolUseCount: child.toolUseCount } : {}),
+        ...(child.tokenCount !== undefined ? { tokenCount: child.tokenCount } : {}),
+        ...(child.recap ? { recap: sanitizeTranscriptPreview(child.recap, 200) } : {}),
+        ...(child.error ? { error: sanitizeTranscriptPreview(child.error, 200) } : {}),
       };
     });
+    const dashboard: SessionDashboard = {
+      status: source.state.isStreaming
+        ? "responding"
+        : source.state.isCompacting
+          ? "compacting"
+          : source.state.isBashRunning
+            ? "running_command"
+            : "idle",
+      ...(source.state.recap ? { recap: source.state.recap } : {}),
+      needsInput: this.rawSummaries.get(record.publicId)?.taskState === "needs_input",
+      ...(record.contextStats?.value ? { contextUsage: record.contextStats.value } : {}),
+      children,
+      refines: refineHistory(messages),
+    };
     const attention = [...this.pendingExtensions.entries()]
       .filter(([, pending]) => pending.publicAgentId === record.publicId)
       .map(([id, pending]) => this.projectAttention(id, pending));
@@ -1842,7 +2325,7 @@ export class PrimeBackend implements AgentBackend {
       revision: record.revision,
       agentId: record.publicId,
       messages,
-      activity: [status, ...childActivity],
+      dashboard,
       attention,
       goal: projectGoal(source.state.goal),
     };
@@ -1850,6 +2333,49 @@ export class PrimeBackend implements AgentBackend {
     const streamId = `agent:${record.publicId}`;
     if (!this.hub.has(streamId)) this.hub.register(streamId, snapshot);
     else if (publish) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    this.maybeRefreshContextStats(record);
+  }
+
+  private recordRefine(record: ConnectionRecord, refine: StoredRefine): void {
+    record.refines.push(refine);
+    while (record.refines.length > MAX_STORED_REFINES) record.refines.shift();
+  }
+
+  private maybeRefreshContextStats(record: ConnectionRecord): void {
+    const connection = record.connection;
+    // The connection is dynamically loaded; older daemon builds may lack the method.
+    if (typeof connection.getSessionStats !== "function") return;
+    if (record.disposed || record.contextStatsPending) return;
+    if (record.contextStats && Date.now() - record.contextStats.fetchedAt < CONTEXT_STATS_MIN_INTERVAL_MS) return;
+    const stats = connection.getSessionStats;
+    const fetching = Promise.resolve()
+      .then(() => stats.call(connection))
+      .then((value) => {
+        record.contextStats = { fetchedAt: Date.now(), value: dashboardContextUsage(value ?? {}) };
+        this.applyFetchedContextStats(record);
+      })
+      .catch(() => {
+        // A failed probe stays throttled like a successful one.
+        record.contextStats = { fetchedAt: Date.now(), value: record.contextStats?.value };
+      })
+      .finally(() => {
+        if (record.contextStatsPending === fetching) record.contextStatsPending = undefined;
+      });
+    record.contextStatsPending = fetching;
+  }
+
+  private applyFetchedContextStats(record: ConnectionRecord): void {
+    if (record.disposed || this.connections.get(record.publicId) !== record) return;
+    const snapshot = this.snapshots.get(record.publicId);
+    if (!snapshot?.dashboard) return;
+    const next = record.contextStats?.value;
+    if (JSON.stringify(snapshot.dashboard.contextUsage ?? null) === JSON.stringify(next ?? null)) return;
+    if (next) snapshot.dashboard.contextUsage = next;
+    else delete snapshot.dashboard.contextUsage;
+    snapshot.revision += 1;
+    record.revision = Math.max(record.revision, snapshot.revision);
+    const streamId = `agent:${record.publicId}`;
+    if (this.hub.has(streamId)) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
   }
 
   private async disposeConnection(record: ConnectionRecord): Promise<void> {
@@ -1879,6 +2405,25 @@ export class PrimeBackend implements AgentBackend {
       const oldest = this.attachmentCache.get(oldestId);
       this.attachmentCache.delete(oldestId);
       this.attachmentCacheBytes -= oldest?.bytes.byteLength ?? 0;
+    }
+  }
+
+  private cacheCell(cell: CellOutput): void {
+    const size = cellOutputBytes(cell);
+    if (size > CELL_CACHE_MAX_BYTES) return;
+    const existing = this.cellCache.get(cell.cellId);
+    if (existing) {
+      this.cellCacheBytes -= cellOutputBytes(existing);
+      this.cellCache.delete(cell.cellId);
+    }
+    this.cellCache.set(cell.cellId, cell);
+    this.cellCacheBytes += size;
+    while (this.cellCacheBytes > CELL_CACHE_MAX_BYTES) {
+      const oldestId = this.cellCache.keys().next().value as string | undefined;
+      if (!oldestId) break;
+      const oldest = this.cellCache.get(oldestId);
+      this.cellCache.delete(oldestId);
+      this.cellCacheBytes -= oldest ? cellOutputBytes(oldest) : 0;
     }
   }
 
@@ -1992,9 +2537,11 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private extensionOptions(pending: PendingExtension): AttentionRequest["options"] {
-    const cancel = { id: "__prime_cancel__", label: pending.method === "confirm" ? "Deny" : "Cancel", tone: "danger" as const };
+    // Confirm dialogs carry no daemon-provided button labels (title + message
+    // only), so the buttons stay neutral instead of inventing approval framing.
+    const cancel = { id: "__prime_cancel__", label: pending.method === "confirm" ? "Decline" : "Cancel", tone: "danger" as const };
     if (pending.method === "confirm") {
-      return [cancel, { id: "confirm", label: "Allow once", tone: "safe" as const }];
+      return [cancel, { id: "confirm", label: "Confirm", tone: "safe" as const }];
     }
     if (pending.method !== "select" || !Array.isArray(pending.payload.options)) return [cancel];
     const projected = pending.payload.options.slice(0, 50).flatMap((value) => {
@@ -2018,10 +2565,10 @@ export class PrimeBackend implements AgentBackend {
     return {
       id,
       agentId: pending.publicAgentId,
-      kind: pending.method === "confirm" ? "approval" : "question",
+      kind: pending.method === "confirm" ? "dialog" : "question",
       title: safeLabel(
         pending.payload.title,
-        pending.method === "confirm" ? "Approval required" : "Input required",
+        pending.method === "confirm" ? "Confirmation required" : "Input required",
         200,
       ),
       detail: boundedString(pending.payload.message, 4_000, true),
@@ -2033,7 +2580,11 @@ export class PrimeBackend implements AgentBackend {
 
   private async projectInactiveSnapshot(publicId: string, summary: PrimeSessionSummary): Promise<AgentSnapshot> {
     const messages = summary.sessionFile
-      ? await projectSavedSessionTranscript(summary.sessionFile, (image) => this.cacheImage(image))
+      ? await projectSavedSessionTranscript(
+          summary.sessionFile,
+          (image) => this.cacheImage(image),
+          (cell) => this.cacheCell(cell),
+        )
       : [];
     const fallback = conciseTitle(summary.firstMessage, 4_000);
     if (!messages.length && fallback) {
@@ -2043,7 +2594,12 @@ export class PrimeBackend implements AgentBackend {
       revision: 1,
       agentId: publicId,
       messages,
-      activity: [{ id: `${publicId}:inactive`, kind: "status", title: "Inactive session", status: "complete", createdAt: toIso(summary.modified) }],
+      dashboard: {
+        status: "inactive",
+        needsInput: false,
+        children: [],
+        refines: refineHistory(messages),
+      },
       attention: [],
     };
   }

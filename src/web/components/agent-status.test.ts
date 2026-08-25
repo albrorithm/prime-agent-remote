@@ -39,9 +39,9 @@ describe("agentStatus", () => {
   });
 
   it("gives attention top priority over lifecycle and activity", () => {
-    expect(agentStatus(makeAgent({ attention: "approval", lifecycle: "failed", activity: "working" })))
-      .toEqual({ label: "Needs approval", tone: "attention" });
-    expect(agentStatus(makeAgent({ attention: "question" }))).toEqual({ label: "Needs question", tone: "attention" });
-    expect(agentStatus(makeAgent({ attention: "error" }))).toEqual({ label: "Needs error", tone: "attention" });
+    expect(agentStatus(makeAgent({ attention: "dialog", lifecycle: "failed", activity: "working" })))
+      .toEqual({ label: "Needs response", tone: "attention" });
+    expect(agentStatus(makeAgent({ attention: "question" }))).toEqual({ label: "Needs input", tone: "attention" });
+    expect(agentStatus(makeAgent({ attention: "error" }))).toEqual({ label: "Needs attention", tone: "attention" });
   });
 });

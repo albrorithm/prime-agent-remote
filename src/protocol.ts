@@ -4,7 +4,7 @@ export const PROTOCOL_VERSION = 1 as const;
 
 export type AgentLifecycle = "starting" | "live" | "inactive" | "stopped" | "failed";
 export type AgentActivityState = "working" | "idle" | "blocked";
-export type AttentionKind = "approval" | "question" | "error";
+export type AttentionKind = "dialog" | "question" | "error";
 
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
 export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
@@ -87,6 +87,8 @@ export interface AgentSummary {
   lifecycle: AgentLifecycle;
   activity: AgentActivityState;
   attention: AttentionKind | null;
+  /** Advisory daemon guess that the agent may be waiting on the user — never a queue. */
+  needsInput?: boolean;
   unreadCount: number;
   childCount: number;
   createdAt: string;
@@ -105,9 +107,73 @@ export type ActivityStatus = "running" | "waiting" | "complete" | "failed";
 
 export type TranscriptToolStatus = ActivityStatus | "unknown";
 
+export interface PythonCellDiff {
+  path: string;
+  oldStr: string;
+  newStr: string;
+  startLine?: number;
+  truncated?: boolean;
+}
+
+export interface PythonCellError {
+  ename: string;
+  evalue?: string;
+  traceback?: string;
+  tracebackTruncated?: boolean;
+}
+
+export type RefineEditAction = "create" | "update" | "delete";
+export type RefineEditKind = "prompt" | "memory" | "skill" | "subagent";
+
+export interface RefineEditSummary {
+  action: RefineEditAction;
+  kind: RefineEditKind;
+  title?: string;
+  reason?: string;
+  applied: boolean;
+  error?: string;
+}
+
+export type RefineScope = "local" | "global";
+export type RefineStatus = "running" | "complete" | "failed";
+export type NoticeTone = "info" | "warning" | "danger";
+
 export type TranscriptPresentation =
-  | { kind: "thinking" }
-  | { kind: "tool"; label: string; status: TranscriptToolStatus; meta?: string };
+  | { kind: "thinking"; full?: string; truncated?: boolean }
+  | { kind: "tool"; label: string; status: TranscriptToolStatus; meta?: string }
+  | {
+      kind: "python";
+      lang: "python" | "bash";
+      status: TranscriptToolStatus;
+      preview: string;
+      meta?: string;
+      code?: string;
+      codeTruncated?: boolean;
+      stdout?: string;
+      stdoutTruncated?: boolean;
+      stderr?: string;
+      stderrTruncated?: boolean;
+      result?: string;
+      resultTruncated?: boolean;
+      error?: PythonCellError;
+      diffs?: PythonCellDiff[];
+      diffsTruncated?: boolean;
+      durationMs?: number;
+      kernelRestarted?: boolean;
+      /** Fetch the untruncated sections via GET /api/v1/cells/:cellId. */
+      cellId?: string;
+    }
+  | {
+      kind: "refine";
+      status: RefineStatus;
+      summary: string;
+      scope?: RefineScope;
+      rollback?: boolean;
+      edits?: RefineEditSummary[];
+      error?: string;
+    }
+  | { kind: "notice"; label: string; tone: NoticeTone }
+  | { kind: "error"; label: string };
 
 export interface TranscriptMessage {
   id: string;
@@ -115,20 +181,57 @@ export interface TranscriptMessage {
   text: string;
   state: MessageState;
   createdAt: string;
+  /**
+   * Groups the rows of one exchange. Opens at each user prompt or session
+   * slash command and is the opening row's id; rows before the first prompt
+   * carry none. Group by consecutive turnId.
+   */
+  turnId?: string;
   presentation?: TranscriptPresentation;
   attachments?: TranscriptAttachment[];
 }
 
-export type ActivityKind = "tool" | "thinking" | "child" | "status";
+export type SessionDashboardStatus = "responding" | "compacting" | "running_command" | "idle" | "inactive";
+export type SessionDashboardChildStatus = "queued" | "running" | "done" | "error" | "cancelled" | "unknown";
 
-export interface ActivityItem {
+export interface SessionDashboardChild {
   id: string;
-  kind: ActivityKind;
-  title: string;
-  detail?: string;
-  status: ActivityStatus;
-  createdAt: string;
+  /** Public agent id when the child maps to a catalog session. */
   agentId?: string;
+  name: string;
+  status: SessionDashboardChildStatus;
+  toolName?: string;
+  durationMs?: number;
+  answerPreview?: string;
+  toolUseCount?: number;
+  tokenCount?: number;
+  recap?: string;
+  error?: string;
+}
+
+export interface SessionContextUsage {
+  tokens?: number;
+  contextWindow?: number;
+  percent?: number;
+}
+
+export interface SessionDashboardRefine {
+  /** Id of the projected refine transcript row. */
+  id: string;
+  status: RefineStatus;
+  summary: string;
+  scope?: RefineScope;
+  rollback?: boolean;
+  createdAt: string;
+}
+
+export interface SessionDashboard {
+  status: SessionDashboardStatus;
+  recap?: string;
+  needsInput: boolean;
+  contextUsage?: SessionContextUsage;
+  children: SessionDashboardChild[];
+  refines: SessionDashboardRefine[];
 }
 
 export interface AttentionRequest {
@@ -164,7 +267,7 @@ export interface AgentSnapshot {
   revision: number;
   agentId: string;
   messages: TranscriptMessage[];
-  activity: ActivityItem[];
+  dashboard?: SessionDashboard;
   attention: AttentionRequest[];
   goal?: AgentGoal;
 }
@@ -186,8 +289,6 @@ export type GatewayEvent =
   | { kind: "agent.replaced"; payload: AgentSnapshot }
   | { kind: "agent.message_added"; payload: TranscriptMessage }
   | { kind: "agent.message_updated"; payload: TranscriptMessage }
-  | { kind: "agent.activity_added"; payload: ActivityItem }
-  | { kind: "agent.activity_updated"; payload: ActivityItem }
   | { kind: "agent.attention_added"; payload: AttentionRequest }
   | { kind: "agent.attention_resolved"; payload: { id: string } };
 
@@ -250,7 +351,8 @@ const agentSummarySchema = z.object({
   cwd: z.string().optional(),
   lifecycle: z.enum(["starting", "live", "inactive", "stopped", "failed"]),
   activity: z.enum(["working", "idle", "blocked"]),
-  attention: z.enum(["approval", "question", "error"]).nullable(),
+  attention: z.enum(["dialog", "question", "error"]).nullable(),
+  needsInput: z.boolean().optional(),
   unreadCount: z.number().int().nonnegative(),
   childCount: z.number().int().nonnegative(),
   createdAt: z.string(),
@@ -293,14 +395,75 @@ const transcriptAttachmentSchema = z.object({
   mimeType: z.enum(IMAGE_MIME_TYPES),
 });
 
+const transcriptToolStatusSchema = z.enum(["running", "waiting", "complete", "failed", "unknown"]);
+
+const pythonCellDiffSchema = z.object({
+  path: z.string(),
+  oldStr: z.string(),
+  newStr: z.string(),
+  startLine: z.number().int().positive().optional(),
+  truncated: z.boolean().optional(),
+});
+
+const pythonCellErrorSchema = z.object({
+  ename: z.string(),
+  evalue: z.string().optional(),
+  traceback: z.string().optional(),
+  tracebackTruncated: z.boolean().optional(),
+});
+
+const refineEditSummarySchema = z.object({
+  action: z.enum(["create", "update", "delete"]),
+  kind: z.enum(["prompt", "memory", "skill", "subagent"]),
+  title: z.string().optional(),
+  reason: z.string().optional(),
+  applied: z.boolean(),
+  error: z.string().optional(),
+});
+
+const refineStatusSchema = z.enum(["running", "complete", "failed"]);
+const refineScopeSchema = z.enum(["local", "global"]);
+
 const transcriptPresentationSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("thinking") }),
+  z.object({ kind: z.literal("thinking"), full: z.string().optional(), truncated: z.boolean().optional() }),
   z.object({
     kind: z.literal("tool"),
     label: z.string(),
-    status: z.enum(["running", "waiting", "complete", "failed", "unknown"]),
+    status: transcriptToolStatusSchema,
     meta: z.string().optional(),
   }),
+  z.object({
+    kind: z.literal("python"),
+    lang: z.enum(["python", "bash"]),
+    status: transcriptToolStatusSchema,
+    preview: z.string(),
+    meta: z.string().optional(),
+    code: z.string().optional(),
+    codeTruncated: z.boolean().optional(),
+    stdout: z.string().optional(),
+    stdoutTruncated: z.boolean().optional(),
+    stderr: z.string().optional(),
+    stderrTruncated: z.boolean().optional(),
+    result: z.string().optional(),
+    resultTruncated: z.boolean().optional(),
+    error: pythonCellErrorSchema.optional(),
+    diffs: z.array(pythonCellDiffSchema).optional(),
+    diffsTruncated: z.boolean().optional(),
+    durationMs: z.number().nonnegative().optional(),
+    kernelRestarted: z.boolean().optional(),
+    cellId: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("refine"),
+    status: refineStatusSchema,
+    summary: z.string(),
+    scope: refineScopeSchema.optional(),
+    rollback: z.boolean().optional(),
+    edits: z.array(refineEditSummarySchema).optional(),
+    error: z.string().optional(),
+  }),
+  z.object({ kind: z.literal("notice"), label: z.string(), tone: z.enum(["info", "warning", "danger"]) }),
+  z.object({ kind: z.literal("error"), label: z.string() }),
 ]);
 
 const transcriptMessageSchema = z.object({
@@ -309,24 +472,65 @@ const transcriptMessageSchema = z.object({
   text: z.string(),
   state: z.enum(["complete", "streaming", "failed"]),
   createdAt: z.string(),
+  turnId: z.string().optional(),
   presentation: transcriptPresentationSchema.optional(),
   attachments: z.array(transcriptAttachmentSchema).optional(),
 });
 
-const activityItemSchema = z.object({
+const sessionDashboardChildSchema = z.object({
   id: z.string(),
-  kind: z.enum(["tool", "thinking", "child", "status"]),
-  title: z.string(),
-  detail: z.string().optional(),
-  status: z.enum(["running", "waiting", "complete", "failed"]),
-  createdAt: z.string(),
   agentId: z.string().optional(),
+  name: z.string(),
+  status: z.enum(["queued", "running", "done", "error", "cancelled", "unknown"]),
+  toolName: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  answerPreview: z.string().optional(),
+  toolUseCount: z.number().int().nonnegative().optional(),
+  tokenCount: z.number().int().nonnegative().optional(),
+  recap: z.string().optional(),
+  error: z.string().optional(),
 });
+
+const sessionContextUsageSchema = z.object({
+  tokens: z.number().nonnegative().optional(),
+  contextWindow: z.number().nonnegative().optional(),
+  percent: z.number().nonnegative().optional(),
+});
+
+const sessionDashboardRefineSchema = z.object({
+  id: z.string(),
+  status: refineStatusSchema,
+  summary: z.string(),
+  scope: refineScopeSchema.optional(),
+  rollback: z.boolean().optional(),
+  createdAt: z.string(),
+});
+
+export const sessionDashboardSchema = z.object({
+  status: z.enum(["responding", "compacting", "running_command", "idle", "inactive"]),
+  recap: z.string().optional(),
+  needsInput: z.boolean(),
+  contextUsage: sessionContextUsageSchema.optional(),
+  children: z.array(sessionDashboardChildSchema),
+  refines: z.array(sessionDashboardRefineSchema),
+});
+
+export const cellOutputSchema = z.object({
+  cellId: z.string().min(1),
+  code: z.string().optional(),
+  stdout: z.string().optional(),
+  stderr: z.string().optional(),
+  result: z.string().optional(),
+  traceback: z.string().optional(),
+  truncated: z.boolean(),
+});
+
+export type CellOutput = z.infer<typeof cellOutputSchema>;
 
 const attentionRequestSchema = z.object({
   id: z.string(),
   agentId: z.string(),
-  kind: z.enum(["approval", "question", "error"]),
+  kind: z.enum(["dialog", "question", "error"]),
   title: z.string(),
   detail: z.string().optional(),
   revision: z.number().int().nonnegative(),
@@ -354,7 +558,7 @@ export const agentSnapshotSchema = z.object({
   revision: z.number().int().nonnegative(),
   agentId: z.string().min(1),
   messages: z.array(transcriptMessageSchema),
-  activity: z.array(activityItemSchema),
+  dashboard: sessionDashboardSchema.optional(),
   attention: z.array(attentionRequestSchema),
   goal: agentGoalSchema.optional(),
 });
@@ -371,8 +575,6 @@ const gatewayEventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent.replaced"), payload: agentSnapshotSchema }),
   z.object({ kind: z.literal("agent.message_added"), payload: transcriptMessageSchema }),
   z.object({ kind: z.literal("agent.message_updated"), payload: transcriptMessageSchema }),
-  z.object({ kind: z.literal("agent.activity_added"), payload: activityItemSchema }),
-  z.object({ kind: z.literal("agent.activity_updated"), payload: activityItemSchema }),
   z.object({ kind: z.literal("agent.attention_added"), payload: attentionRequestSchema }),
   z.object({
     kind: z.literal("agent.attention_resolved"),

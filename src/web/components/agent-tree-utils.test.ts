@@ -36,14 +36,14 @@ const agents = [
 
 describe("agentPriority", () => {
   it("ranks attention above working above idle above inactive", () => {
-    expect(agentPriority(makeAgent("a", null, { attention: "approval" }))).toBe(0);
+    expect(agentPriority(makeAgent("a", null, { attention: "dialog" }))).toBe(0);
     expect(agentPriority(makeAgent("a", null, { activity: "working" }))).toBe(1);
     expect(agentPriority(makeAgent("a", null))).toBe(2);
     expect(agentPriority(makeAgent("a", null, { lifecycle: "inactive" }))).toBe(3);
   });
 
   it("lets attention win even over a working agent", () => {
-    const attention = makeAgent("a", null, { attention: "approval", activity: "working" });
+    const attention = makeAgent("a", null, { attention: "dialog", activity: "working" });
     expect(agentPriority(attention)).toBe(0);
   });
 });
@@ -61,7 +61,7 @@ describe("indexChildren", () => {
       makeAgent("idle-old", "root", { updatedAt: "2026-01-01T00:00:00.000Z" }),
       makeAgent("working", "root", { activity: "working", updatedAt: "2026-01-01T00:00:00.000Z" }),
       makeAgent("idle-new", "root", { updatedAt: "2026-01-02T00:00:00.000Z" }),
-      makeAgent("attention", "root", { attention: "approval", updatedAt: "2026-01-01T00:00:00.000Z" }),
+      makeAgent("attention", "root", { attention: "dialog", updatedAt: "2026-01-01T00:00:00.000Z" }),
       makeAgent("inactive", "root", { lifecycle: "inactive", updatedAt: "2026-01-03T00:00:00.000Z" }),
     ];
     const byParent = indexChildren(siblings);

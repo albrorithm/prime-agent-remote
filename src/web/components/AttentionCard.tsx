@@ -6,7 +6,7 @@ import { useGateway } from "../gateway-store";
 export function AttentionCard({ request }: { request: AttentionRequest }) {
   const { respond } = useGateway();
   const [responding, setResponding] = useState(false);
-  const Icon = request.kind === "approval" ? ShieldAlert : request.kind === "question" ? HelpCircle : CircleAlert;
+  const Icon = request.kind === "dialog" ? ShieldAlert : request.kind === "question" ? HelpCircle : CircleAlert;
   async function choose(optionId: string) {
     if (responding) return;
     setResponding(true);
@@ -24,7 +24,7 @@ export function AttentionCard({ request }: { request: AttentionRequest }) {
       <div className="attention-heading">
         <Icon aria-hidden="true" />
         <div>
-          <p className="eyebrow">Needs attention</p>
+          <p className="eyebrow">{request.kind === "dialog" ? "Extension dialog" : "Needs attention"}</p>
           <h3 id={`attention-${request.id}`}>{request.title}</h3>
         </div>
       </div>

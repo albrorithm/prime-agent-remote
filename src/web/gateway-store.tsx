@@ -159,9 +159,6 @@ export function applyGatewayEvent(snapshot: AgentSnapshot, event: GatewayEvent):
     case "agent.message_added":
     case "agent.message_updated":
       return { ...snapshot, messages: upsertById(snapshot.messages, event.payload) };
-    case "agent.activity_added":
-    case "agent.activity_updated":
-      return { ...snapshot, activity: upsertById(snapshot.activity, event.payload) };
     case "agent.attention_added":
       return { ...snapshot, attention: upsertById(snapshot.attention, event.payload) };
     case "agent.attention_resolved":

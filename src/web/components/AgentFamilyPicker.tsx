@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch, MoreHorizontal, Users } from "lucide-react";
 import { createPortal } from "react-dom";
 import type { AgentSummary } from "../../protocol";
 import {
@@ -23,7 +23,7 @@ interface AgentFamilyPickerProps {
   onSelect: (id: string) => void;
 }
 
-interface PickerMenuPosition {
+export interface PickerMenuPosition {
   top: number;
   left: number;
   width: number;
@@ -61,7 +61,7 @@ function readSafeAreaInsets(): SafeAreaInsets {
   return insets;
 }
 
-function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
+export function measurePickerMenu(trigger: HTMLButtonElement): PickerMenuPosition {
   const margin = 8;
   const gap = 6;
   const rect = trigger.getBoundingClientRect();
@@ -98,11 +98,23 @@ function activityLabel(agent: AgentSummary): "Active" | "Idle" {
 const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFamilyPickerProps) {
-  const descendants = useMemo(
+  const ownDescendants = useMemo(
     () => collectAgentDescendants(agents, selectedAgent.id),
     [agents, selectedAgent.id],
   );
+  const parentId = selectedAgent.parentId;
+  const parentDescendants = useMemo(
+    () => (parentId ? collectAgentDescendants(agents, parentId) : []),
+    [agents, parentId],
+  );
+  // A leaf agent has nothing to drill into, but if its parent has other
+  // descendants there are still siblings worth reaching sideways to — show the
+  // parent's whole tree instead of hiding the control entirely. An only-child
+  // leaf has no one to navigate to, so it stays hidden as before.
+  const siblingsMode = ownDescendants.length === 0 && parentId !== null && parentDescendants.length > 1;
+  const treeRootId = siblingsMode ? parentId! : selectedAgent.id;
   const childrenByParent = useMemo(() => indexChildren(agents), [agents]);
+  const descendants = siblingsMode ? parentDescendants : ownDescendants;
   const descendantIds = useMemo(() => new Set(descendants.map((agent) => agent.id)), [descendants]);
   const [open, setOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<PickerMenuPosition | null>(null);
@@ -113,11 +125,15 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
   const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const menuId = useId();
   const visible = useMemo(
-    () => buildVisibleAgentDescendants(agents, selectedAgent.id, expanded),
-    [agents, selectedAgent.id, expanded],
+    () => buildVisibleAgentDescendants(agents, treeRootId, expanded),
+    [agents, treeRootId, expanded],
   );
   const workingCount = descendants.filter((agent) => agent.activity === "working").length;
-  const countLabel = `${descendants.length} subagent${descendants.length === 1 ? "" : "s"}`;
+  const siblingCount = (childrenByParent.get(treeRootId) ?? [])
+    .filter((agent) => agent.id !== selectedAgent.id).length;
+  const countLabel = siblingsMode
+    ? `${siblingCount} sibling${siblingCount === 1 ? "" : "s"}`
+    : `${descendants.length} subagent${descendants.length === 1 ? "" : "s"}`;
 
   const close = (restoreFocus = false) => {
     setOpen(false);
@@ -188,7 +204,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
       window.visualViewport?.removeEventListener("resize", updatePosition);
       window.visualViewport?.removeEventListener("scroll", updatePosition);
     };
-  }, [open, descendants.length, workingCount, selectedAgent.id]);
+  }, [open, descendants.length, workingCount, treeRootId]);
 
   useEffect(() => {
     if (!descendants.length && open) close();
@@ -234,7 +250,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
       else move(children[0]?.id);
     } else if (event.key === "ArrowLeft") {
       if (expanded.has(row.agent.id)) toggle(row.agent.id, false);
-      else if (row.agent.parentId !== selectedAgent.id) move(row.agent.parentId ?? undefined);
+      else if (row.agent.parentId !== treeRootId) move(row.agent.parentId ?? undefined);
     } else if (event.key === "Enter" || event.key === " ") select(row.agent.id);
     else return;
     event.preventDefault();
@@ -248,6 +264,9 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
     if (triggerRef.current) setMenuPosition(measurePickerMenu(triggerRef.current));
     setOpen(true);
   };
+
+  const dialogLabel = siblingsMode ? "Siblings" : "Subagents";
+  const treeLabel = siblingsMode ? `Siblings of ${selectedAgent.name}` : `Subagents of ${selectedAgent.name}`;
 
   return (
     <>
@@ -263,9 +282,13 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
           aria-label={`Open ${countLabel} of ${selectedAgent.name}${workingCount ? `, ${workingCount} working` : ""}`}
           onClick={toggleOpen}
         >
-          {workingCount > 0 ? <span className="lineage-forward-working" aria-hidden="true" /> : <GitBranch aria-hidden="true" />}
-          <span>{descendants.length}</span>
-          <span className="lineage-forward-label">subagent{descendants.length === 1 ? "" : "s"}</span>
+          {workingCount > 0
+            ? <span className="lineage-forward-working" aria-hidden="true" />
+            : (siblingsMode ? <Users aria-hidden="true" /> : <GitBranch aria-hidden="true" />)}
+          <span>{siblingsMode ? siblingCount : descendants.length}</span>
+          <span className="lineage-forward-label">
+            {siblingsMode ? `sibling${siblingCount === 1 ? "" : "s"}` : `subagent${descendants.length === 1 ? "" : "s"}`}
+          </span>
           <ChevronDown className="lineage-forward-chevron" aria-hidden="true" />
         </button>
       </span>
@@ -277,7 +300,7 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
             id={menuId}
             ref={menuRef}
             role="dialog"
-            aria-label="Subagents"
+            aria-label={dialogLabel}
             tabIndex={-1}
             data-placement={menuPosition.placement}
             style={{
@@ -290,10 +313,11 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
             }}
           >
             <div className="family-picker-scroll">
-              <div className="family-picker-tree" role="tree" aria-label={`Subagents of ${selectedAgent.name}`}>
+              <div className="family-picker-tree" role="tree" aria-label={treeLabel}>
                 {visible.map((row, index) => {
                   const children = navigableChildren(row.agent.id);
                   const isExpanded = expanded.has(row.agent.id);
+                  const isCurrent = row.agent.id === selectedAgent.id;
                   return (
                     <div
                       key={row.agent.id}
@@ -301,11 +325,12 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
                         if (node) rowRefs.current.set(row.agent.id, node);
                         else rowRefs.current.delete(row.agent.id);
                       }}
-                      className="family-agent-row"
+                      className={`family-agent-row${isCurrent ? " current" : ""}`}
                       role="treeitem"
                       aria-level={row.level}
                       aria-expanded={children.length ? isExpanded : undefined}
-                      aria-label={`${row.agent.name}, ${activityLabel(row.agent)}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}`}
+                      aria-current={isCurrent ? "true" : undefined}
+                      aria-label={`${row.agent.name}, ${activityLabel(row.agent)}${children.length ? `, ${children.length} direct subagent${children.length === 1 ? "" : "s"}` : ""}${isCurrent ? ", current" : ""}`}
                       tabIndex={focusId === row.agent.id || (!focusId && index === 0) ? 0 : -1}
                       style={{ "--family-depth": row.level - 1 } as CSSProperties}
                       onFocus={() => setFocusId(row.agent.id)}
@@ -340,5 +365,146 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
         document.body,
       )}
     </>
+  );
+}
+
+interface AncestorMenuProps {
+  ancestors: AgentSummary[];
+  onSelect: (id: string) => void;
+  triggerLabel: string;
+}
+
+/**
+ * Collapses hidden ancestors of a deep lineage ("root › … › parent › current")
+ * behind a "…" trigger. Reuses the family picker's portal/positioning/dismissal
+ * machinery rather than a bespoke popup.
+ */
+export function AncestorMenu({ ancestors, onSelect, triggerLabel }: AncestorMenuProps) {
+  const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<PickerMenuPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLElement>(null);
+  const menuId = useId();
+
+  const close = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const outsideMenu = (target: EventTarget | null) => target instanceof Node
+      && !menuRef.current?.contains(target)
+      && !triggerRef.current?.contains(target);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+      }
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (outsideMenu(event.target)) close();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (outsideMenu(event.target)) close();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("focusin", onFocusIn);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const updatePosition = () => {
+      if (triggerRef.current) setMenuPosition(measurePickerMenu(triggerRef.current));
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [open]);
+
+  const toggleOpen = () => {
+    if (open) {
+      close();
+      return;
+    }
+    if (triggerRef.current) setMenuPosition(measurePickerMenu(triggerRef.current));
+    setOpen(true);
+  };
+
+  const select = (id: string) => {
+    onSelect(id);
+    close();
+    queueMicrotask(() => document.getElementById("transcript-heading")?.focus());
+  };
+
+  return (
+    <span className="lineage-item lineage-ancestors">
+      <ChevronRight className="lineage-separator" aria-hidden="true" />
+      <button
+        ref={triggerRef}
+        className="lineage-ancestors-trigger"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        aria-label={triggerLabel}
+        onClick={toggleOpen}
+      >
+        <MoreHorizontal aria-hidden="true" />
+      </button>
+
+      {open && menuPosition && createPortal(
+        <div className="family-picker-layer" data-gesture-exclusion>
+          <section
+            className="family-picker-menu"
+            id={menuId}
+            ref={menuRef}
+            role="dialog"
+            aria-label="Ancestors"
+            tabIndex={-1}
+            data-placement={menuPosition.placement}
+            style={{
+              top: menuPosition.top,
+              left: menuPosition.left,
+              width: menuPosition.width,
+              maxHeight: menuPosition.maxHeight,
+              transform: menuPosition.placement === "above" ? "translateY(-100%)" : undefined,
+              transformOrigin: menuPosition.placement === "above" ? "bottom center" : "top center",
+            }}
+          >
+            <div className="family-picker-scroll">
+              <div className="family-picker-tree" role="menu" aria-label="Ancestors">
+                {ancestors.map((agent) => (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    role="menuitem"
+                    className="family-agent-row ancestor-row"
+                    onClick={() => select(agent.id)}
+                  >
+                    <span className="family-agent-copy">
+                      <strong title={agent.name}>{agent.name}</strong>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )}
+    </span>
   );
 }

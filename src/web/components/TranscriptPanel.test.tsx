@@ -186,7 +186,6 @@ describe("agent switching resets scroll state", () => {
           revision: 1,
           agentId,
           messages: snapshotMessages,
-          activity: [],
           attention,
         }
       : null;
@@ -335,12 +334,91 @@ describe("agent switching resets scroll state", () => {
     gatewayMock.state = {
       catalog: { revision: 0, agents: [failed] },
       selectedAgent: failed,
-      selectedSnapshot: { revision: 1, agentId: failed.id, messages: [], activity: [], attention: [] },
+      selectedSnapshot: { revision: 1, agentId: failed.id, messages: [], attention: [] },
       pendingMessages: [],
       selectAgent: vi.fn(async () => {}),
     };
     render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
     expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
+  });
+
+  it("suppresses the working status chip when the subagent pill already shows a descendant working", () => {
+    const workingRoot = { ...agent("root", null, 0), activity: "working" as const };
+    const workingChild = { ...agent("worker", "root", 1), activity: "working" as const };
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [workingRoot, workingChild] },
+      selectedAgent: workingRoot,
+      selectedSnapshot: { revision: 1, agentId: workingRoot.id, messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.queryByRole("img", { name: "Working" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open 1 subagent of root, 1 working" })).toBeInTheDocument();
+  });
+
+  it("still shows the working status chip when no descendant is working", () => {
+    const workingRoot = { ...agent("root", null, 0), activity: "working" as const };
+    const idleChild = agent("child", "root", 1);
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [workingRoot, idleChild] },
+      selectedAgent: workingRoot,
+      selectedSnapshot: { revision: 1, agentId: workingRoot.id, messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("img", { name: "Working" })).toBeInTheDocument();
+  });
+
+  it("only masks the lineage row once it actually overflows, and keeps the current agent in view", () => {
+    gatewayState("agent-a", messages(1, "a"));
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const lineageRow = document.querySelector<HTMLElement>(".agent-lineage")!;
+    expect(lineageRow).not.toHaveAttribute("data-overflowing");
+
+    Object.defineProperty(lineageRow, "scrollWidth", { configurable: true, value: 640 });
+    Object.defineProperty(lineageRow, "clientWidth", { configurable: true, value: 240 });
+    gatewayState("agent-b", messages(1, "b"));
+    view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(lineageRow).toHaveAttribute("data-overflowing", "true");
+    expect(lineageRow.scrollLeft).toBe(640);
+  });
+
+  it("collapses a deep lineage behind an ancestor menu, keeping the root and immediate parent legible", async () => {
+    const user = userEvent.setup();
+    const chain = [
+      agent("root", null, 0),
+      agent("a", "root", 1),
+      agent("b", "a", 2),
+      agent("c", "b", 3),
+      agent("leaf", "c", 4),
+    ];
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: chain },
+      selectedAgent: chain[4],
+      selectedSnapshot: { revision: 1, agentId: "leaf", messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.getByRole("button", { name: "root" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "c" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "leaf" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "a" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "b" })).not.toBeInTheDocument();
+
+    const ancestorTrigger = screen.getByRole("button", { name: "Open 2 hidden ancestors" });
+    await user.click(ancestorTrigger);
+    expect(screen.getByRole("dialog", { name: "Ancestors" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "a" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "b" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: "a" }));
+    expect(gatewayMock.state!.selectAgent).toHaveBeenCalledWith("a");
+    expect(screen.queryByRole("dialog", { name: "Ancestors" })).not.toBeInTheDocument();
   });
 
 });

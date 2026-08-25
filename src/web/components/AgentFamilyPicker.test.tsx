@@ -125,8 +125,35 @@ describe("forward subagent breadcrumb", () => {
     expect(outside).toHaveFocus();
   });
 
-  it("renders no forward control for a leaf agent", () => {
-    render(<AgentFamilyPicker agents={agents} selectedAgent={agents[2]} onSelect={() => {}} />);
-    expect(screen.queryByRole("button", { name: /subagents of review/ })).not.toBeInTheDocument();
+  it("renders no forward control for an only-child leaf with no siblings", () => {
+    render(<AgentFamilyPicker agents={agents} selectedAgent={agents[3]} onSelect={() => {}} />);
+    expect(screen.queryByRole("button", { name: /Open .* of example/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("sibling breadcrumb for leaf agents", () => {
+  it("shows the parent's tree in Siblings mode when the leaf has siblings", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <>
+        <h1 id="transcript-heading" tabIndex={-1}>review</h1>
+        <AgentFamilyPicker agents={agents} selectedAgent={agents[2]} onSelect={onSelect} />
+      </>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Open 1 sibling of review, 1 working" });
+    expect(trigger).toHaveTextContent("1sibling");
+    await user.click(trigger);
+
+    expect(screen.getByRole("dialog", { name: "Siblings" })).toBeInTheDocument();
+    expect(screen.getByRole("tree", { name: "Siblings of review" })).toBeInTheDocument();
+    expect(screen.getByRole("treeitem", { name: "research, Active, 1 direct subagent" })).toBeInTheDocument();
+    const currentRow = screen.getByRole("treeitem", { name: "review, Idle, current" });
+    expect(currentRow).toHaveAttribute("aria-current", "true");
+
+    await user.click(screen.getByRole("treeitem", { name: /research/ }));
+    expect(onSelect).toHaveBeenCalledWith("research");
+    expect(screen.getByRole("heading", { name: "review" })).toHaveFocus();
   });
 });

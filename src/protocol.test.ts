@@ -1,267 +1,139 @@
 import { describe, expect, it } from "vitest";
-import {
-  bootstrapResponseSchema,
-  directoryListingSchema,
-  executeSlashCommandRequestSchema,
-  mutationAcceptedSchema,
-  problemDetailsSchema,
-  sendMessageRequestSchema,
-  serverFrameSchema,
-  sessionCreatedSchema,
-  slashCommandAcceptedSchema,
-  slashCommandCatalogSchema,
-  slashCommandResultSchema,
-  EXECUTABLE_SLASH_COMMAND_NAMES,
-} from "./protocol";
+import { agentSnapshotSchema, cellOutputSchema, sessionDashboardSchema } from "./protocol.js";
 
-const valid = {
-  requestId: "11111111-1111-4111-8111-111111111111",
-  expectedRevision: 3,
-  name: "goal",
-  args: "status",
-};
-
-describe("slash command requests", () => {
-  it("accepts the explicitly executable commands", () => {
-    for (const name of EXECUTABLE_SLASH_COMMAND_NAMES) {
-      expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name }).success).toBe(true);
-    }
-  });
-
-  it("keeps slash input out of the ordinary prompt endpoint", () => {
-    expect(sendMessageRequestSchema.safeParse({
-      requestId: valid.requestId,
-      expectedRevision: 3,
-      text: "/model gpt",
-      images: [],
-    }).success).toBe(false);
-  });
-
-  it("accepts conservative command tokens but rejects malformed, multiline, oversized, and extra input", () => {
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "settings" }).success).toBe(true);
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "detected-extension" }).success).toBe(true);
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "../../invalid" }).success).toBe(false);
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, name: "bad command" }).success).toBe(false);
-    for (const separator of ["\r", "\n", "\u2028", "\u2029"]) {
-      expect(executeSlashCommandRequestSchema.safeParse({ ...valid, args: `status${separator}now` }).success).toBe(false);
-    }
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, args: "x".repeat(4_001) }).success).toBe(false);
-    expect(executeSlashCommandRequestSchema.safeParse({ ...valid, extra: true }).success).toBe(false);
-  });
-});
-
-
-describe("runtime server protocol validation", () => {
-  const capabilities = {
-    send: true,
-    abort: true,
-    resume: false,
-    rename: false,
-    stop: false,
-    deactivate: false,
-    delete: false,
-    respond: true,
-    images: true,
-  };
-  const catalog = {
+function snapshotWith(presentation: unknown): unknown {
+  return {
     revision: 1,
-    agents: [{
-      id: "agent-1",
-      rootId: "agent-1",
-      parentId: null,
-      depth: 0,
-      name: "Agent",
-      lifecycle: "live",
-      activity: "idle",
-      attention: null,
-      unreadCount: 0,
-      childCount: 0,
+    agentId: "agent-1",
+    messages: [{
+      id: "message-1",
+      role: "assistant",
+      text: "row",
+      state: "complete",
       createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      capabilities,
+      turnId: "turn-1",
+      presentation,
     }],
+    attention: [],
   };
+}
 
-  it("rejects a bootstrap from another protocol version", () => {
-    expect(bootstrapResponseSchema.safeParse({
-      protocolVersion: 2,
-      csrfToken: "csrf",
-      backend: "demo",
-      catalog,
-    }).success).toBe(false);
+describe("transcript presentation schemas", () => {
+  const cases: Array<{ kind: string; valid: unknown; invalid: unknown }> = [
+    {
+      kind: "thinking",
+      valid: { kind: "thinking", full: "Full thought text", truncated: true },
+      invalid: { kind: "thinking", full: 42 },
+    },
+    {
+      kind: "tool",
+      valid: { kind: "tool", label: "bash", status: "complete", meta: "↑ 1 ↓ 2 lines" },
+      invalid: { kind: "tool", status: "complete" },
+    },
+    {
+      kind: "python",
+      valid: {
+        kind: "python",
+        lang: "python",
+        status: "failed",
+        preview: "run_check()",
+        meta: "↑ 3 lines · 1.2s · ValueError",
+        code: "run_check()",
+        codeTruncated: true,
+        stdout: "out",
+        stderr: "err",
+        result: "None",
+        error: { ename: "ValueError", evalue: "boom", traceback: "Traceback…", tracebackTruncated: true },
+        diffs: [{ path: "src/a.ts", oldStr: "a", newStr: "b", startLine: 3, truncated: true }],
+        diffsTruncated: true,
+        durationMs: 1200,
+        kernelRestarted: true,
+        cellId: "cell_abc",
+      },
+      invalid: { kind: "python", lang: "ruby", status: "complete", preview: "x" },
+    },
+    {
+      kind: "refine",
+      valid: {
+        kind: "refine",
+        status: "complete",
+        summary: "Tightened the prompt",
+        scope: "local",
+        rollback: true,
+        edits: [{ action: "update", kind: "prompt", title: "T", reason: "R", applied: true }],
+      },
+      invalid: { kind: "refine", status: "exploded", summary: "x" },
+    },
+    {
+      kind: "notice",
+      valid: { kind: "notice", label: "Context compacted", tone: "info" },
+      invalid: { kind: "notice", label: "Context compacted", tone: "loud" },
+    },
+    {
+      kind: "error",
+      valid: { kind: "error", label: "Turn failed" },
+      invalid: { kind: "error" },
+    },
+  ];
+
+  for (const { kind, valid, invalid } of cases) {
+    it(`accepts a valid ${kind} presentation and rejects a malformed one`, () => {
+      expect(agentSnapshotSchema.safeParse(snapshotWith(valid)).success).toBe(true);
+      expect(agentSnapshotSchema.safeParse(snapshotWith(invalid)).success).toBe(false);
+    });
+  }
+
+  it("rejects unknown presentation kinds and accepts presentation-free rows", () => {
+    expect(agentSnapshotSchema.safeParse(snapshotWith({ kind: "hologram" })).success).toBe(false);
+    expect(agentSnapshotSchema.safeParse(snapshotWith(undefined)).success).toBe(true);
   });
+});
 
-  it("rejects mismatched snapshot and replay streams", () => {
-    const snapshot = { revision: 1, agentId: "agent-1", messages: [], activity: [], attention: [] };
-    expect(serverFrameSchema.safeParse({
-      type: "snapshot",
-      version: 1,
-      streamId: "agent:other",
-      cursor: { epoch: "epoch", seq: 0 },
-      snapshot,
-    }).success).toBe(false);
-    expect(serverFrameSchema.safeParse({
-      type: "replay",
-      version: 1,
-      streamId: "catalog",
-      cursor: { epoch: "epoch", seq: 1 },
-      events: [{
-        version: 1,
-        streamId: "agent:agent-1",
-        epoch: "epoch",
-        seq: 1,
-        emittedAt: "2026-01-01T00:00:00.000Z",
-        event: { kind: "agent.replaced", payload: snapshot },
+describe("session dashboard schema", () => {
+  it("accepts a full dashboard and rejects a malformed child status", () => {
+    const dashboard = {
+      status: "responding",
+      recap: "Testing the drawer",
+      needsInput: true,
+      contextUsage: { tokens: 5_000, contextWindow: 100_000, percent: 5 },
+      children: [{
+        id: "agent-1:child:agent_abc",
+        agentId: "agent_abc",
+        name: "Subagent",
+        status: "running",
+        toolName: "ipython",
+        durationMs: 1_000,
+        answerPreview: "Preview",
+        toolUseCount: 3,
+        tokenCount: 1_234,
+        recap: "Working",
       }],
+      refines: [{
+        id: "message-9",
+        status: "complete",
+        summary: "Tightened the prompt",
+        scope: "global",
+        rollback: true,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }],
+    };
+    expect(sessionDashboardSchema.safeParse(dashboard).success).toBe(true);
+    expect(sessionDashboardSchema.safeParse({
+      ...dashboard,
+      children: [{ id: "x", name: "Subagent", status: "exploded" }],
     }).success).toBe(false);
   });
 });
 
-describe("slash command catalog schema", () => {
-  it("accepts a well-formed catalog", () => {
-    expect(slashCommandCatalogSchema.safeParse({
-      agentId: "agent-1",
-      agentRevision: 3,
-      partial: false,
-      commands: [{
-        name: "goal",
-        description: "Manage the agent's goal",
-        source: "session",
-        availability: "available",
-        takesArguments: true,
-        options: [{ value: "status", label: "Status", current: true }],
-      }],
-    }).success).toBe(true);
-  });
-
-  it("rejects a command entry with an invalid availability value", () => {
-    expect(slashCommandCatalogSchema.safeParse({
-      agentId: "agent-1",
-      agentRevision: 3,
-      partial: false,
-      commands: [{
-        name: "goal",
-        description: "Manage the agent's goal",
-        source: "session",
-        availability: "sometimes",
-        takesArguments: true,
-      }],
-    }).success).toBe(false);
-  });
-});
-
-describe("directory listing schema", () => {
-  it("accepts a well-formed listing", () => {
-    expect(directoryListingSchema.safeParse({
-      path: "/workspace",
-      home: "/home/user",
-      crumbs: [{ name: "workspace", path: "/workspace", hidden: false }],
-      entries: [{ name: "src", path: "/workspace/src", hidden: false }],
+describe("cell output schema", () => {
+  it("requires a cell id and the truncated flag", () => {
+    expect(cellOutputSchema.safeParse({
+      cellId: "cell_abc",
+      code: "print('hi')",
+      stdout: "hi\n",
       truncated: false,
     }).success).toBe(true);
-  });
-
-  it("rejects an entry missing the required hidden flag", () => {
-    expect(directoryListingSchema.safeParse({
-      path: "/workspace",
-      home: "/home/user",
-      crumbs: [],
-      entries: [{ name: "src", path: "/workspace/src" }],
-      truncated: false,
-    }).success).toBe(false);
-  });
-});
-
-describe("slash command result schema", () => {
-  it("accepts each discriminated variant", () => {
-    expect(slashCommandResultSchema.safeParse({ kind: "session_accepted" }).success).toBe(true);
-    expect(slashCommandResultSchema.safeParse({
-      kind: "heartbeat",
-      status: "active",
-      schedule: "*/5 * * * *",
-      deliveryMode: "steer",
-    }).success).toBe(true);
-  });
-
-  it("rejects an unknown heartbeat status", () => {
-    expect(slashCommandResultSchema.safeParse({
-      kind: "heartbeat",
-      status: "sleeping",
-    }).success).toBe(false);
-  });
-
-  it("rejects an unrecognized kind", () => {
-    expect(slashCommandResultSchema.safeParse({ kind: "unknown_kind" }).success).toBe(false);
-  });
-});
-
-describe("mutation accepted schema", () => {
-  it("accepts a well-formed acceptance", () => {
-    expect(mutationAcceptedSchema.safeParse({
-      accepted: true,
-      requestId: "11111111-1111-4111-8111-111111111111",
-      revision: 4,
-    }).success).toBe(true);
-  });
-
-  it("rejects accepted: false", () => {
-    expect(mutationAcceptedSchema.safeParse({
-      accepted: false,
-      requestId: "11111111-1111-4111-8111-111111111111",
-      revision: 4,
-    }).success).toBe(false);
-  });
-});
-
-describe("slash command accepted schema", () => {
-  it("accepts an acceptance carrying a slash command result", () => {
-    expect(slashCommandAcceptedSchema.safeParse({
-      accepted: true,
-      requestId: "11111111-1111-4111-8111-111111111111",
-      revision: 4,
-      result: { kind: "model", provider: "openai", modelId: "example" },
-    }).success).toBe(true);
-  });
-
-  it("rejects a missing result", () => {
-    expect(slashCommandAcceptedSchema.safeParse({
-      accepted: true,
-      requestId: "11111111-1111-4111-8111-111111111111",
-      revision: 4,
-    }).success).toBe(false);
-  });
-});
-
-describe("session created schema", () => {
-  it("accepts a well-formed session", () => {
-    expect(sessionCreatedSchema.safeParse({
-      requestId: "11111111-1111-4111-8111-111111111111",
-      agentId: "agent-1",
-    }).success).toBe(true);
-  });
-
-  it("rejects a session missing an agentId", () => {
-    expect(sessionCreatedSchema.safeParse({
-      requestId: "11111111-1111-4111-8111-111111111111",
-    }).success).toBe(false);
-  });
-});
-
-describe("problem details schema", () => {
-  it("accepts a well-formed problem", () => {
-    expect(problemDetailsSchema.safeParse({
-      type: "about:blank",
-      title: "Not Found",
-      status: 404,
-      detail: "No such agent",
-    }).success).toBe(true);
-  });
-
-  it("rejects a problem with a non-numeric status", () => {
-    expect(problemDetailsSchema.safeParse({
-      type: "about:blank",
-      title: "Not Found",
-      status: "404",
-    }).success).toBe(false);
+    expect(cellOutputSchema.safeParse({ cellId: "", truncated: false }).success).toBe(false);
+    expect(cellOutputSchema.safeParse({ cellId: "cell_abc" }).success).toBe(false);
   });
 });

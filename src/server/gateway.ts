@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import {
   abortRequestSchema,
   attentionResponseSchema,
+  cellOutputSchema,
   clientFrameSchema,
   createSessionRequestSchema,
   executeSlashCommandRequestSchema,
@@ -221,6 +222,23 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         res.setHeader("Content-Length", attachment.bytes.byteLength);
         res.setHeader("Cache-Control", "private, no-store");
         res.end(attachment.bytes);
+      }
+      return true;
+    }
+
+    const cellMatch = pathname.match(/^\/api\/v1\/cells\/([^/]+)$/);
+    if (req.method === "GET" && cellMatch) {
+      const cellId = decodeSegment(cellMatch[1]);
+      const cached = cellId ? backend.cellOutput(cellId) : null;
+      const cell = cached ? cellOutputSchema.safeParse(cached).data ?? null : null;
+      if (!cell) {
+        problem(res, 404, "Cell output not found");
+      } else {
+        securityHeaders(res);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Cache-Control", "private, no-store");
+        res.end(JSON.stringify(cell));
       }
       return true;
     }

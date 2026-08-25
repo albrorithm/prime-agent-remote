@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CellOutput } from "../protocol.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
@@ -43,11 +44,12 @@ async function startGateway(options: {
   config?: Partial<GatewayConfig>;
   mutationLimiter?: SlidingWindowLimiter;
   staticRootName?: string;
+  backend?: DemoBackend;
 } = {}): Promise<TestGateway> {
   const tmpDir = await mkdtemp(join(tmpdir(), "gateway-test-"));
   const staticRoot = join(tmpDir, options.staticRootName ?? "static");
   const gateway = await createGateway(testConfig(options.config), {
-    backend: new DemoBackend(),
+    backend: options.backend ?? new DemoBackend(),
     staticRoot,
     mutationLimiter: options.mutationLimiter,
   });
@@ -408,24 +410,54 @@ describe("gateway API routes", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  it("serves cached cell output only to authenticated clients", async () => {
+    const cell: CellOutput = {
+      cellId: "cell_demo",
+      code: "print('full output')",
+      stdout: "full output\n",
+      truncated: false,
+    };
+    class CellBackend extends DemoBackend {
+      override cellOutput(id: string): CellOutput | null {
+        return id === cell.cellId ? structuredClone(cell) : null;
+      }
+    }
+    const t = await startGateway({ backend: new CellBackend() });
+
+    const unauthenticated = await fetch(`${t.baseUrl}/api/v1/cells/${cell.cellId}`);
+    expect(unauthenticated.status).toBe(401);
+
+    const client = await pairClient(t);
+    const headers = { Cookie: client.cookie };
+    const unknown = await fetch(`${t.baseUrl}/api/v1/cells/no-such-cell`, { headers });
+    expect(unknown.status).toBe(404);
+    expect(((await unknown.json()) as { title: string }).title).toBe("Cell output not found");
+
+    const found = await fetch(`${t.baseUrl}/api/v1/cells/${cell.cellId}`, { headers });
+    expect(found.status).toBe(200);
+    expect(found.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(found.headers.get("cache-control")).toBe("private, no-store");
+    expect(await found.json()).toEqual(cell);
+  });
+
   it("resolves attention requests and 404s unknown or already-resolved ones", async () => {
     const t = await startGateway();
     const client = await pairClient(t);
     const agents = (await bootstrap(t, client)).catalog.agents;
-    expect(agents.some((agent) => agent.attention === "approval")).toBe(true);
-    const respondUrl = `${t.baseUrl}/api/v1/attention/attention-demo-approval/respond`;
+    expect(agents.some((agent) => agent.attention === "dialog")).toBe(true);
+    const respondUrl = `${t.baseUrl}/api/v1/attention/attention-demo-dialog/respond`;
 
     const unknown = await fetch(`${t.baseUrl}/api/v1/attention/no-such-attention/respond`, {
       method: "POST",
       headers: mutationHeaders(client),
-      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "allow-once" }),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "confirm" }),
     });
     expect(unknown.status).toBe(404);
 
     const stale = await fetch(respondUrl, {
       method: "POST",
       headers: mutationHeaders(client),
-      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 999, optionId: "allow-once" }),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 999, optionId: "confirm" }),
     });
     expect(stale.status).toBe(409);
 
@@ -439,14 +471,14 @@ describe("gateway API routes", () => {
     const resolved = await fetch(respondUrl, {
       method: "POST",
       headers: mutationHeaders(client),
-      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "allow-once" }),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "confirm" }),
     });
     expect(resolved.status).toBe(202);
 
     const gone = await fetch(respondUrl, {
       method: "POST",
       headers: mutationHeaders(client),
-      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "allow-once" }),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "confirm" }),
     });
     expect(gone.status).toBe(404);
   });

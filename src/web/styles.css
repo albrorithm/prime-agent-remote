@@ -18,6 +18,9 @@
   --attention: #fff;
   --attention-soft: rgba(255, 255, 255, .09);
   --danger: #ff6b76;
+  --tone-attention: #fff;
+  --tone-success: #83b88a;
+  --tone-danger: #ff6b76;
   --radius: 14px;
   --drawer-width: min(88vw, 352px);
   --header-height: 54px;
@@ -122,13 +125,19 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .transcript-panel { position: relative; background: #000; }
 .conversation-header { display: flex; min-height: var(--header-height); flex: 0 0 var(--header-height); align-items: center; gap: 3px; padding: 5px 7px; border-bottom: 1px solid #171717; background: rgba(0,0,0,.9); backdrop-filter: blur(18px); }
 .agent-hierarchy { display: flex; min-width: 0; flex: 1; align-items: center; }
-.agent-lineage { display: flex; min-width: 0; flex: 1; align-items: center; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 14px), transparent 100%); }
+.agent-lineage { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; overflow-x: auto; scrollbar-width: none; }
 .agent-lineage::-webkit-scrollbar { display: none; }
+.agent-lineage[data-overflowing="true"] { mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 14px), transparent 100%); }
 .lineage-item { display: inline-flex; min-width: 0; flex: 0 0 auto; align-items: center; }
 .lineage-separator { width: 13px; height: 13px; flex: 0 0 auto; color: #484848; }
 .agent-lineage h1 { max-width: 44vw; overflow: hidden; margin: 0; padding: 6px 4px; font-size: 14px; font-weight: 680; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
-.agent-lineage button { max-width: 92px; overflow: hidden; padding: 6px 4px; border: 0; color: var(--muted); background: transparent; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-lineage button { max-width: 128px; overflow: hidden; padding: 6px 4px; border: 0; color: var(--muted); background: transparent; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-lineage button:hover { color: #fff; }
+.lineage-ancestors-trigger { display: inline-flex; width: 26px; height: 30px; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; }
+.lineage-ancestors-trigger:hover { color: #fff; background: #141414; }
+.lineage-ancestors-trigger svg { width: 15px; height: 15px; }
+.ancestor-row { width: 100%; appearance: none; border: 1px solid transparent; border-radius: 7px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.ancestor-row:hover, .ancestor-row:focus { border-color: #292929; background: #141414; }
 .agent-hierarchy .lineage-forward-trigger { display: inline-flex; max-width: none; min-height: 42px; align-items: center; gap: 4px; margin-left: 1px; padding: 5px 7px; border: 1px solid #292929; border-radius: 99px; color: #d0d0d0; background: #111; font-size: 11px; font-weight: 680; }
 .agent-hierarchy .lineage-forward-trigger:hover { border-color: #4a4a4a; background: #191919; }
 .lineage-forward-trigger > svg { width: 12px; height: 12px; flex: 0 0 auto; }
@@ -142,6 +151,8 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .family-picker-tree { width: 100%; min-width: 0; }
 .family-agent-row { --family-depth: 0; display: flex; width: 100%; min-width: 0; min-height: 46px; align-items: center; padding: 1px 6px 1px calc(3px + var(--family-depth) * 13px); border: 1px solid transparent; border-radius: 7px; user-select: none; }
 .family-agent-row:hover, .family-agent-row:focus { border-color: #292929; background: #141414; }
+.family-agent-row.current { border-color: #333; background: #101010; }
+.family-agent-row.current .family-agent-copy strong::after { content: "•"; margin-left: 5px; color: var(--muted-2); }
 .family-disclosure { display: inline-flex; width: 40px; height: 44px; flex: 0 0 40px; align-items: center; justify-content: center; padding: 0; border: 0; color: var(--muted); background: transparent; }
 .family-disclosure-space { width: 12px; flex: 0 0 12px; }
 .family-disclosure:hover { color: #fff; }
@@ -149,10 +160,12 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .family-agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
 .family-agent-copy strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .family-agent-copy small { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.agent-presence { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #555; }
-.agent-presence.working, .agent-presence.starting { background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.08); animation: blink 1.4s ease-in-out infinite; }
-.agent-presence.attention, .agent-presence.blocked, .agent-presence.failed { background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.2); }
-.agent-presence.inactive, .agent-presence.stopped { background: #858585; }
+.agent-status-chip { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; overflow: hidden; padding: 3px 7px; border-radius: 99px; color: var(--muted); background: #111; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.agent-status-chip svg { width: 12px; height: 12px; flex: 0 0 auto; }
+.agent-status-chip.working svg, .agent-status-chip.starting svg { animation: blink 1.4s ease-in-out infinite; }
+.agent-status-chip.attention, .agent-status-chip.blocked { color: var(--tone-attention); }
+.agent-status-chip.failed { color: var(--tone-danger); }
+.agent-status-chip.inactive, .agent-status-chip.stopped { color: var(--muted-2); }
 .activity-trigger { position: relative; }
 .activity-trigger > span { position: absolute; top: 3px; right: 1px; display: grid; min-width: 16px; height: 16px; place-items: center; padding: 0 4px; border: 1px solid #000; border-radius: 99px; color: #000; background: #fff; font-size: 9px; font-weight: 800; }
 .transcript-scroll { padding: 18px 14px 24px; scroll-padding-bottom: 20px; }
@@ -419,12 +432,14 @@ mark { padding: 0 1px; border-radius: 3px; color: #000; background: #fff; }
   .jump-latest { font-size: 12px; }
 }
 
-@media (max-width: 380px) {
+@media (max-width: 430px) {
   .agent-lineage h1 { max-width: 34vw; }
-  .agent-lineage button { max-width: 68px; }
+  .agent-lineage button { max-width: 84px; }
   .lineage-forward-label { display: none; }
   .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
   .state-pill { display: none; }
+  .agent-status-chip-label { display: none; }
+  .agent-status-chip { padding: 5px; }
 }
 
 @media (min-width: 1100px) {

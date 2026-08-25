@@ -120,7 +120,7 @@ function summary(id: string): AgentSummary {
 }
 
 function snapshot(agentId: string, revision = 1): AgentSnapshot {
-  return { agentId, revision, messages: [], activity: [], attention: [] };
+  return { agentId, revision, messages: [], attention: [] };
 }
 
 function bootstrap(agents: AgentSummary[] = []): BootstrapResponse {

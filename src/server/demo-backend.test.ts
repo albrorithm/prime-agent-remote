@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { agentSnapshotSchema, catalogSnapshotSchema } from "../protocol.js";
 import type { AgentSnapshot, ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { DemoBackend } from "./demo-backend.js";
@@ -214,5 +215,41 @@ describe("DemoBackend", () => {
       hub.close();
     }
   });
+
+  it("emits snapshots that validate against the widened protocol schemas", async () => {
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const catalog = backend.catalog();
+      expect(catalogSnapshotSchema.safeParse(catalog).success).toBe(true);
+      expect(catalog.agents.length).toBeGreaterThan(0);
+      for (const agent of catalog.agents) {
+        const snapshot = await backend.agentSnapshot(agent.id);
+        const parsed = agentSnapshotSchema.safeParse(snapshot);
+        expect(parsed.success, agent.id).toBe(true);
+        expect(snapshot?.dashboard, agent.id).toBeDefined();
+      }
+      const inactive = await backend.agentSnapshot("root-inactive");
+      expect(inactive?.dashboard?.status).toBe("inactive");
+      const dialog = await backend.agentSnapshot("child-review");
+      expect(dialog?.attention[0]).toMatchObject({
+        kind: "dialog",
+        options: [
+          { id: "__demo_cancel__", label: "Decline", tone: "danger" },
+          { id: "confirm", label: "Confirm", tone: "safe" },
+        ],
+      });
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
+  // WS10 (demo parity) fabricates fixtures for every TranscriptPresentation
+  // kind — python cells, thinking-with-full, refine, notice, error — plus a
+  // populated dashboard. Until it lands, the demo transcript has no
+  // presentations, so full parity cannot be asserted here.
+  it.todo("covers every TranscriptPresentation kind in the demo snapshots (WS10)");
 
 });

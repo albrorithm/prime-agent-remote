@@ -1,14 +1,17 @@
-import { CheckCircle2, CircleAlert, GitBranch, LoaderCircle, Wrench, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, GitBranch, LoaderCircle, X } from "lucide-react";
+import type { SessionDashboard } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { agentStatus } from "./agent-status";
 
-function Icon({ kind, status }: { kind: string; status: string }) {
-  if (status === "failed" || status === "waiting") return <CircleAlert aria-hidden="true" />;
-  if (status === "running") return <LoaderCircle className="spin" aria-hidden="true" />;
-  if (kind === "child") return <GitBranch aria-hidden="true" />;
-  if (kind === "tool") return <Wrench aria-hidden="true" />;
-  return <CheckCircle2 aria-hidden="true" />;
-}
+// Interim rendering until SessionDashboard gets its own component (WS5): a
+// status line plus the refine history, all sourced from snapshot.dashboard.
+const DASHBOARD_STATUS_LABELS: Record<SessionDashboard["status"], string> = {
+  responding: "Responding",
+  compacting: "Compacting context",
+  running_command: "Running a command",
+  idle: "Idle",
+  inactive: "Inactive",
+};
 
 interface ActivityPanelProps {
   onClose?: () => void;
@@ -45,18 +48,40 @@ export function ActivityPanel({ onClose, onNavigate }: ActivityPanelProps) {
         )}
         {!selectedSnapshot ? (
           <div className="loading-state"><LoaderCircle className="spin" /> Loading activity…</div>
-        ) : selectedSnapshot.activity.length ? (
+        ) : selectedSnapshot.dashboard ? (
           <ol className="activity-list">
-            {selectedSnapshot.activity.map((item) => (
-              <li key={item.id} className={item.status}>
-                <span className="activity-icon"><Icon kind={item.kind} status={item.status} /></span>
-                <span><strong>{item.title}</strong>{item.detail && <small className="activity-detail">{item.detail}</small>}</span>
-                <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+            <li className={selectedSnapshot.dashboard.status === "idle" || selectedSnapshot.dashboard.status === "inactive" ? "complete" : "running"}>
+              <span className="activity-icon">
+                {selectedSnapshot.dashboard.status === "idle" || selectedSnapshot.dashboard.status === "inactive"
+                  ? <CheckCircle2 aria-hidden="true" />
+                  : <LoaderCircle className="spin" aria-hidden="true" />}
+              </span>
+              <span>
+                <strong>{DASHBOARD_STATUS_LABELS[selectedSnapshot.dashboard.status]}</strong>
+                {selectedSnapshot.dashboard.recap && <small className="activity-detail">{selectedSnapshot.dashboard.recap}</small>}
+              </span>
+            </li>
+            {selectedSnapshot.dashboard.needsInput && (
+              <li className="waiting">
+                <span className="activity-icon"><CircleAlert aria-hidden="true" /></span>
+                <span><strong>May need input</strong></span>
+              </li>
+            )}
+            {selectedSnapshot.dashboard.refines.map((refine) => (
+              <li key={refine.id} className={refine.status === "failed" ? "failed" : refine.status === "running" ? "running" : "complete"}>
+                <span className="activity-icon">
+                  {refine.status === "failed"
+                    ? <CircleAlert aria-hidden="true" />
+                    : refine.status === "running"
+                      ? <LoaderCircle className="spin" aria-hidden="true" />
+                      : <CheckCircle2 aria-hidden="true" />}
+                </span>
+                <span><strong>Refine</strong><small className="activity-detail">{refine.summary}</small></span>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="empty-state">No recent activity for this agent.</p>
+          <p className="empty-state">No session details for this agent.</p>
         )}
       </div>
     </section>

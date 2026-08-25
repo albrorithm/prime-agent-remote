@@ -28,7 +28,7 @@ function agent(id: string, parentId: string | null, depth: number): AgentSummary
 
 const rootAgent = agent("root", null, 0);
 const childAgent = agent("child", "root", 1);
-const snapshot: AgentSnapshot = { revision: 1, agentId: "root", messages: [], activity: [], attention: [] };
+const snapshot: AgentSnapshot = { revision: 1, agentId: "root", messages: [], attention: [] };
 
 beforeEach(() => {
   gatewayMock.current = {

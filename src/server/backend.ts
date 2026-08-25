@@ -2,6 +2,7 @@ import type {
   AgentSnapshot,
   AgentSummary,
   CatalogSnapshot,
+  CellOutput,
   DirectoryListing,
   ImageMimeType,
   MutationAccepted,
@@ -247,6 +248,8 @@ export interface AgentBackend {
   slashCommandCatalog(agentId: string): Promise<SlashCommandCatalog | null>;
   executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted>;
   attachment(id: string): AttachmentData | null;
+  /** Full (bounded) sections of a projected python cell, or null when unknown. */
+  cellOutput(id: string): CellOutput | null;
   abort(input: AbortInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
   listDirectories(path?: string): Promise<DirectoryListing>;

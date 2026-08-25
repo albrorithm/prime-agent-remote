@@ -27,7 +27,7 @@ const agent: AgentSummary = {
   updatedAt: "2026-01-01T00:00:00.000Z",
   capabilities: { send: true, abort: true, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: true, images: true },
 };
-const snapshot: AgentSnapshot = { revision: 1, agentId: agent.id, messages: [], activity: [], attention: [] };
+const snapshot: AgentSnapshot = { revision: 1, agentId: agent.id, messages: [], attention: [] };
 const slashCatalog: SlashCommandCatalog = {
   agentId: agent.id,
   agentRevision: snapshot.revision,

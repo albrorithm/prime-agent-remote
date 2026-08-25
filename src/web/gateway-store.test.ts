@@ -6,7 +6,6 @@ const snapshot: AgentSnapshot = {
   revision: 1,
   agentId: "agent-1",
   messages: [],
-  activity: [],
   attention: [],
 };
 
@@ -30,7 +29,7 @@ describe("applyGatewayEvent", () => {
     const withAttention: AgentSnapshot = {
       ...snapshot,
       attention: [
-        { id: "a", agentId: "agent-1", kind: "approval", title: "A", revision: 1, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
+        { id: "a", agentId: "agent-1", kind: "dialog", title: "A", revision: 1, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
         { id: "b", agentId: "agent-1", kind: "question", title: "B", revision: 1, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
       ],
     };

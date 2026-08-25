@@ -24,7 +24,7 @@ function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
 }
 
 const root = makeAgent({ id: "root", rootId: "root", name: "release-planning", activity: "working" });
-const child = makeAgent({ id: "child", rootId: "root", parentId: "root", depth: 1, name: "db-migration", attention: "approval" });
+const child = makeAgent({ id: "child", rootId: "root", parentId: "root", depth: 1, name: "db-migration", attention: "dialog" });
 const other = makeAgent({ id: "other", rootId: "other", name: "docs-cleanup" });
 
 const gatewayMock = vi.hoisted(() => ({

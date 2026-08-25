@@ -1,17 +1,18 @@
-import { ArrowDown, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, ListTree, LoaderCircle, Menu, Search, User, X } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactElement } from "react";
+import { ArrowDown, Ban, Bot, Brain, Check, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { useReplyAnnouncer } from "../hooks/useReplyAnnouncer";
 import { useScrollFollowing } from "../hooks/useScrollFollowing";
 import { AttentionCard } from "./AttentionCard";
-import { AgentFamilyPicker } from "./AgentFamilyPicker";
+import { AgentFamilyPicker, AncestorMenu } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { ImageViewer } from "./ImageViewer";
 import { MessageContent } from "./MessageContent";
 import { SwitchHapticButton } from "./SwitchHapticButton";
-import { agentStatus } from "./agent-status";
+import { agentStatus, type AgentStatusTone } from "./agent-status";
+import { collectAgentDescendants } from "./agent-tree-utils";
 
 interface TranscriptPanelProps {
   onOpenSessions: () => void;
@@ -58,6 +59,51 @@ function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete"
   if (status === "complete") return <Check aria-hidden="true" />;
   if (status === "failed") return <CircleAlert aria-hidden="true" />;
   return <Circle aria-hidden="true" />;
+}
+
+// Tones differ by hue alone, which colorblind users can't rely on — every tone
+// also gets its own glyph shape.
+function StatusGlyph({ tone }: { tone: AgentStatusTone }) {
+  if (tone === "attention") return <CircleAlert aria-hidden="true" />;
+  if (tone === "failed") return <CircleX aria-hidden="true" />;
+  if (tone === "stopped") return <Ban aria-hidden="true" />;
+  if (tone === "inactive") return <CircleMinus aria-hidden="true" />;
+  if (tone === "starting") return <Hourglass aria-hidden="true" />;
+  if (tone === "working") return <LoaderCircle className="spin" aria-hidden="true" />;
+  if (tone === "blocked") return <OctagonAlert aria-hidden="true" />;
+  return <Circle aria-hidden="true" />;
+}
+
+/**
+ * Keeps the agent-lineage scroller's fade mask off unless it's actually
+ * clipping content, and always scrolls the current agent's name into view
+ * when the selection changes (rather than leaving whatever end happened to
+ * be onscreen from the previous agent).
+ */
+function useLineageOverflow(lineageKey: string, currentAgentId: string | null) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      if (element.scrollWidth > element.clientWidth + 1) element.setAttribute("data-overflowing", "true");
+      else element.removeAttribute("data-overflowing");
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [lineageKey]);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.scrollLeft = element.scrollWidth;
+  }, [currentAgentId]);
+
+  return ref;
 }
 
 interface TranscriptImageSource {
@@ -227,6 +273,21 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
   const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
   const selectedStatus = selectedAgent ? agentStatus(selectedAgent) : null;
+  const selectedDescendants = useMemo(
+    () => (selectedAgent ? collectAgentDescendants(catalog.agents, selectedAgent.id) : []),
+    [catalog.agents, selectedAgent?.id],
+  );
+  // The subagent pill already pulses when a descendant is working; showing the
+  // status chip's own working glyph alongside it doubles up on the same signal.
+  const pillShowsWorking = selectedDescendants.some((agent) => agent.activity === "working");
+  const suppressWorkingChip = selectedStatus?.tone === "working" && pillShowsWorking;
+  const lineageKey = lineage.map((agent) => `${agent.id}:${agent.name}`).join("|");
+  const lineageRef = useLineageOverflow(lineageKey, selectedAgent?.id ?? null);
+  const isDeepLineage = lineage.length > 3;
+  const displayedLineage = isDeepLineage
+    ? [lineage[0], lineage[lineage.length - 2], lineage[lineage.length - 1]]
+    : lineage;
+  const hiddenAncestors = isDeepLineage ? lineage.slice(1, lineage.length - 2) : [];
 
   const { scrollRef, following, unseen, handleTranscriptImageLoad, updateFollowing, jumpToLatest } = useScrollFollowing({
     selectedAgentId: selectedAgent?.id ?? null,
@@ -265,16 +326,25 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           {attentionCount > 0 && <span className="icon-badge" aria-hidden="true">{attentionCount > 9 ? "9+" : attentionCount}</span>}
         </SwitchHapticButton>
         <nav className="agent-hierarchy" aria-label="Agent hierarchy" data-gesture-exclusion>
-          <div className="agent-lineage" role="group" aria-label="Agent ancestry" tabIndex={0}>
-            {lineage.map((agent, index) => (
-              <span className="lineage-item" key={agent.id}>
-                {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
-                {index === lineage.length - 1 ? (
-                  <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
-                ) : (
-                  <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
+          <div className="agent-lineage" ref={lineageRef} role="group" aria-label="Agent ancestry" tabIndex={0}>
+            {displayedLineage.map((agent, index) => (
+              <Fragment key={agent.id}>
+                {isDeepLineage && index === 1 && (
+                  <AncestorMenu
+                    ancestors={hiddenAncestors}
+                    onSelect={(id) => void selectAgent(id)}
+                    triggerLabel={`Open ${hiddenAncestors.length} hidden ancestor${hiddenAncestors.length === 1 ? "" : "s"}`}
+                  />
                 )}
-              </span>
+                <span className="lineage-item">
+                  {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
+                  {index === displayedLineage.length - 1 ? (
+                    <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
+                  ) : (
+                    <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
+                  )}
+                </span>
+              </Fragment>
             ))}
             {!lineage.length && <h1 id="transcript-heading" tabIndex={-1}>Prime Agent</h1>}
           </div>
@@ -286,11 +356,17 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
             />
           )}
         </nav>
-        <span
-          className={`agent-presence ${selectedStatus?.tone ?? "idle"}`}
-          role="img"
-          aria-label={selectedStatus?.label ?? "No agent selected"}
-        />
+        {!suppressWorkingChip && (
+          <span
+            className={`agent-status-chip ${selectedStatus?.tone ?? "idle"}`}
+            role="img"
+            aria-label={selectedStatus?.label ?? "No agent selected"}
+            title={selectedStatus?.label ?? "No agent selected"}
+          >
+            <StatusGlyph tone={selectedStatus?.tone ?? "idle"} />
+            <span className="agent-status-chip-label" aria-hidden="true">{selectedStatus?.label ?? "No agent selected"}</span>
+          </span>
+        )}
         <button
           className={`icon-button search-trigger ${searchOpen ? "active" : ""}`}
           onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
