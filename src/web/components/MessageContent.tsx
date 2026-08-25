@@ -2,6 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { memo, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { Marked, Tokenizer, type Token, type TokenizerExtension, type Tokens } from "marked";
 import { latexToUnicode } from "../latex";
+import { useSettings } from "../settings";
 import { SyntaxHighlight } from "./SyntaxHighlight";
 
 export interface TextBlock {
@@ -604,7 +605,12 @@ export function renderInline(text: string): Array<string | ReactElement> {
 }
 
 export function MessageContent({ text }: { text: string }) {
-  const content = useMemo(() => renderProse(text, 0), [text]);
+  const { settings } = useSettings();
+  const { rawMarkdown } = settings;
+  // The raw escape hatch must never reach marked or latex.ts, so the parse is
+  // skipped rather than rendered and discarded.
+  const content = useMemo(() => (rawMarkdown ? null : renderProse(text, 0)), [text, rawMarkdown]);
   if (!text) return null;
+  if (rawMarkdown) return <p className="markdown-paragraph" data-raw-markdown="true">{text}</p>;
   return <>{content}</>;
 }

@@ -12,10 +12,12 @@ import { MAX_DRAFT_LENGTH, useComposerDrafts } from "../hooks/useComposerDrafts"
 import { useImageAttachments } from "../hooks/useImageAttachments";
 import { useOptionsMenu } from "../hooks/useOptionsMenu";
 import { experimentalCommandNotice, useSlashCommandMenu } from "../hooks/useSlashCommandMenu";
+import { useSettings } from "../settings";
 import { SwitchHapticButton } from "./SwitchHapticButton";
 
 export function Composer() {
   const { selectedAgent, selectedSnapshot, send, loadSlashCommands, runSlashCommand, abort } = useGateway();
+  const { settings } = useSettings();
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -159,10 +161,18 @@ export function Composer() {
       return;
     }
     if (slashMenu.handleTextareaKeyDown(event)) return;
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void submit();
-    }
+    if (event.key !== "Enter") return;
+    // Slash commands are single-line, so a command draft always submits on
+    // Enter — a newline there could never be sent anyway.
+    // Shift+Enter stays a newline in both modes: it is the universal chord for
+    // one, and someone who turned Enter-to-send off did so to write multi-line
+    // drafts. Cmd/Ctrl+Enter is the inverse send.
+    const sendChord = settings.enterSends || slashMenu.commandDraft
+      ? !event.shiftKey
+      : event.metaKey || event.ctrlKey;
+    if (!sendChord) return;
+    event.preventDefault();
+    void submit();
   }
 
   if (!selectedAgent) return null;

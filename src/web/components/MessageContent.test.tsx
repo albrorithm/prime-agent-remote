@@ -1,7 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { render as renderBare, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, type Settings } from "../settings";
 import { MessageContent, parseMessageBlocks, renderInline } from "./MessageContent";
+
+function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
+  return renderBare(ui, { wrapper: SettingsProvider });
+}
 
 describe("parseMessageBlocks", () => {
   it("splits fenced code from prose and extracts the language", () => {
@@ -363,6 +370,33 @@ describe("MessageContent", () => {
     expect(screen.getByRole("link", { name: "external" })).toHaveAttribute("target", "_blank");
     expect(screen.getByRole("link", { name: "external" })).toHaveAttribute("rel", "noopener noreferrer");
     expect(screen.getByRole("link", { name: "local" })).not.toHaveAttribute("target");
+  });
+
+  it("renders the body verbatim when rawMarkdown is on, bypassing marked and LaTeX", () => {
+    const text = "# Heading\n\n**bold** `code`\n\n$$E = mc^2$$\n\n```ts\nconst x = 1;\n```";
+    const { container } = render(<MessageContent text={text} />, { rawMarkdown: true });
+    expect(container.querySelector("[data-raw-markdown]")!.textContent).toBe(text);
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.querySelector(".code-block")).toBeNull();
+    // latexToUnicode would have turned this into mc².
+    expect(container.textContent).toContain("mc^2");
+  });
+
+  it("parses markdown again once rawMarkdown is off", () => {
+    const { container } = render(<MessageContent text={"# Heading\n\n**bold**"} />, { rawMarkdown: false });
+    expect(container.querySelector("[data-raw-markdown]")).toBeNull();
+    expect(container.querySelector("h1")!.textContent).toBe("Heading");
+    expect(container.querySelector("strong")!.textContent).toBe("bold");
+  });
+
+  it("marks code blocks for soft wrapping only when codeWrap is on", () => {
+    const wrapped = render(<MessageContent text={"```\nhello()\n```"} />, { codeWrap: true });
+    expect(wrapped.container.querySelector(".code-block code")!.getAttribute("data-wrap")).toBe("true");
+    wrapped.unmount();
+
+    const scrolling = render(<MessageContent text={"```\nhello()\n```"} />, { codeWrap: false });
+    expect(scrolling.container.querySelector(".code-block code")!.hasAttribute("data-wrap")).toBe(false);
   });
 
 });

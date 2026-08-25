@@ -4,6 +4,7 @@ import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../proto
 import { useGateway } from "../gateway-store";
 import { useReplyAnnouncer } from "../hooks/useReplyAnnouncer";
 import { useScrollFollowing } from "../hooks/useScrollFollowing";
+import { useSettings } from "../settings";
 import { AttentionCard } from "./AttentionCard";
 import { AgentFamilyPicker, AncestorMenu } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
@@ -208,6 +209,7 @@ export function TranscriptEntry({
   searchTerm?: string;
   onImageLoad?: () => void;
 }) {
+  const { settings } = useSettings();
   const presentation = message.presentation;
   if (presentation?.kind === "thinking") {
     const full = presentation.full && presentation.full !== message.text ? presentation.full : null;
@@ -279,7 +281,7 @@ export function TranscriptEntry({
       <div className="message-author">
         {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
         <span>{message.role === "user" ? "You" : agentName}</span>
-        <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+        {settings.timestamps && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
       </div>
       <div className="message-body">
         <TranscriptImages

@@ -1,8 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { render as renderBare, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage, TranscriptPresentation } from "../../protocol";
+import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, useSettings, type Settings } from "../settings";
 import { formatWorkDuration, groupIntoTurns, splitTurn, TurnGroup, turnSettled } from "./TurnGroup";
+
+function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
+  return renderBare(ui, { wrapper: SettingsProvider });
+}
+
+function TurnsCollapsedToggle() {
+  const { settings, setSetting } = useSettings();
+  return <button onClick={() => setSetting("turnsCollapsed", !settings.turnsCollapsed)}>flip turnsCollapsed</button>;
+}
 
 function row(
   id: string,
@@ -249,5 +261,46 @@ describe("TurnGroup", () => {
 
     view.rerender(<TurnGroup turnId="u1" rows={liveRows().map((r) => ({ ...r }))} renderRow={renderRow} />);
     expect(renderRow.mock.calls.length).toBeGreaterThan(callsAfterMount);
+  });
+
+  it("leaves a settled turn expanded when turnsCollapsed is off", () => {
+    const view = render(
+      <TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />,
+      { turnsCollapsed: false },
+    );
+    expect(view.container.querySelector<HTMLDetailsElement>("details.turn-work")!.open).toBe(true);
+  });
+
+  it("keeps a live turn open whichever way turnsCollapsed is set", () => {
+    const view = render(
+      <TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />,
+      { turnsCollapsed: true },
+    );
+    expect(view.container.querySelector<HTMLDetailsElement>("details.turn-work")!.open).toBe(true);
+  });
+
+  it("follows a mid-session setting change only on turns the user has not touched", async () => {
+    const user = userEvent.setup();
+    const view = render(
+      <>
+        <TurnsCollapsedToggle />
+        <TurnGroup turnId="u1" rows={settledRows("u1")} renderRow={renderPlainRow} />
+        <TurnGroup turnId="u2" rows={settledRows("u2")} renderRow={renderPlainRow} />
+      </>,
+      { turnsCollapsed: true },
+    );
+    const details = () => [...view.container.querySelectorAll<HTMLDetailsElement>("details.turn-work")];
+    expect(details().map((element) => element.open)).toEqual([false, false]);
+
+    await user.click(view.container.querySelectorAll("summary.turn-summary")[0]);
+    expect(details().map((element) => element.open)).toEqual([true, false]);
+
+    await user.click(screen.getByRole("button", { name: "flip turnsCollapsed" }));
+    expect(details().map((element) => element.open)).toEqual([true, true]);
+
+    // Flipping back proves the split: the untouched turn tracks the default,
+    // the one the user expanded keeps its state.
+    await user.click(screen.getByRole("button", { name: "flip turnsCollapsed" }));
+    expect(details().map((element) => element.open)).toEqual([true, false]);
   });
 });

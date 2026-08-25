@@ -1,12 +1,16 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { fireEvent, render as renderBare, screen } from "@testing-library/react";
+import { useState, type ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary } from "../protocol";
 import { App } from "./App";
+import { SettingsProvider } from "./settings";
 
 const gatewayMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 vi.mock("./gateway-store", () => ({ useGateway: () => gatewayMock.current }));
+
+// Transcript components read useSettings(); main.tsx mounts the provider above them.
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: SettingsProvider });
 
 function agent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -162,7 +166,7 @@ describe("mobile shell navigation", () => {
     const hiddenRetry = document.querySelector<HTMLButtonElement>(".connection-banner button")!;
     hiddenRetry.focus();
     fireEvent.keyDown(hiddenRetry, { key: "Tab" });
-    expect(screen.getByRole("button", { name: "Close sessions" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Open settings" })).toHaveFocus();
 
     await user.click(screen.getByRole("button", { name: "Close sessions" }));
     expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();

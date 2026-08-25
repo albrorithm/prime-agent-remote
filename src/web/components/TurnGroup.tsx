@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import { memo, useState, type ReactNode } from "react";
 import type { TranscriptMessage } from "../../protocol";
+import { useSettings } from "../settings";
 
 export type TurnListItem =
   | { kind: "turn"; key: string; turnId: string; rows: TranscriptMessage[] }
@@ -110,9 +111,13 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   // An explicit user choice overrides auto-collapse in both directions and
   // persists for the session (the component stays mounted under its turnId key).
   const [userChoice, setUserChoice] = useState<boolean | undefined>(undefined);
+  const { settings } = useSettings();
   const { prompt, work, tail } = splitTurn(rows);
   const settled = turnSettled(rows);
-  const open = userChoice ?? !settled;
+  // A live turn stays open whatever the setting says — its work is what the
+  // user is watching. `turnsCollapsed` only decides where a turn lands once
+  // it settles, and any explicit choice still wins over both.
+  const open = userChoice ?? (settled ? !settings.turnsCollapsed : true);
   const { steps, durationMs } = summarizeTurnWork(work);
   const stepsLabel = `${steps} step${steps === 1 ? "" : "s"}`;
   const countsLabel = durationMs > 0 ? `${stepsLabel} · ${formatWorkDuration(durationMs)}` : stepsLabel;

@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { createLowlight } from "lowlight";
 import type { RootContent } from "hast";
+import { useSettings } from "../settings";
 
 type Highlighter = ReturnType<typeof createLowlight>;
 
@@ -96,9 +97,12 @@ function renderHastNodes(nodes: RootContent[], keyPrefix: string): ReactNode[] {
  * it renders the same plain `<code>` the app always shipped.
  */
 export const SyntaxHighlight = memo(function SyntaxHighlight({ lang, code }: { lang: string; code: string }) {
-  const language = normalizeHighlightLanguage(lang);
+  const { settings } = useSettings();
+  const wrap = settings.codeWrap || undefined;
+  const language = settings.syntaxHighlight ? normalizeHighlightLanguage(lang) : null;
   const [engine, setEngine] = useState<Highlighter | null>(loadedHighlighter);
 
+  // `language` is null with highlighting off, so the grammars are never fetched.
   useEffect(() => {
     if (engine || !language) return;
     let cancelled = false;
@@ -119,6 +123,6 @@ export const SyntaxHighlight = memo(function SyntaxHighlight({ lang, code }: { l
     }
   }, [engine, language, code]);
 
-  if (!tree) return <code>{code}</code>;
-  return <code className="syntax-highlight">{renderHastNodes(tree.children as RootContent[], "hl")}</code>;
+  if (!tree) return <code data-wrap={wrap}>{code}</code>;
+  return <code className="syntax-highlight" data-wrap={wrap}>{renderHastNodes(tree.children as RootContent[], "hl")}</code>;
 });

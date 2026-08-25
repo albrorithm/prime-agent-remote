@@ -1,8 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render as renderBare, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, SlashCommandCatalog } from "../../protocol";
+import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, type Settings } from "../settings";
 import { Composer } from "./Composer";
+
+function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
+  return renderBare(ui, { wrapper: SettingsProvider });
+}
 
 const gatewayMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 const imageAttachmentMock = vi.hoisted(() => ({ prepareImageFile: vi.fn() }));
@@ -204,6 +211,41 @@ describe("Composer", () => {
     expect(input).toHaveValue("first line\nsecond line");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("first line\nsecond line", undefined, expect.any(String)));
+  });
+
+  it("keeps both Enter and Shift+Enter as newlines when enterSends is off", async () => {
+    const user = userEvent.setup();
+    render(<Composer />, { enterSends: false });
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "first line");
+    await user.keyboard("{Enter}second line");
+    expect(input).toHaveValue("first line\nsecond line");
+    expect(gatewayMock.current.send).not.toHaveBeenCalled();
+
+    // Shift+Enter is the universal newline chord, and someone who turned
+    // Enter-to-send off wants multi-line drafts — it must never send.
+    await user.keyboard("{Shift>}{Enter}{/Shift}third line");
+    expect(input).toHaveValue("first line\nsecond line\nthird line");
+    expect(gatewayMock.current.send).not.toHaveBeenCalled();
+  });
+
+  it("accepts Cmd or Ctrl+Enter as the send chord when enterSends is off", async () => {
+    const user = userEvent.setup();
+    render(<Composer />, { enterSends: false });
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "ping");
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("ping", undefined, expect.any(String)));
+  });
+
+  it("keeps Enter running a slash command even when enterSends is off", async () => {
+    const user = userEvent.setup();
+    render(<Composer />, { enterSends: false });
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    await user.type(input, "/goal status");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(gatewayMock.current.runSlashCommand).toHaveBeenCalledWith("goal", "status", expect.any(String)));
+    expect(input).not.toHaveValue("/goal status\n");
   });
 
   it("starts a slash command from the extensible composer menu", async () => {

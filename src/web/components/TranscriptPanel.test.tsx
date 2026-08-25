@@ -1,8 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render as renderBare, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
 import type { useGateway } from "../gateway-store";
+import { SETTINGS_KEY, SettingsProvider } from "../settings";
 import { deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
 
 type GatewayMockState = Pick<
@@ -20,6 +22,9 @@ vi.mock("./MessageContent", () => ({
 vi.mock("./Composer", () => ({ Composer: () => <div /> }));
 vi.mock("./GoalStrip", () => ({ GoalStrip: () => <div /> }));
 vi.mock("./AttentionCard", () => ({ AttentionCard: () => <div /> }));
+
+// Transcript components read useSettings(); main.tsx mounts the provider above them.
+const render = (ui: ReactElement) => renderBare(ui, { wrapper: SettingsProvider });
 
 function agent(id: string, parentId: string | null, depth: number): AgentSummary {
   return {
@@ -234,6 +239,22 @@ describe("compact transcript entries", () => {
     await user.click(trigger);
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the author-row clock only while the timestamps setting is on", () => {
+    const message: TranscriptMessage = { ...base, id: "answer", text: "Done" };
+    const shown = renderBare(
+      <SettingsProvider><TranscriptEntry agentName="Agent" message={message} /></SettingsProvider>,
+    );
+    expect(shown.container.querySelector("time")).toHaveAttribute("dateTime", base.createdAt);
+    shown.unmount();
+
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ timestamps: false }));
+    const hidden = renderBare(
+      <SettingsProvider><TranscriptEntry agentName="Agent" message={message} /></SettingsProvider>,
+    );
+    expect(hidden.container.querySelector("time")).toBeNull();
+    expect(hidden.getByText("Agent")).toBeInTheDocument();
   });
 });
 

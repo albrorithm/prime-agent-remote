@@ -6,12 +6,19 @@
     <meta name="theme-color" content="#000000" />
     <meta name="color-scheme" content="dark light" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <!-- "default" rather than "black" so the status bar takes its color from the
+         theme-color meta above, which theme-init.js and applySettings keep on the
+         active theme's --bg. "black" would paint a hard black bar over the light
+         theme, and this meta is read once at launch — only theme-color is live. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Prime" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/prime-mark.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" sizes="180x180" href="/prime-mark-180.png" />
     <title>Prime Agent</title>
+    <!-- Blocking on purpose: this stamps the persisted theme and text scale on
+         <html> before first paint. Deferring it reintroduces the dark flash. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

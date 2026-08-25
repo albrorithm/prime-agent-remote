@@ -1,9 +1,10 @@
-import { Bot, CircleAlert, Plus, Search, X } from "lucide-react";
+import { Bot, CircleAlert, Plus, Search, Settings, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
 import { AgentTree } from "./AgentTree";
 import { NewSessionPanel } from "./NewSessionPanel";
+import { SettingsPanel } from "./SettingsPanel";
 
 interface AgentsPanelProps {
   visible?: boolean;
@@ -16,6 +17,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   const persistentDesktop = usePersistentDesktop();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return catalog.agents;
@@ -45,7 +47,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
 
   return (
     <section className="panel agents-panel" aria-label="Sessions">
-      {!creating && (
+      {!creating && !settingsOpen && (
         <header className="drawer-header">
           <div className="drawer-title">
             <img src="/prime-mark.svg" alt="" />
@@ -54,10 +56,15 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           {persistentDesktop && (
             <button className="icon-button" onClick={() => setCreating(true)} aria-label="Start a new session"><Plus /></button>
           )}
+          {/* Deliberately not `.drawer-close`: that class hides at ≥1100px, but settings
+              must stay reachable on desktop, where this panel is permanent. */}
+          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings"><Settings /></button>
           {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
         </header>
       )}
-      {creating ? (
+      {settingsOpen ? (
+        <SettingsPanel onClose={() => setSettingsOpen(false)} />
+      ) : creating ? (
         <NewSessionPanel
           onClose={() => setCreating(false)}
           onCreated={() => {

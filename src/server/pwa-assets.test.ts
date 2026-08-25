@@ -47,7 +47,7 @@ describe("PWA assets", () => {
     const agentsPanel = await readFile(join(projectRoot, "src/web/components/AgentsPanel.tsx"), "utf8");
 
     expect(html).toContain('name="apple-mobile-web-app-capable" content="yes"');
-    expect(html).toContain('name="apple-mobile-web-app-status-bar-style" content="black"');
+    expect(html).toContain('name="apple-mobile-web-app-status-bar-style" content="default"');
     expect(html).toContain('rel="apple-touch-icon" sizes="180x180" href="/prime-mark-180.png"');
     expect(logo).toContain('viewBox="0 0 178 178"');
     expect(logo.match(/fill="#ffffff"/g)).toHaveLength(2);
@@ -55,6 +55,20 @@ describe("PWA assets", () => {
     await expect(pngSize(join(projectRoot, "public/prime-mark-180.png"))).resolves.toEqual({ width: 180, height: 180 });
     await expect(pngSize(join(projectRoot, "public/prime-mark-192.png"))).resolves.toEqual({ width: 192, height: 192 });
     await expect(pngSize(join(projectRoot, "public/prime-mark-512.png"))).resolves.toEqual({ width: 512, height: 512 });
+  });
+
+  // The status-bar style meta is read once at launch, so only theme-color can
+  // follow a theme change — both stampers have to keep it current.
+  it("keeps the iOS status bar on the active theme", async () => {
+    const html = await readFile(join(projectRoot, "index.html"), "utf8");
+    const themeInit = await readFile(join(projectRoot, "public/theme-init.js"), "utf8");
+    const settings = await readFile(join(projectRoot, "src/web/settings.tsx"), "utf8");
+
+    expect(html).toContain('name="theme-color" content="#000000"');
+    expect(themeInit).toContain('meta[name="theme-color"]');
+    expect(settings).toContain('meta[name="theme-color"]');
+    expect(themeInit).toContain('"#fdfcfa"');
+    expect(settings).toContain('light: "#fdfcfa"');
   });
 
   it("lets the installed viewport size the fixed app shell", async () => {

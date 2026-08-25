@@ -6,6 +6,9 @@ const BUILD_ID = "dev";
 const CACHE_NAME = `${CACHE_PREFIX}${BUILD_ID}`;
 const STATIC_SHELL = [
   "/manifest.webmanifest",
+  // Also discoverable from index.html, but listed explicitly: if it is ever
+  // missing offline the app paints the wrong theme before the bundle loads.
+  "/theme-init.js",
   "/prime-mark.svg",
   "/prime-mark-180.png",
   "/prime-mark-192.png",
