@@ -265,9 +265,14 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       return true;
     }
 
-    if (!allowMutation(req, res, session)) return true;
-
+    // Above the mutation gate, and so above the rate limiter: revoking a
+    // session must never be the one request a session cannot make. It still
+    // validates Origin and CSRF, which is what actually guards it.
     if (req.method === "POST" && pathname === "/api/v1/auth/logout") {
+      if (!auth.validateMutation(req, session)) {
+        problem(res, 403, "Origin or CSRF validation failed");
+        return true;
+      }
       // Deliberately not request-ID deduplicated: the cache is keyed by session
       // id, and this call destroys that session, so a replay 401s before it
       // could ever reach a cached entry.
@@ -278,6 +283,8 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       json(res, 200, { signedOut: true });
       return true;
     }
+
+    if (!allowMutation(req, res, session)) return true;
 
     if (req.method === "POST" && pathname === "/api/v1/sessions") {
       const parsed = createSessionRequestSchema.safeParse(await readJson(req));

@@ -339,6 +339,44 @@ describe("gateway mutation guards", () => {
     expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(200);
   });
 
+  it("lets a rate-limited session still sign out", async () => {
+    const t = await startGateway({ mutationLimiter: new SlidingWindowLimiter(60_000, 1, 8) });
+    const client = await pairClient(t);
+    await fetch(`${t.baseUrl}/api/v1/sessions`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), cwd: "/" }),
+    });
+    const limited = await fetch(`${t.baseUrl}/api/v1/sessions`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), cwd: "/" }),
+    });
+    expect(limited.status).toBe(429);
+
+    // Revoking must never be the one request a session cannot make.
+    const signedOut = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(signedOut.status).toBe(200);
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(401);
+  });
+
+  it("still requires CSRF to sign out when the limiter is bypassed", async () => {
+    const t = await startGateway({ mutationLimiter: new SlidingWindowLimiter(60_000, 1, 8) });
+    const client = await pairClient(t);
+
+    const forged = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: { Cookie: client.cookie, Origin: t.baseUrl, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(forged.status).toBe(403);
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(200);
+  });
+
   it("400s malformed JSON and schema-invalid bodies, 413s oversized ones", async () => {
     const t = await startGateway();
     const client = await pairClient(t);
