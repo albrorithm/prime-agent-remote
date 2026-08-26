@@ -17,6 +17,7 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     sessionTtlMs: 60_000,
     webPushStorePath: "/dev/null/push-subscriptions.json",
     pairingTokenPath: "/dev/null/pairing-token",
+    gatewayStatePath: "/dev/null/gateway.json",
     deviceStorePath: "/dev/null/devices.json",
     ...overrides,
   };

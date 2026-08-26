@@ -34,6 +34,8 @@ export interface GatewayConfig {
   /** Where an unconfigured gateway keeps the token it minted for itself. */
   pairingTokenPath: string;
   deviceStorePath: string;
+  /** Where the launcher records a running gateway so other tools can find it. */
+  gatewayStatePath: string;
 }
 
 const MIN_PRODUCTION_PAIRING_TOKEN_CHARS = 32;
@@ -159,6 +161,7 @@ export function loadConfig(env = process.env): GatewayConfig {
     webPush: parseWebPush(env),
     webPushStorePath: configFilePath(env, "PRIME_WEB_PUSH_STORE", "push-subscriptions.json"),
     pairingTokenPath: configFilePath(env, "PRIME_WEB_PAIRING_TOKEN_FILE", "pairing-token"),
+    gatewayStatePath: configFilePath(env, "PRIME_WEB_STATE_FILE", "gateway.json"),
     deviceStorePath: configFilePath(env, "PRIME_WEB_DEVICE_STORE", "devices.json"),
   };
 }

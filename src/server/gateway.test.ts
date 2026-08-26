@@ -33,6 +33,7 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     // temp directory; the default only exists to satisfy the type.
     webPushStorePath: join(tmpdir(), "prime-gateway-test-unused-push-store.json"),
     pairingTokenPath: join(tmpdir(), "prime-gateway-test-unused-pairing-token"),
+    gatewayStatePath: join(tmpdir(), "prime-gateway-test-unused-state.json"),
     deviceStorePath: join(tmpdir(), "prime-gateway-test-unused-devices.json"),
     ...overrides,
   };

@@ -11,7 +11,7 @@
     "dev": "concurrently -k -n gateway,web -c blue,magenta \"npm:dev:gateway\" \"npm:dev:web\"",
     "dev:gateway": "tsx watch src/server/index.ts",
     "dev:web": "vite",
-    "build": "npm run clean:server && npm run typecheck && vite build && node scripts/hash-sw.mjs dist && tsc -p tsconfig.server.json",
+    "build": "npm run clean:server && npm run typecheck && vite build && node scripts/hash-sw.mjs dist && tsc -p tsconfig.server.json && node -e \"require('node:fs').chmodSync('dist-server/cli/index.js', 0o755)\"",
     "clean:server": "node -e \"require('node:fs').rmSync('dist-server', { recursive: true, force: true })\"",
     "start": "NODE_ENV=production node dist-server/server/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.server.test.json --noEmit",
@@ -47,5 +47,15 @@
     "vite": "^6.0.0",
     "vitest": "^4.1.11",
     "vitest-axe": "^0.1.0"
-  }
+  },
+  "bin": {
+    "prime-agent-mobile": "dist-server/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "dist-server",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
 }

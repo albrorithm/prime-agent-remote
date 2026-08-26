@@ -10,6 +10,6 @@
     "checkJs": false,
     "rootDir": "."
   },
-  "include": ["src/protocol.ts", "src/server/**/*.ts", "scripts/**/*.mjs"],
+  "include": ["src/protocol.ts", "src/server/**/*.ts", "src/cli/**/*.ts", "scripts/**/*.mjs"],
   "exclude": []
 }
