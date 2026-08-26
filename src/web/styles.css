@@ -809,7 +809,10 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 .turn-group { display: flex; min-width: 0; flex-direction: column; gap: 20px; }
 /* Never display:flex on the <details> element itself — it breaks closed-state hiding. */
 .turn-work { min-width: 0; align-self: stretch; }
-.turn-summary { display: flex; min-height: 34px; min-width: 0; align-items: center; gap: 7px; margin: -6px 0; color: var(--muted); font: 560 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; list-style: none; cursor: pointer; }
+/* 44px so the transcript's primary disclosure control is a real touch target;
+   the negative margin absorbs the extra height back out of the 20px turn gap,
+   so the row occupies the same optical space it did at 34px. */
+.turn-summary { display: flex; min-height: 44px; min-width: 0; align-items: center; gap: 7px; margin: -11px 0; color: var(--muted); font: 560 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; list-style: none; cursor: pointer; }
 .turn-summary::-webkit-details-marker { display: none; }
 .turn-chevron { width: 14px; height: 14px; flex: 0 0 14px; transition: transform 140ms ease; }
 .turn-work[open] > .turn-summary .turn-chevron { transform: rotate(90deg); }
