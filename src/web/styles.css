@@ -845,12 +845,16 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 /* === The mobile tier ===
    Every max-width override lives here, at the end, rather than beside the
    component it adjusts. Three separate 1099px blocks had accumulated as
-   components were added, and a block sitting ABOVE a later base rule loses to
-   it at equal specificity — .turn-summary's base rule outranked its own mobile
-   font-size that way. Keeping the tier last makes that class of silent
-   regression impossible, so a new override only has to land in the right
-   block, not at the right line. 430px stays after 1099px: the narrow-phone
-   rules refine the same properties and must win. */
+   components were added. Nothing was broken — every override happened to sit
+   after the base rule it overrides — but that was luck, not structure: a block
+   ABOVE a later base rule loses to it at equal specificity. .turn-summary is
+   the example. Its base rule sits after two of the three old blocks, so
+   folding its override up into the first one would have silently dropped its
+   mobile font-size, and a component added below the tier would have inherited
+   the same trap. Keeping the tier last makes that class of regression
+   impossible, so a new override only has to land in the right block, not at
+   the right line. 430px stays after 1099px: the narrow-phone rules refine the
+   same properties and must win. */
 @media (max-width: 1099px) {
   .agent-lineage h1 { font-size: 1rem; }
   .agent-lineage button { font-size: .875rem; }
