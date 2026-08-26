@@ -16,6 +16,7 @@ The gateway currently permits these live operations:
 - request abort;
 - rename one agent, by its id: a live session through the same `AgentConnection` adapter the `/name` command already uses, and a saved one through the daemon's own recorded session path — never a path the browser supplies. The name is schema-validated as a single line of at most 200 characters before it leaves the gateway;
 - end one agent's live session, by its id, through the daemon's `kill` for that session's own active id. The session is left saved and resumable; this is not daemon shutdown, and the browser cannot express one;
+- permanently delete one saved session and its transcript, by its id, through the daemon's `delete_saved_session` on that session's own recorded path. This is irreversible and the gateway keeps no copy. It is confirmed by the request carrying the session's current name, which the gateway checks server-side and refuses on any mismatch, so a browser cannot skip the confirmation and a stale catalog deletes nothing rather than the wrong session. A live session is refused outright and must be stopped first;
 - answer supported extension confirmation and selection requests;
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker;

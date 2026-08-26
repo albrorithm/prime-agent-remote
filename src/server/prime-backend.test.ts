@@ -34,6 +34,8 @@ interface FixtureState {
   savedRenameError?: string;
   kills: Array<Record<string, unknown>>;
   killError?: string;
+  deletes: Array<Record<string, unknown>>;
+  deleteError?: string;
   listener: ((event: unknown) => void) | null;
   createError?: string;
   listError: boolean;
@@ -141,6 +143,7 @@ const fixture: FixtureState = {
   creates: [],
   savedRenames: [],
   kills: [],
+  deletes: [],
   listener: null,
   listError: false,
   connectError: false,
@@ -197,6 +200,14 @@ export class DaemonClient {
       // reports the row with no activeSessionId and a file to resume from.
       delete session.activeSessionId;
       session.sessionFile = session.sessionFile ?? "/fixture/killed-session.jsonl";
+      return { success: true, data: {} };
+    }
+    if (command.type === "delete_saved_session") {
+      state.deletes.push(command);
+      if (state.deleteError) return { success: false, error: state.deleteError };
+      const index = state.sessions.findIndex((item) => item.sessionFile === command.sessionPath);
+      if (index < 0) return { success: false, error: "saved session missing" };
+      state.sessions.splice(index, 1);
       return { success: true, data: {} };
     }
     if (command.type === "rename_saved_session") {
@@ -1174,6 +1185,81 @@ describe("PrimeBackend", () => {
       expect(backend.catalog().agents.find((agent) => agent.id === live!.id)?.lifecycle).toBe("live");
     } finally {
       delete fixture.killError;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("deletes a saved session, refuses a live one, and refuses a name that does not match", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.deletes = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      const saved = backend.catalog().agents.find((agent) => agent.lifecycle === "inactive");
+      // `delete_saved_session` deletes a file, so a live session must be
+      // stopped first — the two bits are mirror images.
+      expect(live?.capabilities.delete).toBe(false);
+      expect(saved?.capabilities.delete).toBe(true);
+
+      await backend.agentSnapshot(live!.id);
+      await expect(backend.delete({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot(live!.id))!.revision,
+        confirmName: live!.name,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(fixture.deletes).toHaveLength(0);
+
+      const snapshot = await backend.agentSnapshot(saved!.id);
+      await expect(backend.delete({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        confirmName: "Not this session",
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(fixture.deletes).toHaveLength(0);
+
+      const result = await backend.delete({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        confirmName: saved!.name,
+      });
+
+      // The daemon's own recorded path, never one the caller supplied.
+      expect(fixture.deletes).toEqual([{ type: "delete_saved_session", sessionPath: "/fixture/saved-session.jsonl" }]);
+      expect(result.revision).toBe(snapshot!.revision + 1);
+      expect(backend.catalog().agents.some((agent) => agent.id === saved!.id)).toBe(false);
+      expect(await backend.agentSnapshot(saved!.id)).toBeNull();
+      expect(hub.has(`agent:${saved!.id}`)).toBe(false);
+    } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("keeps a session that the daemon refused to delete", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.deletes = [];
+    fixture.deleteError = "private delete failure";
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const saved = backend.catalog().agents.find((agent) => agent.lifecycle === "inactive");
+      const snapshot = await backend.agentSnapshot(saved!.id);
+      await expect(backend.delete({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        confirmName: saved!.name,
+      })).rejects.toThrow("Prime session delete failed");
+      expect(backend.catalog().agents.some((agent) => agent.id === saved!.id)).toBe(true);
+    } finally {
+      delete fixture.deleteError;
       hub.close();
       await backend.close();
     }

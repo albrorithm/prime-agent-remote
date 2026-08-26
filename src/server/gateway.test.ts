@@ -593,6 +593,65 @@ describe("gateway API routes", () => {
     expect(extra.status).toBe(400);
   });
 
+  it("deletes only a stopped session, and only with the matching name", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const liveId = agents.find((agent) => agent.capabilities.stop && !agent.capabilities.delete)?.id;
+    const target = agents.find((agent) => agent.capabilities.delete);
+    if (!liveId || !target) throw new Error("Demo catalog has no live and deletable pair");
+
+    // A live session is refused outright — it has to be stopped first.
+    const liveRefused = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(liveId)}/delete`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, liveId),
+        confirmName: agents.find((agent) => agent.id === liveId)!.name,
+      }),
+    });
+    expect(liveRefused.status).toBe(403);
+
+    // The confirming name is validated server-side, so a browser cannot skip it.
+    const wrongName = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(target.id)}/delete`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, target.id),
+        confirmName: "Not this session",
+      }),
+    });
+    expect(wrongName.status).toBe(403);
+    expect((await bootstrap(t, client)).catalog.agents.some((agent) => agent.id === target.id)).toBe(true);
+
+    // Omitting it entirely is a malformed request, not a permitted shortcut.
+    const noName = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(target.id)}/delete`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1 }),
+    });
+    expect(noName.status).toBe(400);
+
+    const deleted = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(target.id)}/delete`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, target.id),
+        confirmName: target.name,
+      }),
+    });
+    expect(deleted.status).toBe(202);
+    expect((await bootstrap(t, client)).catalog.agents.some((agent) => agent.id === target.id)).toBe(false);
+
+    const snapshotGone = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(target.id)}/snapshot`, {
+      headers: { Cookie: client.cookie },
+    });
+    expect(snapshotGone.status).toBe(404);
+  });
+
   it("answers a backend that refuses to rename with 403 rather than 500", async () => {
     // The UI decides what to offer from the capability bits, but the gateway
     // must still turn a backend's refusal into a refusal — not an error.

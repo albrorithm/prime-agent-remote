@@ -921,6 +921,19 @@ export const stopAgentRequestSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
 }).strict();
 
+/**
+ * Deleting a saved session, transcript and all. Irreversible, and the only
+ * operation the gateway offers that destroys something rather than changing
+ * it — so it carries the name the caller believes it is deleting, and the
+ * backend refuses if that is not the session's current name. A confirmation
+ * the browser could skip would not be one.
+ */
+export const deleteAgentRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+  confirmName: sessionNameSchema,
+}).strict();
+
 export const problemDetailsSchema = z.object({
   type: z.string(),
   title: z.string(),

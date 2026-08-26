@@ -51,6 +51,7 @@ import {
   type AttentionListener,
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
+  type DeleteInput,
   type RenameInput,
   type StopInput,
   type ResolveAttentionInput,
@@ -1923,6 +1924,43 @@ export class PrimeBackend implements AgentBackend {
     });
   }
 
+  async delete(input: DeleteInput): Promise<MutationAccepted> {
+    const summary = this.rawSummaries.get(input.agentId);
+    if (!summary) throw new BackendNotFoundError("Agent not found");
+    return this.withCommandLock(input.agentId, async () => {
+      const snapshot = this.requiredSnapshot(input.agentId);
+      if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+      if (summary.activeSessionId) throw new BackendCapabilityError("Stop this session before deleting it");
+      const sessionPath = summary.sessionFile;
+      if (typeof sessionPath !== "string" || !sessionPath) {
+        throw new BackendCapabilityError("This agent has no saved session to delete");
+      }
+      // The name the browser believes it is deleting must be the name this
+      // session actually has. A catalog that went stale between the
+      // confirmation and the request deletes nothing rather than the wrong
+      // thing.
+      const current = this.catalogState.agents.find((agent) => agent.id === input.agentId);
+      if (!current || input.confirmName !== current.name) {
+        throw new BackendCapabilityError("That is not this session's name");
+      }
+
+      // Read before the removal: there is no snapshot to read afterwards.
+      const revision = snapshot.revision + 1;
+      let response: PrimeResponse;
+      try {
+        response = await this.client.request({ type: "delete_saved_session", sessionPath });
+      } catch {
+        throw new Error("Prime session delete failed");
+      }
+      if (!response.success) throw new Error("Prime session delete failed");
+
+      this.snapshots.delete(input.agentId);
+      this.hub.unregister(`agent:${input.agentId}`);
+      await this.refreshCatalog(true);
+      return { accepted: true, requestId: input.requestId, revision };
+    });
+  }
+
   async resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted> {
     const pending = this.pendingExtensions.get(input.attentionId);
     if (!pending) throw new BackendNotFoundError("Attention request not found");
@@ -2194,6 +2232,11 @@ export class PrimeBackend implements AgentBackend {
         // Only a live session has something to end. `kill` takes an
         // activeSessionId, so a saved one has nothing to name.
         stop: Boolean(summary.activeSessionId),
+        // The mirror image: `delete_saved_session` deletes a file, so a live
+        // session has to be stopped before it can be deleted. That two-step is
+        // deliberate — it is one more thing between a phone and an
+        // irreversible loss.
+        delete: !summary.activeSessionId && Boolean(summary.sessionFile),
         respond: Boolean(summary.activeSessionId),
         images: summary.model?.input?.includes("image") === true,
       },

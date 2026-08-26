@@ -11,6 +11,7 @@ import {
   cellOutputSchema,
   clientFrameSchema,
   createSessionRequestSchema,
+  deleteAgentRequestSchema,
   executeSlashCommandRequestSchema,
   pairRequestSchema,
   PROTOCOL_VERSION,
@@ -423,6 +424,21 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         parsed.data.requestId,
         mutationBinding(`stop:${agentId}`, parsed.data),
         () => backend.stop({ agentId, ...parsed.data }),
+      );
+      json(res, 202, result);
+      return true;
+    }
+
+    const deleteMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/delete$/);
+    if (req.method === "POST" && deleteMatch) {
+      const agentId = decodeSegment(deleteMatch[1]);
+      const parsed = deleteAgentRequestSchema.safeParse(await readJson(req));
+      if (!agentId || !parsed.success) { problem(res, 400, "Invalid delete request"); return true; }
+      const result = await deduplicated(
+        session,
+        parsed.data.requestId,
+        mutationBinding(`delete:${agentId}`, parsed.data),
+        () => backend.delete({ agentId, ...parsed.data }),
       );
       json(res, 202, result);
       return true;

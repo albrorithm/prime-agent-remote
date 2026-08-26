@@ -337,6 +337,65 @@ describe("DemoBackend", () => {
     }
   });
 
+  it("deletes a stopped session only when the confirming name matches", async () => {
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      // A live session cannot be deleted: it has to be stopped first.
+      const live = backend.catalog().agents.find((agent) => agent.id === "root-mobile");
+      expect(live?.capabilities.delete).toBe(false);
+      await expect(backend.delete({
+        agentId: "root-mobile",
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot("root-mobile"))!.revision,
+        confirmName: live!.name,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+
+      const target = backend.catalog().agents.find((agent) => agent.id === "root-inactive")!;
+      expect(target.capabilities.delete).toBe(true);
+      const snapshot = await backend.agentSnapshot("root-inactive");
+      const frames: unknown[] = [];
+      const attached = hub.attach("agent:root-inactive", null, (frame) => frames.push(frame));
+      expect(attached).not.toBeNull();
+
+      // A name that is not this session's name deletes nothing.
+      await expect(backend.delete({
+        agentId: "root-inactive",
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        confirmName: "Some other session",
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(backend.catalog().agents.some((agent) => agent.id === "root-inactive")).toBe(true);
+
+      const result = await backend.delete({
+        agentId: "root-inactive",
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+        confirmName: target.name,
+      });
+
+      // The revision is the last one the agent ever had — read before removal,
+      // because there is no snapshot to read afterwards.
+      expect(result.revision).toBe(snapshot!.revision + 1);
+      expect(backend.catalog().agents.some((agent) => agent.id === "root-inactive")).toBe(false);
+      expect(await backend.agentSnapshot("root-inactive")).toBeNull();
+      expect(hub.has("agent:root-inactive")).toBe(false);
+      // Anyone watching the stream is told it is gone rather than left hanging.
+      expect(frames).toContainEqual(expect.objectContaining({ type: "detached", reason: "stream_gone" }));
+
+      await expect(backend.delete({
+        agentId: "root-inactive",
+        requestId: crypto.randomUUID(),
+        expectedRevision: result.revision,
+        confirmName: target.name,
+      })).rejects.toBeInstanceOf(BackendNotFoundError);
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
   it("never advertises a capability it has no method for", async () => {
     // The UI decides what to put on screen from these bits, so an advertised
     // capability with nothing behind it is a control that fails when pressed.

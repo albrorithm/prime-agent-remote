@@ -347,6 +347,73 @@ try {
   });
   if (stopWithoutCsrf.status !== 403) throw new Error(`Expected stop CSRF rejection, got ${stopWithoutCsrf.status}`);
 
+  // Delete: irreversible, so both refusal paths are checked before the one
+  // that actually destroys something.
+  const deleteTarget = stoppedBootstrap.catalog.agents.find((agent) => agent.capabilities.delete);
+  const undeletableId = stoppedBootstrap.catalog.agents.find((agent) => !agent.capabilities.delete)?.id;
+  if (!deleteTarget || !undeletableId) throw new Error("Demo catalog has no deletable and live pair");
+  const deletePath = `${origin}/api/v1/agents/${encodeURIComponent(deleteTarget.id)}/delete`;
+  const deleteRevision = async (id) => (await json(await fetch(
+    `${origin}/api/v1/agents/${encodeURIComponent(id)}/snapshot`,
+    { headers: { Origin: origin, Cookie: cookie } },
+  ))).revision;
+
+  const liveDelete = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(undeletableId)}/delete`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: await deleteRevision(undeletableId),
+      confirmName: stoppedBootstrap.catalog.agents.find((agent) => agent.id === undeletableId).name,
+    }),
+  });
+  if (liveDelete.status !== 403) throw new Error(`Expected live-session delete refusal, got ${liveDelete.status}`);
+
+  const wrongName = await fetch(deletePath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: await deleteRevision(deleteTarget.id),
+      confirmName: "Not this session",
+    }),
+  });
+  if (wrongName.status !== 403) throw new Error(`Expected mismatched-name delete refusal, got ${wrongName.status}`);
+
+  // The confirmation is enforced by the gateway, so it cannot be skipped.
+  const noConfirmation = await fetch(deletePath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: 1 }),
+  });
+  if (noConfirmation.status !== 400) throw new Error(`Expected unconfirmed delete rejection, got ${noConfirmation.status}`);
+
+  const deleteWithoutCsrf = await fetch(deletePath, {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: 1, confirmName: deleteTarget.name }),
+  });
+  if (deleteWithoutCsrf.status !== 403) throw new Error(`Expected delete CSRF rejection, got ${deleteWithoutCsrf.status}`);
+
+  const deleted = await fetch(deletePath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: await deleteRevision(deleteTarget.id),
+      confirmName: deleteTarget.name,
+    }),
+  });
+  if (deleted.status !== 202) throw new Error(`Delete failed: ${deleted.status} ${await deleted.text()}`);
+  const deletedBootstrap = await json(await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin, Cookie: cookie } }));
+  if (deletedBootstrap.catalog.agents.some((agent) => agent.id === deleteTarget.id)) {
+    throw new Error("Deleted demo agent is still in the catalog");
+  }
+  const deletedSnapshot = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(deleteTarget.id)}/snapshot`, {
+    headers: { Origin: origin, Cookie: cookie },
+  });
+  if (deletedSnapshot.status !== 404) throw new Error(`Expected deleted snapshot 404, got ${deletedSnapshot.status}`);
+
   const pushSubscription = {
     endpoint: "https://push.example.invalid/smoke-endpoint",
     keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },

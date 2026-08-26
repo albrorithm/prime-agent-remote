@@ -30,6 +30,7 @@ import {
   type AgentBackend,
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
+  type DeleteInput,
   type RenameInput,
   type StopInput,
   type ResolveAttentionInput,
@@ -67,6 +68,23 @@ const fullCapabilities: AgentCapabilities = {
   delete: false,
   respond: true,
   images: false,
+};
+
+/**
+ * What a session looks like once it has no live session behind it — whether it
+ * arrived that way or was stopped. Named once so the seeded fixture and `stop`
+ * cannot drift into describing the same state differently.
+ */
+const inactiveCapabilities: AgentCapabilities = {
+  ...fullCapabilities,
+  send: false,
+  abort: false,
+  resume: true,
+  respond: false,
+  stop: false,
+  // Only a saved session can be deleted: the daemon's verb is
+  // `delete_saved_session`, and a live one has to be stopped first.
+  delete: true,
 };
 
 function agent(
@@ -137,7 +155,7 @@ const initialAgents: AgentSummary[] = [
     description: "Available to resume",
     lifecycle: "inactive",
     activity: "idle",
-    capabilities: { ...fullCapabilities, send: false, abort: false, resume: true, respond: false, stop: false },
+    capabilities: inactiveCapabilities,
   }),
 ];
 
@@ -1024,7 +1042,7 @@ export class DemoBackend implements AgentBackend {
     summary.activity = "idle";
     summary.attention = null;
     summary.unreadCount = 0;
-    summary.capabilities = { ...fullCapabilities, send: false, abort: false, resume: true, respond: false, stop: false };
+    summary.capabilities = inactiveCapabilities;
     summary.updatedAt = new Date().toISOString();
     snapshot.attention = [];
     snapshot.dashboard = demoDashboard(summary);
@@ -1033,6 +1051,28 @@ export class DemoBackend implements AgentBackend {
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
     this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async delete(input: DeleteInput): Promise<MutationAccepted> {
+    const snapshot = this.requiredSnapshot(input.agentId);
+    const summary = this.requiredSummary(input.agentId);
+    if (!summary.capabilities.delete) throw new BackendCapabilityError("Stop this session before deleting it");
+    if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+    if (input.confirmName !== summary.name) throw new BackendCapabilityError("That is not this session's name");
+
+    // The revision is read before the removal, not after: there is no snapshot
+    // left to read once the agent is gone, and the caller still needs the
+    // number the mutation settled at.
+    const revision = snapshot.revision + 1;
+    this.clearTimers(input.agentId);
+    this.snapshots.delete(input.agentId);
+    this.catalogState.agents = this.catalogState.agents.filter((agent) => agent.id !== input.agentId);
+    this.catalogState.revision += 1;
+    // Unregistering detaches anyone watching this agent's stream with
+    // `stream_gone`, which is the truth: it is gone.
+    this.hub.unregister(`agent:${input.agentId}`);
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    return { accepted: true, requestId: input.requestId, revision };
   }
 
   async resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted> {

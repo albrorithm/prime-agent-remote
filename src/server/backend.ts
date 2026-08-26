@@ -54,6 +54,14 @@ export interface StopInput {
   expectedRevision: number;
 }
 
+export interface DeleteInput {
+  agentId: string;
+  requestId: string;
+  expectedRevision: number;
+  /** The name the caller believes it is deleting; a mismatch is a refusal. */
+  confirmName: string;
+}
+
 export interface RenameInput {
   agentId: string;
   requestId: string;
@@ -291,6 +299,12 @@ export interface AgentBackend {
    * id and the backend chooses the verb.
    */
   stop(input: StopInput): Promise<MutationAccepted>;
+  /**
+   * Permanently delete one saved session and its transcript. Irreversible.
+   * The revision it echoes is the last one the agent ever had, since there is
+   * no snapshot left to read afterwards.
+   */
+  delete(input: DeleteInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
   listDirectories(path?: string): Promise<DirectoryListing>;
   createSession(input: CreateSessionInput): Promise<SessionCreated>;
