@@ -16,6 +16,26 @@ const VAPID_ENV = {
   PRIME_WEB_VAPID_SUBJECT: "mailto:operator@example.test",
 };
 
+/* One throw-away directory for every file the gateway persists.
+
+   The push store was already redirected here, with a comment saying the
+   operator's real store must never be touched — but it was the only one, and
+   the device store was not. So each smoke run paired its test devices into
+   ~/.config/prime-agent-web/devices.json for real. That store keeps only the
+   most recent MAX_DEVICES (32) entries and evicts the oldest, so a handful of
+   smoke runs in one afternoon silently pushed the operator's actual phone out
+   of it and the phone had to be paired again from the token.
+
+   Anything derived from configFilePath() in src/server/config.ts belongs here.
+   Add to this list when a new one appears. */
+const smokeConfigDir = mkdtempSync(join(tmpdir(), "prime-smoke-config-"));
+const ISOLATED_STORES = {
+  PRIME_WEB_PUSH_STORE: join(smokeConfigDir, "push-subscriptions.json"),
+  PRIME_WEB_DEVICE_STORE: join(smokeConfigDir, "devices.json"),
+  PRIME_WEB_PAIRING_TOKEN_FILE: join(smokeConfigDir, "pairing-token"),
+  PRIME_WEB_STATE_FILE: join(smokeConfigDir, "gateway.json"),
+};
+
 const gateways = [];
 
 function startGateway(gatewayPort, extraEnv = {}) {
@@ -31,8 +51,8 @@ function startGateway(gatewayPort, extraEnv = {}) {
       PRIME_WEB_PAIRING_TOKEN: pairingToken,
       PRIME_WEB_BACKEND: "demo",
       PRIME_WEB_SECURE_COOKIE: "false",
-      // Never the operator's real store.
-      PRIME_WEB_PUSH_STORE: join(mkdtempSync(join(tmpdir(), "prime-smoke-push-")), "push-subscriptions.json"),
+      // Never the operator's real stores.
+      ...ISOLATED_STORES,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
