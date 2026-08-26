@@ -88,7 +88,15 @@
      inside it, so this has to grow with --text-scale like the type does.
      3.375rem is exactly 54px at scale 1. */
   --header-height: 3.375rem;
+  /* The composer's clearance over the home indicator. useViewportGeometry
+     pins this to 0 while the keyboard covers that strip, because there is
+     nothing left to clear and the gap would read as the composer floating. */
   --composer-safe-bottom: max(9px, env(safe-area-inset-bottom, 0px));
+  /* --viewport-top and --viewport-height are NOT declared here on purpose.
+     useViewportGeometry publishes them on <html> from window.visualViewport,
+     and every use site carries its own fallback, so a tree where the hook has
+     not run (a test, the harness before mount, a stripped shell) keeps exactly
+     the layout it had before. Declaring a default here would take that away. */
   /* The composer's growth range, in rem so the box tracks the text inside it.
      Composer.tsx clamps the same two numbers when it resizes the textarea and
      reads them from here, so the JS and the CSS cannot drift apart.
@@ -221,7 +229,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .switch-haptic-input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .switch-haptic-input:disabled { cursor: not-allowed; }
 
-.connection-banner { position: fixed; z-index: 80; top: calc(env(safe-area-inset-top) + 5px); left: 50%; display: flex; align-items: center; justify-content: center; gap: 7px; max-width: calc(100vw - 24px); min-height: 36px; padding: 6px 10px; transform: translateX(-50%); border: 1px solid var(--border-emphasis); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 30px var(--shadow); font-size: .75rem; font-weight: 650; }
+.connection-banner { position: fixed; z-index: 80; top: calc(var(--viewport-top, 0px) + env(safe-area-inset-top) + 5px); left: 50%; display: flex; align-items: center; justify-content: center; gap: 7px; max-width: calc(100vw - 24px); min-height: 36px; padding: 6px 10px; transform: translateX(-50%); border: 1px solid var(--border-emphasis); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 30px var(--shadow); font-size: .75rem; font-weight: 650; }
 .connection-banner svg { width: 14px; height: 14px; }
 .connection-banner button { min-height: 26px; padding: 3px 8px; border: 1px solid var(--border-emphasis); border-radius: 99px; background: var(--panel-raised-4); font-size: .6875rem; font-weight: 700; }
 /* "offline" is the genuine connection-failure state (vs. the neutral connecting/replaying busy states, which stay grayscale). */
@@ -444,7 +452,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
    the textarea's 2.75rem floor plus its 9px/9px padding, the 1px rule and a
    15px gap — instead of the single baked 78px that silently went wrong the
    moment the textarea could grow. */
-.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(var(--composer-min-h) + 34px + env(safe-area-inset-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
+.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(var(--composer-min-h) + 34px + var(--composer-safe-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
 .jump-latest svg { width: 13px; }
 
 .sessions-trigger { position: relative; }
@@ -516,7 +524,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .transcript-search input { width: 100%; min-width: 0; min-height: 38px; border: 0; outline: 0; background: transparent; }
 .transcript-search input::placeholder { color: var(--muted-2); }
 .search-count { flex: 0 0 auto; color: var(--muted); font-size: .625rem; white-space: nowrap; }
-.gesture-hint { position: fixed; z-index: 70; top: calc(env(safe-area-inset-top) + var(--header-height) + .5rem); left: 14px; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 28px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-bright); border-radius: 12px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 10px 34px var(--shadow); font-size: .6875rem; font-weight: 650; }
+.gesture-hint { position: fixed; z-index: 70; top: calc(var(--viewport-top, 0px) + env(safe-area-inset-top) + var(--header-height) + .5rem); left: 14px; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 28px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-bright); border-radius: 12px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 10px 34px var(--shadow); font-size: .6875rem; font-weight: 650; }
 .gesture-hint::before { content: ""; position: absolute; top: 50%; left: -9px; width: 12px; height: 32px; transform: translateY(-50%); border-right: 2px solid var(--accent); border-radius: 0 8px 8px 0; opacity: .7; animation: blink 1.4s ease-in-out infinite; }
 .gesture-hint button { display: grid; width: 24px; height: 24px; place-items: center; border: 0; border-radius: 50%; color: var(--muted); background: transparent; }
 .gesture-hint button svg { width: 13px; height: 13px; }
@@ -557,7 +565,9 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .composer-menu button > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .composer-menu strong { font-size: .75rem; }
 .composer-menu small { color: var(--muted); font-size: .625rem; }
-.slash-command-menu { position: absolute; z-index: 13; right: 10px; bottom: calc(100% - 2px); left: 10px; display: grid; max-height: min(292px, 42dvh); gap: 3px; padding: 6px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border-mid); border-radius: 14px; background: var(--overlay-menu); box-shadow: 0 16px 48px var(--shadow-deep); backdrop-filter: blur(18px); }
+/* 42% of what is VISIBLE, not of the screen: with the keyboard up, 42dvh is
+   most of the room the shell has left and the menu would run off the top. */
+.slash-command-menu { position: absolute; z-index: 13; right: 10px; bottom: calc(100% - 2px); left: 10px; display: grid; max-height: min(292px, calc(var(--viewport-height, 100dvh) * .42)); gap: 3px; padding: 6px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border-mid); border-radius: 14px; background: var(--overlay-menu); box-shadow: 0 16px 48px var(--shadow-deep); backdrop-filter: blur(18px); }
 .slash-command-menu button { display: grid; min-height: 54px; gap: 4px; padding: 8px 10px; border: 0; border-radius: 9px; color: var(--text); background: transparent; text-align: left; }
 .slash-command-menu button:hover, .slash-command-menu button[aria-selected="true"] { background: var(--panel-raised-3); }
 .slash-command-menu button[aria-disabled="true"] { opacity: .48; }
@@ -616,7 +626,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .new-session-form input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .new-session-form input::placeholder { color: var(--muted-2); }
 
-.login-shell, .splash { display: grid; width: 100%; height: 100svh; height: 100dvh; place-items: center; padding: max(22px, env(safe-area-inset-top)) 18px max(22px, env(safe-area-inset-bottom)); background: var(--bg); }
+.login-shell, .splash { display: grid; width: 100%; height: 100svh; height: 100dvh; height: var(--viewport-height, 100dvh); place-items: center; padding: max(22px, env(safe-area-inset-top)) 18px max(22px, env(safe-area-inset-bottom)); background: var(--bg); }
 .login-card { display: grid; width: min(100%, 390px); gap: 15px; padding: 25px; border: 1px solid var(--border-mid); border-radius: 20px; background: var(--panel-soft); box-shadow: 0 24px 70px var(--shadow-deep); }
 .login-mark { display: grid; width: 46px; height: 46px; place-items: center; border: 1px solid var(--border-bright); border-radius: 14px; color: var(--text); background: var(--panel-raised); }
 .login-mark svg { width: 21px; }
@@ -630,6 +640,30 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .form-error { color: var(--tone-danger); font-size: .75rem; }
 .splash { align-content: center; gap: 10px; color: var(--muted); }
 .splash img { width: 54px; height: 54px; border-radius: 14px; filter: grayscale(1); }
+
+/* === The visible rectangle ===
+   Every full-screen fixed layer is sized and placed against the VISUAL
+   viewport rather than the layout viewport. `position: fixed` resolves against
+   the layout viewport, and on iOS WebKit the two part company in the two ways
+   this app cares about: the layout viewport is briefly reported taller than
+   the screen just after an installed launch, and it does not shrink when the
+   keyboard opens — WebKit scrolls the page instead, which is what used to
+   carry the header and the drawers off the top of the screen.
+
+   Placed here, after every layer it names, so it wins over their own `inset`
+   and `height` declarations; the >=1100px block below re-states the drawers
+   and comes later still, which is how they go back to being grid columns.
+   `left`/`right` are deliberately absent: the drawers each own one edge.
+
+   The fallbacks are load-bearing. useViewportGeometry writes these two custom
+   properties on <html>; wherever it has not run, this rule is `top: 0;
+   height: 100%`, which is what the layers had before. */
+.app-shell, .shell-global-ui, .shell-scrim, .session-drawer, .activity-drawer,
+.family-picker-layer, .image-viewer {
+  top: var(--viewport-top, 0px);
+  bottom: auto;
+  height: var(--viewport-height, 100%);
+}
 
 @media (max-width: 720px) and (display-mode: fullscreen),
   (max-width: 720px) and (display-mode: standalone) {

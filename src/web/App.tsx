@@ -7,7 +7,7 @@ import { SessionDashboard } from "./components/SessionDashboard";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useGateway } from "./gateway-store";
 import { useDrawerGesture } from "./hooks/useDrawerGesture";
-import { useInstalledViewportRecovery } from "./hooks/useInstalledViewportRecovery";
+import { useViewportGeometry } from "./hooks/useViewportGeometry";
 import { usePersistentDesktop } from "./hooks/usePersistentDesktop";
 
 const FOCUSABLE = 'button:not([disabled]):not([tabindex="-1"]), a[href]:not([tabindex="-1"]), input:not([disabled]):not([hidden]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
@@ -64,7 +64,7 @@ function GestureHint() {
 }
 
 export function App() {
-  useInstalledViewportRecovery();
+  useViewportGeometry();
   const gateway = useGateway();
   const persistentDesktop = usePersistentDesktop();
   const [sessionsOpen, setSessionsOpen] = useState(false);

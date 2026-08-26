@@ -69,6 +69,50 @@ that decides. Headless WebKit is still not a phone: safe-area insets are zero
 and there is no device text inflation, so anything depending on those needs
 real hardware.
 
+## The screen is not the page
+
+Every full-screen fixed layer — the shell, the drawers, the scrims, the image
+viewer — is sized and placed against the **visual** viewport, not the layout
+viewport, through two custom properties that `useViewportGeometry` writes on
+`<html>`:
+
+| | |
+|---|---|
+| `--viewport-top` | where the visible part of the page starts |
+| `--viewport-height` | how much of it can be seen |
+
+`position: fixed` resolves against the layout viewport, and on iOS WebKit the
+two are not the same rectangle. Just after an installed launch the layout
+viewport is sometimes reported taller than the screen, and a layer at
+`inset: 0` then hangs off the display — which is why the top bar or the
+composer could be missing on first open. And iOS uses
+`interactive-widget: resizes-visual`, so the layout viewport does **not**
+shrink when the keyboard opens: WebKit scrolls the whole page up to lift the
+focused field clear of it, carrying the header and, on iPad, the drawers with
+it.
+
+Sizing to the visible rectangle answers both. The shell ends exactly where the
+keyboard begins, so the composer comes to rest on top of it and nothing else
+has to move; the transcript is the shell's one flexible row, so it is what
+gives up the height, and it re-pins to its latest message when it does.
+
+The rules that follow from this:
+
+- A new full-screen fixed layer joins the `--viewport-top` / `--viewport-height`
+  rule in `styles.css` rather than using `inset: 0`. A fixed pill positioned
+  from the top edge adds `var(--viewport-top, 0px)` to its offset.
+- Every use site carries its own fallback, so a tree where the hook has not run
+  keeps its previous layout. Do not give these properties a `:root` default.
+- Anything that must fit on screen measures against `--viewport-height`, not
+  `dvh`. With the keyboard up, `dvh` is still the whole screen.
+- `env(keyboard-inset-*)` and the VirtualKeyboard API are Chromium-only, and no
+  shipping Safari announces `interactive-widget`. `window.visualViewport` is
+  the only signal available here.
+
+`.ui-harness/scripts/keyboard-probe.mjs` opens a scripted keyboard against a
+real shell in WebKit and Chromium and checks what moved. Run it after touching
+any of this.
+
 ## House rules that apply to any change here
 
 - Tests live beside the module they cover, as `*.test.ts` or `*.test.tsx`.

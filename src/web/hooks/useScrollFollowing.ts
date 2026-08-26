@@ -87,6 +87,27 @@ export function useScrollFollowing({
     previousAttention.current = snapshotAttention;
   }, [snapshotAttention]);
 
+  // The shell is sized to the visible rectangle, so the transcript is the row
+  // that gives up height when the keyboard opens. A shorter scroll box keeps
+  // its scrollTop, which silently un-pins a reader who was at the bottom — the
+  // composer rises and the latest message slides out from behind it. Re-pin on
+  // any height change, which covers rotation and the drawers too.
+  // ResizeObserver is absent in jsdom; without it this is simply inert there,
+  // which is the honest outcome for a test environment with no layout.
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver !== "function") return;
+    let previousHeight = element.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const height = element.clientHeight;
+      if (height === previousHeight) return;
+      previousHeight = height;
+      if (followingRef.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   function handleTranscriptImageLoad() {
     const element = scrollRef.current;
     if (!element) return;
