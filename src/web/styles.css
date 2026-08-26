@@ -604,8 +604,23 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
   .lineage-forward-label { display: none; }
   .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
   .state-pill { display: none; }
+  /* Seven of the eight tones are circle-family lucide glyphs at 12px. Icon-only,
+     Circle (idle) and CircleMinus (inactive) are the same smudge on a phone, so
+     hiding the label here cost the chip its meaning. Spend width where the state
+     needs an action: the two quiet tones collapse to a presence dot (the
+     pre-chip behaviour, and the same language as .agent-state-dot), and the
+     tones that ask for something keep icon AND word. */
   .agent-status-chip-label { display: none; }
   .agent-status-chip { padding: 5px; }
+  .agent-status-chip.attention .agent-status-chip-label,
+  .agent-status-chip.blocked .agent-status-chip-label,
+  .agent-status-chip.failed .agent-status-chip-label { display: inline; }
+  .agent-status-chip.attention, .agent-status-chip.blocked, .agent-status-chip.failed { padding: 3px 7px; }
+  .agent-status-chip.idle > svg, .agent-status-chip.inactive > svg { display: none; }
+  .agent-status-chip.idle::before, .agent-status-chip.inactive::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
+  .agent-status-chip.idle::before { background: var(--border-emphasis); }
+  /* Hollow reads as "asleep" against idle's filled dot without adding a hue. */
+  .agent-status-chip.inactive::before { box-shadow: inset 0 0 0 1px var(--border-emphasis); }
 }
 
 @media (min-width: 1100px) {
