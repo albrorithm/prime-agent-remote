@@ -1,4 +1,4 @@
-import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, OctagonAlert, Search, User, X } from "lucide-react";
+import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, MessagesSquare, OctagonAlert, Search, User, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -274,13 +274,72 @@ export function TranscriptEntry({
     return <RefineRow presentation={presentation} />;
   }
   if (presentation?.kind === "notice") {
-    return (
-      <div className={`timeline-row notice ${presentation.tone}`} role="note" aria-label={`${presentation.label}: ${message.text}`}>
+    /* A notice is a short label plus a body of free text — a subagent's
+       terminal reason, a compaction outcome — and the body has no length
+       bound. Laying both on one nowrap line handed the label, which does not
+       shrink, the entire width and left the body a few characters, which it
+       then wrapped one letter at a time into a tall ribbon down the right-hand
+       edge. The label IS the summary here, so it takes the line by itself and
+       the body goes behind a disclosure, where it gets the full width. */
+    const detail = message.text.trim();
+    const body = detail && detail !== presentation.label ? detail : null;
+    const row = (
+      <>
         <Info aria-hidden="true" />
-        <strong className="timeline-label">{presentation.label}</strong>
-        <span className="timeline-separator" aria-hidden="true">·</span>
-        <span className="timeline-preview"><HighlightedText text={message.text} term={searchTerm ?? ""} /></span>
-      </div>
+        <strong className="timeline-preview">{presentation.label}</strong>
+      </>
+    );
+    if (!body) {
+      return (
+        <div className={`timeline-row notice ${presentation.tone}`} role="note" aria-label={presentation.label}>
+          {row}
+        </div>
+      );
+    }
+    return (
+      <details className="notice-disclosure" data-gesture-exclusion>
+        <summary
+          className={`timeline-row notice ${presentation.tone}`}
+          aria-label={`${presentation.label}: ${detail}. Expand for the full notice.`}
+        >
+          {row}
+          <ChevronDown className="notice-chevron" aria-hidden="true" />
+        </summary>
+        <p className="notice-detail"><HighlightedText text={detail} term={searchTerm ?? ""} /></p>
+      </details>
+    );
+  }
+  if (presentation?.kind === "agent-message") {
+    /* Same shape as a notice, for the same reason: who it came from is the
+       summary, and the body — which runs to thousands of characters — is what
+       the reader opens when they want it. Having any presentation at all is
+       also what moves this row out of a turn's outcome and into its collapsible
+       work, so a turn full of subagent traffic folds away with one tap. */
+    const body = message.text.trim();
+    const label = presentation.relationship === "child"
+      ? `Message from subagent ${presentation.sender}`
+      : presentation.relationship === "parent"
+        ? `Message from ${presentation.sender}, its parent`
+        : `Message from ${presentation.sender}`;
+    if (!body) {
+      return (
+        <div className="timeline-row agent-message" role="note" aria-label={label}>
+          <MessagesSquare aria-hidden="true" />
+          <strong className="timeline-preview">{label}</strong>
+        </div>
+      );
+    }
+    return (
+      <details className="notice-disclosure" data-gesture-exclusion>
+        <summary className="timeline-row agent-message" aria-label={`${label}. Expand to read it.`}>
+          <MessagesSquare aria-hidden="true" />
+          <strong className="timeline-preview">{label}</strong>
+          <ChevronDown className="notice-chevron" aria-hidden="true" />
+        </summary>
+        <div className="agent-message-body">
+          <MessageContent text={body} />
+        </div>
+      </details>
     );
   }
   if (presentation?.kind === "error") {

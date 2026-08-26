@@ -158,6 +158,8 @@ export interface RefineEditSummary {
 export type RefineScope = "local" | "global";
 export type RefineStatus = "running" | "complete" | "failed";
 export type NoticeTone = "info" | "warning" | "danger";
+/** Where an inter-agent message came from, relative to the agent reading it. */
+export type AgentMessageRelationship = "parent" | "child" | "peer";
 
 export type TranscriptPresentation =
   | { kind: "thinking"; full?: string; truncated?: boolean }
@@ -194,6 +196,10 @@ export type TranscriptPresentation =
       error?: string;
     }
   | { kind: "notice"; label: string; tone: NoticeTone }
+  /* An inter-agent message: one agent's text delivered into another's
+     transcript. The body stays in TranscriptMessage.text; this carries who it
+     came from, which is the part a reader needs before deciding to open it. */
+  | { kind: "agent-message"; sender: string; relationship: AgentMessageRelationship }
   | { kind: "error"; label: string };
 
 export interface TranscriptMessage {
@@ -496,6 +502,11 @@ const transcriptPresentationSchema = z.discriminatedUnion("kind", [
     error: z.string().optional(),
   }),
   z.object({ kind: z.literal("notice"), label: z.string(), tone: z.enum(["info", "warning", "danger"]) }),
+  z.object({
+    kind: z.literal("agent-message"),
+    sender: z.string(),
+    relationship: z.enum(["parent", "child", "peer"]),
+  }),
   z.object({ kind: z.literal("error"), label: z.string() }),
 ]);
 

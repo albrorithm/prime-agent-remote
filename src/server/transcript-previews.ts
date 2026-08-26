@@ -32,12 +32,31 @@ function isSafeQuotedPreview(value: string): boolean {
     || /^[A-Za-z0-9_.-]+\.(?:c|css|go|h|html|js|json|jsx|md|mjs|py|rs|sh|toml|ts|tsx|txt|yaml|yml)$/.test(value);
 }
 
+/* An apostrophe is not a quote.
+
+   This used to treat ' exactly like " and `, so in ordinary prose it paired
+   the apostrophe in one contraction with the apostrophe in the next and
+   redacted everything between them: "There'll skip the .research directory,
+   so I'll" came out as "There'<redacted>'ll". Thinking-row previews are prose
+   and contractions are common, so this ate a large share of them on screen.
+
+   A single quote therefore only opens a literal where a shell or code quote
+   can actually start — at the beginning, or after whitespace or an opening
+   delimiter — and only closes where one can end. An apostrophe sitting
+   between two word characters is left alone. Credentials do not appear as
+   word'word, so nothing that was redacted before stops being redacted:
+   `--password='hunter2'`, `token='...'` and `grep 'literal'` all still pair. */
+const DOUBLE_OR_BACKTICK = /"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g;
+const SINGLE_QUOTED = /(^|[\s=:,([{])'((?:\\.|[^'\\])*)'(?=$|[\s=:,.;!?)\]}])/g;
+
+function redactLiteral(quote: string, content: string): string {
+  return isSafeQuotedPreview(content) ? `${quote}${content}${quote}` : `${quote}<redacted>${quote}`;
+}
+
 function redactQuotedPreviews(value: string): string {
-  return value.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, (literal) => {
-    const quote = literal[0] ?? '"';
-    const content = literal.slice(1, -1);
-    return isSafeQuotedPreview(content) ? literal : `${quote}<redacted>${quote}`;
-  });
+  return value
+    .replace(DOUBLE_OR_BACKTICK, (literal) => redactLiteral(literal[0] ?? '"', literal.slice(1, -1)))
+    .replace(SINGLE_QUOTED, (_match, lead: string, content: string) => `${lead}${redactLiteral("'", content)}`);
 }
 
 /** Keep compact previews useful without forwarding private literals, credentials, or machine paths. */

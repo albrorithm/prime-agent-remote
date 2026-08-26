@@ -424,8 +424,24 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .thinking-disclosure { min-width: 0; max-width: 100%; align-self: stretch; }
 .thinking-disclosure > summary { cursor: pointer; list-style: none; }
 .thinking-disclosure > summary::-webkit-details-marker { display: none; }
-.thinking-chevron { width: 13px; height: 13px; flex: 0 0 auto; color: var(--muted); transition: transform 140ms ease; }
-.thinking-disclosure[open] .thinking-chevron { transform: rotate(180deg); }
+.thinking-chevron, .notice-chevron { width: 13px; height: 13px; flex: 0 0 auto; color: var(--muted); transition: transform 140ms ease; }
+.thinking-disclosure[open] .thinking-chevron, .notice-disclosure[open] .notice-chevron { transform: rotate(180deg); }
+/* Same shape as .thinking-disclosure: the label is the summary, the body is
+   what the reader asks for. */
+.notice-disclosure { min-width: 0; max-width: 100%; align-self: stretch; }
+.notice-disclosure > summary { cursor: pointer; list-style: none; }
+.notice-disclosure > summary::-webkit-details-marker { display: none; }
+/* An inter-agent message is prose, often Markdown, and often long, so its body
+   is rendered content rather than a preformatted block — but it keeps the
+   notice's frame so the two read as the same class of aside. */
+.agent-message-body { margin: 5px 0 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); }
+.agent-message-body > :first-child { margin-top: 0; }
+.agent-message-body > :last-child { margin-bottom: 0; }
+.timeline-row.agent-message { color: var(--muted-2); }
+.timeline-row.agent-message > svg { color: var(--muted); }
+.timeline-row.agent-message .timeline-preview { color: var(--text-soft); font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-weight: 700; }
+.notice-detail { margin: 5px 0 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; color: var(--text-soft); background: var(--panel-soft); font: 500 .75rem/1.55 Inter, ui-sans-serif, system-ui, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice-disclosure:has(.notice.danger) .notice-detail { border-color: var(--tone-danger-soft); }
 .thinking-disclosure[open] > summary .timeline-preview { white-space: normal; }
 .thinking-full { margin: 4px 0 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); color: var(--text-soft); font: 500 .8125rem/1.55 Inter, ui-sans-serif, system-ui, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 1em, so the caret is the height of whatever line it is trailing rather than
@@ -863,10 +879,19 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 .turn-summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn-work[data-state="live"] .turn-summary-text { color: var(--text-soft); }
 .turn-summary-meta { flex: 0 0 auto; overflow: hidden; color: var(--muted-2); text-overflow: ellipsis; white-space: nowrap; }
-.turn-work-rows { display: flex; min-width: 0; flex-direction: column; gap: 20px; padding: 12px 0 6px 21px; }
+/* No left indent. Every row in here is a single monospace line competing for
+   the width — a command, a thought, a notice — so an indent is paid for in
+   characters the reader never sees, and at phone width 21px was most of a
+   command name. The summary above and the answer below already bracket the
+   block; it does not also need to be inset to read as subordinate. */
+.turn-work-rows { display: flex; min-width: 0; flex-direction: column; gap: 20px; padding: 12px 0 6px; }
 
-.timeline-row.notice { color: var(--muted-2); white-space: normal; }
-.timeline-row.notice .timeline-preview { color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+/* Deliberately NOT `white-space: normal`. A notice keeps the timeline's
+   single truncated line; its body lives in .notice-detail, which is where
+   wrapping belongs. Letting the row wrap is what produced the one-letter-wide
+   ribbon down the right-hand edge. */
+.timeline-row.notice { color: var(--muted-2); }
+.timeline-row.notice .timeline-preview { color: var(--muted); }
 /* A "danger"-tone notice (e.g. rlm_child_failure) is a failed row; info/warning notices stay grayscale. */
 .timeline-row.notice.danger { color: var(--tone-danger); }
 .timeline-row.notice.danger .timeline-preview { color: var(--tone-danger-text); }

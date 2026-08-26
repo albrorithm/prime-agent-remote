@@ -60,4 +60,30 @@ describe("tool transcript previews", () => {
     expect(sanitizeTranscriptPreview("read /home/example/project API_TOKEN='value'"))
       .toBe("read ~/project API_TOKEN=<redacted>");
   });
+
+  // An apostrophe is not a quote. Pairing the one in "There'll" with the one in
+  // "I'll" used to redact the whole span between them, which ate most of a
+  // prose preview: "There'<redacted>'ll ...".
+  it("leaves contractions in prose alone", () => {
+    expect(sanitizeTranscriptPreview("There'll skip the .research directory, so I'll read the hook"))
+      .toBe("There'll skip the .research directory, so I'll read the hook");
+    expect(sanitizeTranscriptPreview("I'm checking the app shell layout CSS and the viewport hook"))
+      .toBe("I'm checking the app shell layout CSS and the viewport hook");
+    expect(sanitizeTranscriptPreview("it doesn't fit, the user's request wasn't clear"))
+      .toBe("it doesn't fit, the user's request wasn't clear");
+  });
+
+  // ...and narrowing what counts as a literal must not narrow what is redacted.
+  it("still redacts single-quoted literals wherever one can actually open", () => {
+    expect(sanitizeTranscriptPreview("run --password='hunter2'")).toBe("run --password=<redacted>");
+    expect(sanitizeTranscriptPreview("export SECRET='abc def'")).toBe("export SECRET=<redacted>");
+    expect(sanitizeTranscriptPreview("echo 'private sentence here'")).toBe("echo '<redacted>'");
+    expect(sanitizeTranscriptPreview("call('private sentence here')")).toBe("call('<redacted>')");
+    // The allow-list is unchanged: a path literal still survives, quotes and
+    // all, and a bare identifier is still redacted — this module is
+    // deny-by-default and narrowing what counts as a quote does not change that.
+    expect(sanitizeTranscriptPreview("sed -n '1,40p' 'src/web/styles.css'"))
+      .toBe("sed -n '<redacted>' 'src/web/styles.css'");
+    expect(sanitizeTranscriptPreview("grep -rn 'visualViewport' src")).toBe("grep -rn '<redacted>' src");
+  });
 });

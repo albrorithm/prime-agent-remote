@@ -13,6 +13,7 @@ import {
 import type {
   AgentCapabilities,
   AgentGoal,
+  AgentMessageRelationship,
   AgentSnapshot,
   AgentSummary,
   AttentionRequest,
@@ -579,6 +580,25 @@ function messageCreatedAt(record: PrimeRecord): string {
   return toIso(record.timestamp ?? record.__savedCreatedAt);
 }
 
+/** A sender long enough to identify and short enough to stay on one line. */
+const MAX_AGENT_SENDER_CHARS = 64;
+
+/* The daemon names the author in `details.from.sessionName`. Everything else is
+   a fallback for a record that predates it or omits it, so the row still says
+   something truthful about where the message came from. */
+function agentMessageSender(from: PrimeRecord | undefined, relationship: unknown): string {
+  const named = boundedString(from?.sessionName, MAX_AGENT_SENDER_CHARS)?.trim();
+  if (named) return named;
+  if (relationship === "child" || from?.runtimeKind === "subagent") return "a subagent";
+  if (relationship === "parent") return "the parent agent";
+  return "another agent";
+}
+
+function agentMessageRelationship(relationship: unknown, runtimeKind: unknown): AgentMessageRelationship {
+  if (relationship === "parent" || relationship === "child" || relationship === "peer") return relationship;
+  return runtimeKind === "subagent" ? "child" : "peer";
+}
+
 function plainMessage(
   record: PrimeRecord,
   index: number,
@@ -967,6 +987,34 @@ function projectMessage(
           kind: "notice",
           label: outcome === "failed" ? "Compaction failed" : outcome === "cancelled" ? "Compaction cancelled" : "Compaction skipped",
           tone: outcome === "failed" ? "danger" : outcome === "cancelled" ? "warning" : "info",
+        };
+      }
+      return item ? [item] : [];
+    }
+    /* An inter-agent message — by a wide margin the most common custom record
+       a session produces. It used to match no branch at all and fall through
+       to the plain-prose path at the bottom of this function, which meant two
+       things at once: the whole body was dumped into the transcript
+       uncollapsed (a median of about 1.1k characters and up to 16k), and
+       because a row with no presentation counts as a turn OUTCOME rather than
+       work, it could not even be folded away with the rest of the turn.
+
+       `details.message` is the message on its own. `content` is that same text
+       with a delivery header ("[from child:name]", "Agent-to-agent message
+       received.") pasted in front of it, so the structured field is both
+       cleaner and what a reader actually wants to see. */
+    if (record.customType === "agent_message") {
+      const details = primeRecord(record.details);
+      const from = primeRecord(details?.from);
+      const body = typeof details?.message === "string" && details.message.trim()
+        ? details.message.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)
+        : messageText(record);
+      const item = plainMessage(record, index, "system", body, streaming, "agent-message");
+      if (item) {
+        item.presentation = {
+          kind: "agent-message",
+          sender: agentMessageSender(from, details?.fromRelationship),
+          relationship: agentMessageRelationship(details?.fromRelationship, from?.runtimeKind),
         };
       }
       return item ? [item] : [];

@@ -160,7 +160,10 @@ describe("compact transcript entries", () => {
     expect(screen.getByRole("group", { name: "Refine complete, Tightened prompt guidance, local scope" })).toBeInTheDocument();
   });
 
-  it("renders notice rows as labeled system lines", () => {
+  // The label is the summary and the body is behind a disclosure. Laying both
+  // on the row's one nowrap line gave the label — which does not shrink — the
+  // whole width and wrapped the body one letter at a time down the right edge.
+  it("puts a notice body behind its label", () => {
     render(
       <TranscriptEntry
         agentName="Agent"
@@ -173,9 +176,71 @@ describe("compact transcript entries", () => {
         }}
       />,
     );
-    const notice = screen.getByRole("note", { name: "Context compacted: Compacted the last 41 exchanges." });
+    const summary = screen.getByText("Context compacted");
+    expect(summary.closest("summary")).toBeInTheDocument();
+    expect(screen.getByText("Compacted the last 41 exchanges.")).toBeInTheDocument();
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+  });
+
+  // A body that only repeats the label is not detail, so it gets no disclosure.
+  it("renders a notice with nothing to add as a plain line", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "notice-flat",
+          role: "system",
+          text: "Compaction skipped",
+          presentation: { kind: "notice", label: "Compaction skipped", tone: "info" },
+        }}
+      />,
+    );
+    const notice = screen.getByRole("note", { name: "Compaction skipped" });
     expect(notice).toBeInTheDocument();
-    expect(within(notice).getByText("Context compacted")).toBeInTheDocument();
+    expect(notice.closest("details")).toBeNull();
+  });
+
+  it("names the sender of an inter-agent message and collapses its body", async () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "agent-message",
+          role: "system",
+          text: "FINDINGS\n\nThe custom branch handles exactly **four** customTypes.",
+          presentation: { kind: "agent-message", sender: "agent-msg-recon", relationship: "child" },
+        }}
+      />,
+    );
+    const summary = screen.getByText("Message from subagent agent-msg-recon");
+    const disclosure = summary.closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    // The body goes through MessageContent — Markdown, not a raw dump. This
+    // file stubs that component, so the real rendering is checked by eye in
+    // .ui-harness (case `work-density`); what matters here is that the body
+    // reaches it at all instead of being dropped or inlined into the summary.
+    const body = disclosure?.querySelector(".agent-message-body");
+    expect(body?.textContent).toContain("The custom branch handles exactly");
+    await userEvent.click(summary);
+    expect(disclosure).toHaveAttribute("open");
+  });
+
+  it("says when an inter-agent message came from the parent", () => {
+    render(
+      <TranscriptEntry
+        agentName="Agent"
+        message={{
+          ...base,
+          id: "agent-message-parent",
+          role: "system",
+          text: "Check the drawers on iPad.",
+          presentation: { kind: "agent-message", sender: "root-session", relationship: "parent" },
+        }}
+      />,
+    );
+    expect(screen.getByText("Message from root-session, its parent")).toBeInTheDocument();
   });
 
   it("renders error rows with their label and full text", () => {

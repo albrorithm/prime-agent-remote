@@ -437,7 +437,7 @@ describe("DemoBackend", () => {
     const messageSchema = (agentSnapshotSchema.shape.messages as unknown as { element: PresentationHost }).element;
     const presentationUnion = (messageSchema.shape.presentation as unknown as { unwrap(): DiscriminatedUnion }).unwrap();
     const expectedKinds = presentationUnion.options.map((option) => option.shape.kind.value);
-    expect(expectedKinds.sort()).toEqual(["error", "notice", "python", "refine", "thinking", "tool"]);
+    expect(expectedKinds.sort()).toEqual(["agent-message", "error", "notice", "python", "refine", "thinking", "tool"]);
 
     const backend = new DemoBackend();
     const hub = new EventHub();

@@ -482,6 +482,60 @@ describe("projectPrimeTranscript", () => {
     expect(JSON.stringify(messages)).not.toContain("private internal detail");
   });
 
+  // The most common custom record a session produces, and until now the one
+  // with no branch at all: it fell through to plain prose, which dumped the
+  // whole body into the transcript AND — because a row with no presentation
+  // counts as a turn's outcome rather than its work — put it somewhere the
+  // turn could not fold away.
+  it("projects an inter-agent message as its own collapsible row", () => {
+    const messages = projectPrimeTranscript([
+      {
+        role: "custom",
+        customType: "agent_message",
+        display: true,
+        content: "[from child:ios-kbd-research]\nFINDINGS — the report body",
+        details: {
+          id: "agentmsg_1",
+          message: "FINDINGS — the report body",
+          from: { sessionName: "ios-kbd-research", runtimeKind: "subagent", sessionId: "s1", activeSessionId: "a1", clientId: "c1" },
+          fromRelationship: "child",
+          target: { sessionName: "root", runtimeKind: "top-level", sessionId: "s0", activeSessionId: "a0" },
+        },
+        timestamp: 1,
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    // The delivery header is dropped: details.message is the message itself.
+    expect(messages[0]).toMatchObject({
+      role: "system",
+      text: "FINDINGS — the report body",
+      presentation: { kind: "agent-message", sender: "ios-kbd-research", relationship: "child" },
+    });
+  });
+
+  it("falls back to the record body and an honest sender when details are thin", () => {
+    const messages = projectPrimeTranscript([
+      { role: "custom", customType: "agent_message", display: true, content: "Agent-to-agent message received.\nBody", timestamp: 1 },
+      {
+        role: "custom",
+        customType: "agent_message",
+        display: true,
+        content: "Body",
+        details: { message: "Body", from: { runtimeKind: "top-level" }, fromRelationship: "parent" },
+        timestamp: 2,
+      },
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      text: "Agent-to-agent message received.\nBody",
+      presentation: { kind: "agent-message", sender: "another agent", relationship: "peer" },
+    });
+    expect(messages[1]).toMatchObject({
+      presentation: { kind: "agent-message", sender: "the parent agent", relationship: "parent" },
+    });
+  });
+
   it("emits an error row for a failed turn instead of zero rows", () => {
     const messages = projectPrimeTranscript([
       { role: "user", content: "Do the thing", timestamp: 1 },
