@@ -1,8 +1,10 @@
-import { LogOut, Settings as SettingsIcon, Trash2, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Bell, BellOff, LogOut, Settings as SettingsIcon, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { PROTOCOL_VERSION } from "../../protocol";
+import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 import { DRAFTS_KEY } from "../hooks/useComposerDrafts";
+import { disablePush, enablePush, readPushState, type PushState } from "../push";
 import { SETTINGS_KEY, TEXT_SCALES, useSettings, type Settings } from "../settings";
 
 interface SettingsPanelProps {
@@ -79,6 +81,96 @@ function backendLabel(backend: "demo" | "prime" | null): string {
   return "Not connected";
 }
 
+/**
+ * Copy for every state a phone can actually be in. `denied` gets its own
+ * wording because a page whose prompt was refused can never show it again;
+ * offering "turn on" there would send the user round a loop with no exit.
+ */
+const PUSH_COPY: Record<PushState, { hint: string; action?: string }> = {
+  unsupported: {
+    hint: "This browser can't receive notifications. On iPhone, add Prime Agent to the Home Screen and open it from there.",
+  },
+  unconfigured: {
+    hint: "This gateway has no notification keys configured. Ask whoever runs it to set the VAPID keys.",
+  },
+  denied: {
+    hint: "Notifications are blocked for this app. Turn them back on in your device settings — this page can't ask again.",
+  },
+  off: {
+    hint: "Get woken when a session needs a decision. The alert names the session and nothing else — never transcript text.",
+    action: "Turn on notifications",
+  },
+  on: {
+    hint: "This device is woken when a session needs a decision, and the app icon shows how many are waiting.",
+    action: "Turn off notifications",
+  },
+};
+
+function NotificationsGroup() {
+  const { csrfToken, push } = useGateway();
+  const [state, setState] = useState<PushState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setState(await readPushState(push));
+  }, [push]);
+
+  useEffect(() => {
+    let current = true;
+    void readPushState(push).then((value) => { if (current) setState(value); });
+    return () => { current = false; };
+  }, [push]);
+
+  // Permission is requested here and nowhere else: the browser only honours
+  // `requestPermission` inside a user gesture, and a prompt fired on load is
+  // the fastest way to a permanent denial.
+  async function toggle(turnOn: boolean) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (turnOn) setState(await enablePush(push?.publicKey ?? "", csrfToken));
+      else {
+        await disablePush(csrfToken);
+        await refresh();
+      }
+    } catch (caught) {
+      setError(humanizeError(caught, turnOn ? "Could not turn on notifications" : "Could not turn off notifications"));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state === null) return null;
+  const copy = PUSH_COPY[state];
+  const on = state === "on";
+  return (
+    <section className="settings-group" aria-labelledby="settings-notifications">
+      <h3 id="settings-notifications">Notifications</h3>
+      <div className="settings-row">
+        <div className="settings-row-copy">
+          <p className="settings-status">{on ? "On for this device" : "Off"}</p>
+          <p className="settings-hint">{copy.hint}</p>
+        </div>
+      </div>
+      {copy.action && (
+        <div className="settings-actions">
+          <button
+            className={on ? "settings-quiet" : "primary-button"}
+            disabled={busy}
+            onClick={() => void toggle(!on)}
+          >
+            {on ? <BellOff aria-hidden="true" /> : <Bell aria-hidden="true" />} {copy.action}
+          </button>
+        </div>
+      )}
+      {error && <p className="settings-hint settings-error" role="alert">{error}</p>}
+    </section>
+  );
+}
+
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const { backend, signOut } = useGateway();
   const { settings, setSetting } = useSettings();
@@ -145,6 +237,8 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             onChange={(value) => setSetting("textScale", Number(value))}
           />
         </section>
+
+        <NotificationsGroup />
 
         <section className="settings-group" aria-labelledby="settings-reading">
           <h3 id="settings-reading">Reading</h3>

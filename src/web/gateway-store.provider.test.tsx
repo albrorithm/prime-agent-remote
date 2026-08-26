@@ -25,6 +25,9 @@ const apiMock = vi.hoisted(() => {
   };
 });
 
+const pushMock = vi.hoisted(() => ({ revokePushLocally: vi.fn(async () => {}) }));
+vi.mock("./push", () => pushMock);
+
 vi.mock("./api", () => ({
   ApiError: apiMock.ApiError,
   bootstrap: apiMock.bootstrap,
@@ -167,6 +170,7 @@ beforeEach(() => {
   apiMock.abortAgent.mockReset();
   apiMock.respondToAttention.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
+  pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -404,10 +408,25 @@ describe("GatewayProvider recovery and state ownership", () => {
     await act(async () => { await result.current.signOut(); });
 
     expect(apiMock.signOut).toHaveBeenCalledWith("csrf");
+    // Sign-out kills the wake capability on both sides. A TTL lapse
+    // deliberately kills neither.
+    expect(pushMock.revokePushLocally).toHaveBeenCalled();
     expect(result.current.authRequired).toBe(true);
     expect(result.current.hadSession).toBe(false);
     expect(result.current.snapshots).toEqual({});
     expect(result.current.csrfToken).toBe("");
+  });
+
+  it("gives up the browser subscription even when the logout request fails", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    apiMock.signOut.mockRejectedValue(new Error("gateway unreachable"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => { await result.current.signOut(); });
+
+    expect(pushMock.revokePushLocally).toHaveBeenCalled();
   });
 
   it("keeps the session when sign-out fails, rather than faking it locally", async () => {

@@ -6,6 +6,7 @@ import {
   directoryListingSchema,
   mutationAcceptedSchema,
   problemDetailsSchema,
+  pushAcceptedSchema,
   sessionCreatedSchema,
   slashCommandAcceptedSchema,
   slashCommandCatalogSchema,
@@ -16,6 +17,7 @@ import {
   type ImageAttachmentInput,
   type MutationAccepted,
   type ProblemDetails,
+  type PushAccepted,
   type SessionCreated,
   type SlashCommandAccepted,
   type SlashCommandCatalog,
@@ -262,4 +264,33 @@ export function createSession(
     cwd,
     ...(name ? { name } : {}),
   }, options, sessionCreatedSchema);
+}
+
+export interface PushSubscriptionBody {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+export function subscribeToPush(
+  csrfToken: string,
+  subscription: PushSubscriptionBody,
+  requestId: string = crypto.randomUUID(),
+  options?: ApiRequestOptions,
+): Promise<PushAccepted> {
+  return mutate<PushAccepted>("/api/v1/push/subscribe", csrfToken, {
+    requestId,
+    subscription,
+  }, options, pushAcceptedSchema);
+}
+
+export function unsubscribeFromPush(
+  csrfToken: string,
+  endpoint: string,
+  requestId: string = crypto.randomUUID(),
+  options?: ApiRequestOptions,
+): Promise<PushAccepted> {
+  return mutate<PushAccepted>("/api/v1/push/unsubscribe", csrfToken, {
+    requestId,
+    endpoint,
+  }, options, pushAcceptedSchema);
 }

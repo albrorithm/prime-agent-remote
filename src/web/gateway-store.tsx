@@ -19,6 +19,7 @@ import type {
   ServerFrame,
   StreamCursor,
   TranscriptMessage,
+  WebPushAvailability,
   MutationAccepted,
   SlashCommandCatalog,
   SlashCommandResult,
@@ -27,6 +28,7 @@ import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../pro
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
 import { useAppBadge } from "./hooks/useAppBadge";
+import { revokePushLocally } from "./push";
 import type { PreparedImage } from "./image-attachments";
 
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
@@ -104,6 +106,8 @@ interface State {
   connection: ConnectionPhase;
   csrfToken: string;
   backend: "demo" | "prime" | null;
+  /** Whether this gateway can push at all. Null until the first bootstrap. */
+  push: WebPushAvailability | null;
   catalog: CatalogSnapshot;
   snapshots: Record<string, AgentSnapshot>;
   // Agent ids whose stream was explicitly declared gone (a "stream_gone" detach).
@@ -163,6 +167,7 @@ const initialState: State = {
   connection: "checking",
   csrfToken: "",
   backend: null,
+  push: null,
   catalog: emptyCatalog,
   snapshots: {},
   goneAgentIds: new Set(),
@@ -216,6 +221,7 @@ function reducer(state: State, action: Action): State {
         connection: "connecting",
         csrfToken: action.value.csrfToken,
         backend: action.value.backend,
+        push: action.value.push,
         catalog,
         selectedAgentId: requested
           ?? (state.selectedAgentId
@@ -997,6 +1003,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    // Before the request, not after: the gateway drops its records when the
+    // session dies, and the browser must stop holding a wake capability even
+    // if the network call fails. An expiry deliberately does neither.
+    await revokePushLocally().catch(() => {});
     try {
       await api.signOut(stateRef.current.csrfToken);
     } catch (error) {

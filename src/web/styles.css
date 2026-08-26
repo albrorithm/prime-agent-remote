@@ -838,6 +838,9 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 .settings-danger { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--tone-danger-soft); border-radius: 11px; color: var(--tone-danger-text); background: transparent; font-size: .8125rem; font-weight: 650; }
 .settings-danger:hover { background: color-mix(in srgb, var(--tone-danger) 12%, transparent); }
 .settings-sign-out { margin-top: 5px; }
+/* Notifications states have no control to sit opposite, so the copy runs full width. */
+.settings-status { margin: 0; font-size: .8125rem; font-weight: 620; }
+.settings-error { color: var(--tone-danger-text); }
 
 /* codeWrap setting: SyntaxHighlight stamps data-wrap so blocks soft-wrap instead of scrolling. */
 .code-block code[data-wrap] { white-space: pre-wrap; overflow-wrap: anywhere; }
