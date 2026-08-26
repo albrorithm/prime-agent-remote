@@ -1,14 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, SlidersHorizontal, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 import { agentStatus } from "./agent-status";
 import { buildVisibleAgents } from "./agent-tree-utils";
+import { hasSessionActions } from "./SessionActions";
 
 interface Props {
   agents: AgentSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAbort?: (id: string) => Promise<void>;
+  onManage?: (id: string) => void;
   drawerOpen?: boolean;
 }
 
@@ -36,7 +38,7 @@ function StateIcon({ agent }: { agent: AgentSummary }) {
   return <span className="agent-state-dot" aria-hidden="true" />;
 }
 
-export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }: Props) {
+export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, drawerOpen }: Props) {
   const roots = agents.filter((agent) => agent.parentId === null).map((agent) => agent.id);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(agents.map((item) => item.id)));
   const [focusId, setFocusId] = useState<string | null>(selectedId ?? roots[0] ?? null);
@@ -230,6 +232,19 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, drawerOpen }:
                 }}
               >
                 <Square aria-hidden="true" />
+              </button>
+            )}
+            {onManage && hasSessionActions(agent) && (
+              <button
+                className="row-manage"
+                aria-label={`Manage ${agent.name}`}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onManage(agent.id);
+                }}
+              >
+                <SlidersHorizontal aria-hidden="true" />
               </button>
             )}
           </div>

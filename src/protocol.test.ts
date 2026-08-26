@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  sessionNameSchema,
   agentSnapshotSchema,
   attentionAgentCount,
   cellOutputSchema,
@@ -197,5 +198,20 @@ describe("attentionAgentCount", () => {
 
   it("is empty for an empty catalog", () => {
     expect(attentionAgentCount([])).toBe(0);
+  });
+});
+
+describe("sessionNameSchema", () => {
+  it("accepts a trimmed single-line label", () => {
+    expect(sessionNameSchema.parse("  Mobile session  ")).toBe("Mobile session");
+    expect(sessionNameSchema.parse("x".repeat(200))).toHaveLength(200);
+  });
+
+  it("refuses anything that is not a label", () => {
+    // Empty or whitespace-only, over the bound, and every line break form: a
+    // name lands in a list row and in the daemon's own session title.
+    for (const value of ["", "   ", "x".repeat(201), "two\nlines", "carriage\rreturn", "line\u2028sep", "para\u2029sep", "null\u0000byte"]) {
+      expect(sessionNameSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
+    }
   });
 });

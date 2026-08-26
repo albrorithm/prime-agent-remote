@@ -230,6 +230,21 @@ export function abortAgent(
   }, options, mutationAcceptedSchema);
 }
 
+export function renameAgent(
+  agentId: string,
+  csrfToken: string,
+  expectedRevision: number,
+  name: string,
+  requestId: string = crypto.randomUUID(),
+  options?: ApiRequestOptions,
+) {
+  return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/rename`, csrfToken, {
+    requestId,
+    expectedRevision,
+    name,
+  }, options, mutationAcceptedSchema);
+}
+
 export function respondToAttention(
   attentionId: string,
   csrfToken: string,

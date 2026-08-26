@@ -48,6 +48,13 @@ export interface AbortInput {
   expectedRevision: number;
 }
 
+export interface RenameInput {
+  agentId: string;
+  requestId: string;
+  expectedRevision: number;
+  name: string;
+}
+
 export interface CreateSessionInput {
   requestId: string;
   cwd: string;
@@ -266,6 +273,12 @@ export interface AgentBackend {
   /** Full (bounded) sections of a projected python cell, or null when unknown. */
   cellOutput(id: string): CellOutput | null;
   abort(input: AbortInput): Promise<MutationAccepted>;
+  /**
+   * Retitle one session. Named and schema-validated rather than a daemon
+   * command passthrough: the backend picks the verb from the agent's own
+   * lifecycle, so the browser never gets to say which one runs.
+   */
+  rename(input: RenameInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
   listDirectories(path?: string): Promise<DirectoryListing>;
   createSession(input: CreateSessionInput): Promise<SessionCreated>;

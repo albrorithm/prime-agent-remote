@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, signOut } from "./api";
+import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -220,5 +220,38 @@ describe("sign out", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(signOut("stale")).rejects.toThrow("Origin or CSRF validation failed");
+  });
+});
+
+describe("renameAgent", () => {
+  it("posts the name to the agent's own rename route with the CSRF header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 5,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(renameAgent("agent/1", "csrf", 4, "New name", requestId))
+      .resolves.toEqual({ accepted: true, requestId, revision: 5 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The id is a path segment, so it is encoded rather than interpolated raw.
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent%2F1/rename");
+    const init = fetchMock.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("same-origin");
+    expect(init.headers["X-CSRF-Token"]).toBe("csrf");
+    expect(JSON.parse(init.body as string)).toEqual({ requestId, expectedRevision: 4, name: "New name" });
+  });
+
+  it("rejects a refused rename rather than resolving", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      type: "about:blank",
+      title: "Action is not allowed",
+      status: 403,
+    }), { status: 403, headers: { "Content-Type": "application/problem+json" } })));
+
+    await expect(renameAgent("agent-1", "csrf", 4, "New name", requestId)).rejects.toMatchObject({ status: 403 });
   });
 });

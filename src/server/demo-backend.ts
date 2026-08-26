@@ -30,6 +30,7 @@ import {
   type AgentBackend,
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
+  type RenameInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -59,7 +60,7 @@ const fullCapabilities: AgentCapabilities = {
   send: true,
   abort: true,
   resume: false,
-  rename: false,
+  rename: true,
   stop: false,
   deactivate: false,
   delete: false,
@@ -981,6 +982,24 @@ export class DemoBackend implements AgentBackend {
       this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_updated", payload: streaming }, snapshot);
     }
     this.markAgent(input.agentId, "idle", null);
+    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async rename(input: RenameInput): Promise<MutationAccepted> {
+    const snapshot = this.requiredSnapshot(input.agentId);
+    const summary = this.requiredSummary(input.agentId);
+    if (!summary.capabilities.rename) throw new BackendCapabilityError("This agent cannot be renamed");
+    if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+    // Deliberately not run through `uniqueSessionName`: creation invents a name
+    // and may disambiguate it, but a rename is a name the user typed, and
+    // silently appending a number to it is a worse answer than two rows that
+    // share a label.
+    summary.name = input.name;
+    summary.updatedAt = new Date().toISOString();
+    snapshot.revision += 1;
+    this.catalogState.revision += 1;
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 

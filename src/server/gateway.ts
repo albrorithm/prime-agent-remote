@@ -16,6 +16,7 @@ import {
   PROTOCOL_VERSION,
   pushSubscribeRequestSchema,
   pushUnsubscribeRequestSchema,
+  renameAgentRequestSchema,
   sendMessageRequestSchema,
   type ProblemDetails,
   type PushAccepted,
@@ -391,6 +392,21 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         parsed.data.requestId,
         mutationBinding(`abort:${agentId}`, parsed.data),
         () => backend.abort({ agentId, ...parsed.data }),
+      );
+      json(res, 202, result);
+      return true;
+    }
+
+    const renameMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/rename$/);
+    if (req.method === "POST" && renameMatch) {
+      const agentId = decodeSegment(renameMatch[1]);
+      const parsed = renameAgentRequestSchema.safeParse(await readJson(req));
+      if (!agentId || !parsed.success) { problem(res, 400, "Invalid rename request"); return true; }
+      const result = await deduplicated(
+        session,
+        parsed.data.requestId,
+        mutationBinding(`rename:${agentId}`, parsed.data),
+        () => backend.rename({ agentId, ...parsed.data }),
       );
       json(res, 202, result);
       return true;

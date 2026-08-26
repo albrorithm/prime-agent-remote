@@ -4,6 +4,7 @@ import { useGateway } from "../gateway-store";
 import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
 import { AgentTree } from "./AgentTree";
 import { NewSessionPanel } from "./NewSessionPanel";
+import { SessionActions } from "./SessionActions";
 import { SettingsPanel } from "./SettingsPanel";
 
 interface AgentsPanelProps {
@@ -18,12 +19,25 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [manageId, setManageId] = useState<string | null>(null);
+  // Resolved from the catalog every render rather than held as a copy, so the
+  // view reflects a rename (or a session going away) as it happens.
+  const managed = catalog.agents.find((agent) => agent.id === manageId) ?? null;
   // Settings is a detour, not work in progress, so closing the drawer should
   // leave it. `creating` deliberately survives: it holds a chosen directory and
   // a typed name that would be destructive to discard behind a swipe.
   useEffect(() => {
     if (!visible) setSettingsOpen(false);
   }, [visible]);
+  // Same reasoning for session actions, plus one more: it names one session,
+  // and leaving it open would reopen it against whatever is selected later.
+  useEffect(() => {
+    if (!visible) setManageId(null);
+  }, [visible]);
+  // A session can leave the catalog while its actions are open.
+  useEffect(() => {
+    if (manageId && !managed) setManageId(null);
+  }, [manageId, managed]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return catalog.agents;
@@ -52,7 +66,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
 
   return (
     <section className="panel agents-panel" aria-label="Sessions">
-      {!creating && !settingsOpen && (
+      {!creating && !settingsOpen && !managed && (
         <header className="drawer-header">
           <div className="drawer-title">
             <img src="/prime-mark.svg" alt="" />
@@ -69,6 +83,8 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
       )}
       {settingsOpen ? (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
+      ) : managed ? (
+        <SessionActions agent={managed} onClose={() => setManageId(null)} />
       ) : creating ? (
         <NewSessionPanel
           onClose={() => setCreating(false)}
@@ -90,7 +106,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           </label>
           <div className="panel-scroll">
             {filtered.length ? (
-              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} onAbort={abort} drawerOpen={visible} />
+              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} onAbort={abort} onManage={setManageId} drawerOpen={visible} />
             ) : (
               <p className="empty-state">No sessions match that search.</p>
             )}

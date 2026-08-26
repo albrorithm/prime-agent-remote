@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
 import type { AttentionRequest, CellOutput } from "../protocol.js";
-import type { AttentionListener } from "./backend.js";
+import { BackendCapabilityError, type AttentionListener } from "./backend.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
@@ -527,6 +527,57 @@ describe("gateway API routes", () => {
       method: "POST",
       headers: mutationHeaders(client),
       body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1 }),
+    });
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("renames an agent, rejects a malformed name, and maps a refused capability to 403", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.rename)?.id;
+    if (!agentId) throw new Error("No renameable demo agent");
+
+    const revision = await agentRevision(t, client, agentId);
+    const renamed = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/rename`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: revision, name: "Renamed by the gateway test" }),
+    });
+    expect(renamed.status).toBe(202);
+    const after = (await bootstrap(t, client)).catalog.agents.find((agent) => agent.id === agentId);
+    expect(after?.name).toBe("Renamed by the gateway test");
+
+    // A name is a label in a list, so the schema refuses one that is not.
+    for (const name of ["", "   ", "two\nlines", "x".repeat(201)]) {
+      const rejected = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/rename`, {
+        method: "POST",
+        headers: mutationHeaders(client),
+        body: JSON.stringify({ requestId: randomUUID(), expectedRevision: await agentRevision(t, client, agentId), name }),
+      });
+      expect(rejected.status, JSON.stringify(name)).toBe(400);
+    }
+  });
+
+  it("answers a backend that refuses to rename with 403 rather than 500", async () => {
+    // The UI decides what to offer from the capability bits, but the gateway
+    // must still turn a backend's refusal into a refusal — not an error.
+    class RefusingBackend extends DemoBackend {
+      override async rename(): Promise<never> {
+        throw new BackendCapabilityError("This agent cannot be renamed");
+      }
+    }
+    const t = await startGateway({ backend: new RefusingBackend() });
+    const client = await pairClient(t);
+    const agentId = (await bootstrap(t, client)).catalog.agents[0]!.id;
+    const forbidden = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/rename`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, agentId),
+        name: "Nope",
+      }),
     });
     expect(forbidden.status).toBe(403);
   });

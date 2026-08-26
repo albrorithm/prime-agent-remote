@@ -128,4 +128,25 @@ describe("AgentTree", () => {
     expect(screen.getByRole("treeitem", { name: /starting.*Starting/i })).toBeInTheDocument();
   });
 
+
+  it("offers a manage entry point only for sessions the backend says are manageable", async () => {
+    const onManage = vi.fn();
+    const manageable = { ...makeAgent("root", null, 0), capabilities: { ...makeAgent("root", null, 0).capabilities, rename: true } };
+    render(<AgentTree agents={[manageable, makeAgent("child", "root", 1)]} selectedId="root" onSelect={vi.fn()} onManage={onManage} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(2));
+
+    // "child" advertises no management capability, so it gets no button.
+    expect(screen.queryByRole("button", { name: "Manage child" })).toBeNull();
+
+    // Managing must not also open the session the row points at.
+    fireEvent.click(screen.getByRole("button", { name: "Manage root" }));
+    expect(onManage).toHaveBeenCalledWith("root");
+  });
+
+  it("shows no manage entry point at all without a handler", async () => {
+    const manageable = { ...makeAgent("root", null, 0), capabilities: { ...makeAgent("root", null, 0).capabilities, rename: true } };
+    render(<AgentTree agents={[manageable]} selectedId="root" onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Manage root" })).toBeNull();
+  });
 });

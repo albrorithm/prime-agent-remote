@@ -280,6 +280,19 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .row-stop:hover { border-color: var(--border-emphasis); color: var(--text); background: var(--panel-raised-4); }
 .row-stop:disabled { cursor: wait; opacity: .45; }
 .row-stop svg { width: 11px; height: 11px; fill: currentColor; }
+/* Shares .row-stop's geometry so the two never disagree about row height, but
+   stays outline-only: this one opens a view, it does not act. */
+.row-manage { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 50%; color: var(--muted); background: transparent; }
+.row-manage:hover { border-color: var(--border-emphasis); color: var(--text); background: var(--panel-raised-3); }
+.row-manage svg { width: 13px; height: 13px; }
+
+.session-actions-scroll { display: grid; align-content: start; gap: 14px; padding: 12px; }
+.session-action-group { display: grid; gap: 8px; padding: 13px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel-soft); }
+.session-action-group h3 { margin: 0; font-size: .8125rem; font-weight: 700; letter-spacing: -.01em; }
+.session-action-note { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.45; }
+.session-action-group input { width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg); }
+.session-action-group input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
+.session-action-group .primary-button:disabled { opacity: .45; }
 
 .transcript-panel { position: relative; background: var(--bg); }
 /* `flex: 0 0 auto` with a min-height, never `flex: 0 0 <height>`: the basis

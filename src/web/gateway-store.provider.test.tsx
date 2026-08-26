@@ -19,6 +19,7 @@ const apiMock = vi.hoisted(() => {
     loadSlashCommandCatalog: vi.fn(),
     executeSlashCommand: vi.fn(),
     abortAgent: vi.fn(),
+    renameAgent: vi.fn(),
     respondToAttention: vi.fn(),
     signOut: vi.fn(),
     unauthorized: null as null | (() => void),
@@ -39,6 +40,7 @@ vi.mock("./api", () => ({
   loadSlashCommandCatalog: apiMock.loadSlashCommandCatalog,
   executeSlashCommand: apiMock.executeSlashCommand,
   abortAgent: apiMock.abortAgent,
+  renameAgent: apiMock.renameAgent,
   respondToAttention: apiMock.respondToAttention,
   signOut: apiMock.signOut,
   humanizeError: (error: unknown, fallback: string) =>
@@ -168,6 +170,7 @@ beforeEach(() => {
   apiMock.loadSlashCommandCatalog.mockReset();
   apiMock.executeSlashCommand.mockReset();
   apiMock.abortAgent.mockReset();
+  apiMock.renameAgent.mockReset();
   apiMock.respondToAttention.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
   pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
@@ -637,6 +640,39 @@ describe("GatewayProvider recovery and state ownership", () => {
 
     await expect(stopping).resolves.toMatchObject({ name: "AbortError" });
     expect(apiMock.abortAgent).not.toHaveBeenCalled();
+  });
+
+  it("loads a snapshot for an unopened session before renaming it", async () => {
+    // Renaming is reachable from the drawer for a session the user has never
+    // opened, so the revision the mutation must echo is not in the store yet.
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id, id === "agent-b" ? 7 : 1)));
+    apiMock.renameAgent.mockResolvedValue({ accepted: true, requestId: "request", revision: 8 });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(() => result.current.rename("agent-b", "Renamed from the drawer"));
+
+    expect(apiMock.renameAgent).toHaveBeenCalledWith("agent-b", "csrf", 7, "Renamed from the drawer");
+    expect(result.current.snapshots["agent-b"].revision).toBe(8);
+    // Renaming another session must not move the user off the one they are in.
+    expect(result.current.selectedAgentId).toBe("agent-a");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("surfaces a refused rename and leaves the revision alone", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a", 3));
+    apiMock.renameAgent.mockRejectedValue(new apiMock.ApiError(403, "Action is not allowed"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => {
+      await expect(result.current.rename("agent-a", "Nope")).rejects.toMatchObject({ status: 403 });
+    });
+
+    expect(result.current.error).toBe("Action is not allowed");
+    expect(result.current.snapshots["agent-a"].revision).toBe(3);
   });
 
   it("applies an attention response to its owning agent after selection changes", async () => {

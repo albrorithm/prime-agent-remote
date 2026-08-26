@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentSnapshotSchema, catalogSnapshotSchema } from "../protocol.js";
 import type { AgentSnapshot, ServerFrame } from "../protocol.js";
-import { BackendCapabilityError, BackendConflictError } from "./backend.js";
+import { BackendCapabilityError, BackendConflictError, BackendNotFoundError } from "./backend.js";
 import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
@@ -240,6 +240,50 @@ describe("DemoBackend", () => {
           { id: "confirm", label: "Confirm", tone: "safe" },
         ],
       });
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
+  it("renames a live and an inactive session, and publishes both", async () => {
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const catalogFrames: unknown[] = [];
+      hub.attach("catalog", null, (frame) => catalogFrames.push(frame));
+
+      for (const agentId of ["root-mobile", "root-inactive"]) {
+        const snapshot = await backend.agentSnapshot(agentId);
+        const result = await backend.rename({
+          agentId,
+          requestId: crypto.randomUUID(),
+          expectedRevision: snapshot!.revision,
+          name: `Renamed ${agentId}`,
+        });
+        expect(result.revision).toBe(snapshot!.revision + 1);
+        expect(backend.catalog().agents.find((agent) => agent.id === agentId)?.name).toBe(`Renamed ${agentId}`);
+      }
+
+      // An inactive session can be renamed without being woken.
+      expect(backend.catalog().agents.find((agent) => agent.id === "root-inactive")?.lifecycle).toBe("inactive");
+      expect(catalogFrames.length).toBeGreaterThan(0);
+
+      const stale = await backend.agentSnapshot("root-mobile");
+      await expect(backend.rename({
+        agentId: "root-mobile",
+        requestId: crypto.randomUUID(),
+        expectedRevision: stale!.revision - 1,
+        name: "Should conflict",
+      })).rejects.toBeInstanceOf(BackendConflictError);
+
+      await expect(backend.rename({
+        agentId: "no-such-agent",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        name: "Nowhere",
+      })).rejects.toBeInstanceOf(BackendNotFoundError);
     } finally {
       await backend.close();
       hub.close();

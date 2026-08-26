@@ -272,6 +272,45 @@ try {
   });
   if (unknownCommand.status !== 403) throw new Error(`Expected unknown command rejection, got ${unknownCommand.status}`);
 
+  // Rename: the happy path, a malformed name, and a session the user never
+  // opened — the drawer can reach all three.
+  const renameTarget = bootstrap.catalog.agents.find((agent) => agent.capabilities.rename)?.id;
+  if (!renameTarget) throw new Error("No renameable demo agent found");
+  const renameSnapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(renameTarget)}/snapshot`, {
+    headers: { Origin: origin, Cookie: cookie },
+  }));
+  const renamePath = `${origin}/api/v1/agents/${encodeURIComponent(renameTarget)}/rename`;
+  const renamed = await fetch(renamePath, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({
+      requestId: crypto.randomUUID(),
+      expectedRevision: renameSnapshot.revision,
+      name: "Renamed by the smoke test",
+    }),
+  });
+  if (renamed.status !== 202) throw new Error(`Rename failed: ${renamed.status} ${await renamed.text()}`);
+  const renamedBootstrap = await json(await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin, Cookie: cookie } }));
+  if (renamedBootstrap.catalog.agents.find((agent) => agent.id === renameTarget)?.name !== "Renamed by the smoke test") {
+    throw new Error("Rename did not reach the catalog");
+  }
+  const renameWithoutCsrf = await fetch(renamePath, {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: 1, name: "No CSRF" }),
+  });
+  if (renameWithoutCsrf.status !== 403) throw new Error(`Expected rename CSRF rejection, got ${renameWithoutCsrf.status}`);
+  for (const name of ["", "   ", "two\nlines", "x".repeat(201)]) {
+    const rejected = await fetch(renamePath, {
+      method: "POST",
+      headers: commandHeaders,
+      body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: 1, name }),
+    });
+    if (rejected.status !== 400) {
+      throw new Error(`Expected rename schema rejection for ${JSON.stringify(name)}, got ${rejected.status}`);
+    }
+  }
+
   const pushSubscription = {
     endpoint: "https://push.example.invalid/smoke-endpoint",
     keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },

@@ -887,11 +887,28 @@ export interface SessionCreated {
   agentId: string;
 }
 
+export const MAX_SESSION_NAME_CHARS = 200;
+
+/**
+ * A session name is a label in a list, not a message: one line, no control
+ * characters, and bounded at the same 200 the `/name` adapter already enforces
+ * further in. Shared by create and rename so the two cannot drift into
+ * accepting different names for the same field.
+ */
+export const sessionNameSchema = z.string().trim().min(1).max(MAX_SESSION_NAME_CHARS)
+  .refine((value) => !/[\u0000-\u001f\u007f\u2028\u2029]/u.test(value), "Session name must be a single line");
+
 export const createSessionRequestSchema = z.object({
   requestId: z.string().uuid(),
   cwd: z.string().min(1).max(1024),
-  name: z.string().trim().min(1).max(200).optional(),
+  name: sessionNameSchema.optional(),
 });
+
+export const renameAgentRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+  name: sessionNameSchema,
+}).strict();
 
 export const problemDetailsSchema = z.object({
   type: z.string(),

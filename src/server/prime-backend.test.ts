@@ -30,6 +30,8 @@ interface FixtureState {
   aborts: number;
   responses: unknown[];
   creates: Array<Record<string, unknown>>;
+  savedRenames: Array<Record<string, unknown>>;
+  savedRenameError?: string;
   listener: ((event: unknown) => void) | null;
   createError?: string;
   listError: boolean;
@@ -135,6 +137,7 @@ const fixture: FixtureState = {
   aborts: 0,
   responses: [],
   creates: [],
+  savedRenames: [],
   listener: null,
   listError: false,
   connectError: false,
@@ -181,6 +184,14 @@ export class DaemonClient {
         firstMessage: "(no messages)",
       });
       return { success: true, data: { activeSessionId, sessionId } };
+    }
+    if (command.type === "rename_saved_session") {
+      state.savedRenames.push(command);
+      if (state.savedRenameError) return { success: false, error: state.savedRenameError };
+      const saved = state.sessions.find((session) => session.sessionFile === command.sessionPath);
+      if (!saved) return { success: false, error: "saved session missing" };
+      saved.sessionName = command.name;
+      return { success: true, data: {} };
     }
     if (command.type !== "list" || command.all !== true) return { success: false, error: "unexpected command" };
     state.listCalls += 1;
@@ -230,6 +241,12 @@ const connection = {
   async setSessionName(name) {
     state.adapterCalls.push({ method: "setSessionName", name });
     state.connectionState.sessionName = name;
+    // The real daemon renames the session itself, so the next \`list\` reports
+    // the new name. Without this the fixture would let a rename look applied
+    // to the adapter while the catalog kept the old title.
+    const attached = state.attachOptions && state.attachOptions.activeSessionId;
+    const session = state.sessions.find((item) => item.activeSessionId === attached);
+    if (session) session.sessionName = name;
   },
   async getSessionStats() { return structuredClone(state.sessionStats); },
   async getHeartbeat() { return state.heartbeat ? structuredClone(state.heartbeat) : undefined; },
@@ -279,7 +296,15 @@ function moduleSpecifier(): string {
   return `data:text/javascript;base64,${Buffer.from(moduleSource).toString("base64")}#${crypto.randomUUID()}`;
 }
 
+// The fixture daemon now mutates session rows the way a real one does — a
+// rename changes what the next `list` reports — so the rows are restored
+// between tests instead of being handed on half-renamed.
+const pristineSessions = structuredClone(fixture.sessions);
+const pristineConnectionState = structuredClone(fixture.connectionState);
+
 afterEach(() => {
+  fixture.sessions = structuredClone(pristineSessions);
+  fixture.connectionState = structuredClone(pristineConnectionState);
   delete (globalThis as typeof globalThis & { __primeWebFixture?: FixtureState }).__primeWebFixture;
 });
 
@@ -988,6 +1013,78 @@ describe("PrimeBackend", () => {
       expect(fixture.creates).toHaveLength(1);
       expect(fixture.prompts).toHaveLength(1);
     } finally {
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("renames a live session through the adapter and a saved one through its file", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = originalSessions.map((session) => ({ ...session }));
+    fixture.adapterCalls = [];
+    fixture.savedRenames = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      const saved = backend.catalog().agents.find((agent) => agent.lifecycle === "inactive");
+      // Both are renameable, by different routes; neither bit is probed.
+      expect(live?.capabilities.rename).toBe(true);
+      expect(saved?.capabilities.rename).toBe(true);
+
+      // The first read attaches the connection, which advances the revision;
+      // the second is the one a client would actually be holding.
+      await backend.agentSnapshot(live!.id);
+      const liveSnapshot = await backend.agentSnapshot(live!.id);
+      const renamedLive = await backend.rename({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: liveSnapshot!.revision,
+        name: "Renamed live session",
+      });
+      expect(fixture.adapterCalls).toContainEqual({ method: "setSessionName", name: "Renamed live session" });
+      expect(fixture.savedRenames).toHaveLength(0);
+      expect(renamedLive.revision).toBeGreaterThan(liveSnapshot!.revision);
+      expect(backend.catalog().agents.find((agent) => agent.id === live!.id)?.name).toBe("Renamed live session");
+
+      // A stale revision is a conflict, not a second rename.
+      await expect(backend.rename({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: liveSnapshot!.revision,
+        name: "Should not land",
+      })).rejects.toBeInstanceOf(BackendConflictError);
+      expect(fixture.adapterCalls.filter((call) => call.method === "setSessionName")).toHaveLength(1);
+
+      const savedSnapshot = await backend.agentSnapshot(saved!.id);
+      const renamedSaved = await backend.rename({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: savedSnapshot!.revision,
+        name: "Renamed saved session",
+      });
+      // The path is the daemon's own, taken from its listing — never the caller's.
+      expect(fixture.savedRenames).toEqual([{
+        type: "rename_saved_session",
+        sessionPath: "/fixture/saved-session.jsonl",
+        name: "Renamed saved session",
+      }]);
+      expect(renamedSaved.revision).toBeGreaterThan(savedSnapshot!.revision);
+      expect(backend.catalog().agents.find((agent) => agent.id === saved!.id)?.name).toBe("Renamed saved session");
+
+      // A daemon that refuses must not read as success.
+      fixture.savedRenameError = "private rename failure";
+      await expect(backend.rename({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: renamedSaved.revision,
+        name: "Never applied",
+      })).rejects.toThrow("Prime session rename failed");
+    } finally {
+      delete fixture.savedRenameError;
       fixture.sessions = originalSessions;
       hub.close();
       await backend.close();

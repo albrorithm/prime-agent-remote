@@ -51,6 +51,7 @@ import {
   type AttentionListener,
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
+  type RenameInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -1840,6 +1841,56 @@ export class PrimeBackend implements AgentBackend {
     return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
   }
 
+  async rename(input: RenameInput): Promise<MutationAccepted> {
+    const summary = this.rawSummaries.get(input.agentId);
+    if (!summary) throw new BackendNotFoundError("Agent not found");
+    return this.withCommandLock(input.agentId, async () => {
+      const snapshot = this.requiredSnapshot(input.agentId);
+      if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+
+      if (summary.activeSessionId) {
+        // A live session is renamed through the same adapter the `/name`
+        // command already uses, so the daemon sees one route for one change.
+        const record = await this.ensureConnection(input.agentId, summary.activeSessionId);
+        const setSessionName = record.connection.setSessionName;
+        if (typeof setSessionName !== "function") throw new BackendCapabilityError("This agent cannot be renamed");
+        try {
+          await setSessionName.call(record.connection, input.name);
+        } catch {
+          throw new Error("Prime session rename failed");
+        }
+      } else {
+        // A saved session has no connection to carry the change, so the
+        // daemon renames the file itself. `sessionPath` is the bounded path
+        // this backend already read from the daemon's own listing — never a
+        // path the browser chose.
+        if (typeof summary.sessionFile !== "string" || !summary.sessionFile) {
+          throw new BackendCapabilityError("This agent cannot be renamed");
+        }
+        let response: PrimeResponse;
+        try {
+          response = await this.client.request({
+            type: "rename_saved_session",
+            sessionPath: summary.sessionFile,
+            name: input.name,
+          });
+        } catch {
+          throw new Error("Prime session rename failed");
+        }
+        if (!response.success) throw new Error("Prime session rename failed");
+      }
+
+      // The new name reaches the drawer only through a catalog refresh: the
+      // name lives on the summary, not in the transcript.
+      await this.refreshCatalog(true);
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: this.advanceSnapshotRevision(input.agentId),
+      };
+    });
+  }
+
   async resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted> {
     const pending = this.pendingExtensions.get(input.attentionId);
     if (!pending) throw new BackendNotFoundError("Attention request not found");
@@ -2102,6 +2153,12 @@ export class PrimeBackend implements AgentBackend {
         send: Boolean(summary.activeSessionId),
         abort: Boolean(summary.activeSessionId && working),
         resume: !summary.activeSessionId && typeof summary.sessionFile === "string" && Boolean(summary.sessionFile),
+        // Structural, not probed: capabilities are stamped from the daemon's
+        // `list` output with no connection in hand. A live session renames
+        // through the adapter, a saved one through its file; whether this
+        // build's adapter actually exposes the setter is re-checked at execute
+        // time, where a missing one is a refusal rather than a broken button.
+        rename: Boolean(summary.activeSessionId) || Boolean(summary.sessionFile),
         respond: Boolean(summary.activeSessionId),
         images: summary.model?.input?.includes("image") === true,
       },

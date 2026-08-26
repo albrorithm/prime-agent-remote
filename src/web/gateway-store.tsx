@@ -347,6 +347,7 @@ interface GatewayContextValue extends State {
   loadSlashCommands: (agentId: string) => Promise<SlashCommandCatalog>;
   runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
   abort: (agentId?: string) => Promise<void>;
+  rename: (agentId: string, name: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   signOut: () => Promise<void>;
   reconnect: () => void;
@@ -955,28 +956,34 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     [runMutation, showError],
   );
 
+  // Every mutation reachable from the drawer can name a session the user has
+  // never opened, and so has no snapshot — and therefore no revision to echo —
+  // in the store yet. Fetching one is the first step of all of them.
+  const loadedRevision = useCallback(async (agentId: string, generation: number): Promise<number> => {
+    const existing = stateRef.current.snapshots[agentId];
+    if (existing) return existing.revision;
+    const loaded = await loadAgentHttp(agentId);
+    if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
+    dispatch({
+      type: "snapshot",
+      value: loaded.snapshot,
+      source: "http",
+      allowEqualRevision: loaded.allowEqualRevision,
+    });
+    return loaded.snapshot.revision;
+  }, [loadAgentHttp]);
+
   const abort = useCallback(async (agentId?: string) => {
     const current = stateRef.current;
     const generation = sessionGeneration.current;
     const id = agentId ?? current.selectedAgentId;
     if (!id) throw new Error("No agent selected");
     try {
-      let snapshot = current.snapshots[id];
-      if (!snapshot) {
-        const loaded = await loadAgentHttp(id);
-        if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
-        snapshot = loaded.snapshot;
-        dispatch({
-          type: "snapshot",
-          value: snapshot,
-          source: "http",
-          allowEqualRevision: loaded.allowEqualRevision,
-        });
-      }
+      const revision = await loadedRevision(id, generation);
       const result = await runMutation(
         id,
-        (revision) => api.abortAgent(id, current.csrfToken, revision),
-        snapshot.revision,
+        (next) => api.abortAgent(id, current.csrfToken, next),
+        revision,
       );
       if (generation !== sessionGeneration.current) return;
       dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
@@ -987,7 +994,28 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       }
       throw error;
     }
-  }, [loadAgentHttp, runMutation, showError]);
+  }, [loadedRevision, runMutation, showError]);
+
+  const rename = useCallback(async (agentId: string, name: string) => {
+    const current = stateRef.current;
+    const generation = sessionGeneration.current;
+    try {
+      const revision = await loadedRevision(agentId, generation);
+      const result = await runMutation(
+        agentId,
+        (next) => api.renameAgent(agentId, current.csrfToken, next, name),
+        revision,
+      );
+      if (generation !== sessionGeneration.current) return;
+      dispatch({ type: "agent_revision", agentId, revision: result.revision });
+      showError(null);
+    } catch (error) {
+      if (generation === sessionGeneration.current) {
+        showError(humanizeError(error, "Rename failed"));
+      }
+      throw error;
+    }
+  }, [loadedRevision, runMutation, showError]);
 
   const respond = useCallback(
     async (attentionId: string, revision: number, optionId: string) => {
@@ -1063,11 +1091,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       loadSlashCommands,
       runSlashCommand,
       abort,
+      rename,
       respond,
       signOut,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, signOut, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, respond, signOut, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }
