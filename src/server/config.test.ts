@@ -14,12 +14,22 @@ const vapid = {
 };
 
 describe("loadConfig", () => {
-  it("requires an explicit origin allowlist and strong configured token in production", () => {
+  it("requires an explicit origin allowlist in production", () => {
     expect(() => loadConfig({ NODE_ENV: "production" })).toThrow("PRIME_WEB_ALLOWED_ORIGINS");
-    expect(() => loadConfig({
+  });
+
+  it("lets production run without a configured token, which is then minted and persisted", () => {
+    const value = loadConfig({
       NODE_ENV: "production",
       PRIME_WEB_ALLOWED_ORIGINS: "https://agent.example.test",
-    })).toThrow("PRIME_WEB_PAIRING_TOKEN");
+    });
+    // The value here is a throwaway: index.ts replaces it with the persisted
+    // token. What matters is that startup no longer refuses.
+    expect(value.generatedPairingToken).toBe(true);
+    expect(value.pairingTokenPath).toContain("pairing-token");
+  });
+
+  it("still refuses a weak token that was configured on purpose", () => {
     expect(() => loadConfig({
       NODE_ENV: "production",
       PRIME_WEB_ALLOWED_ORIGINS: "https://agent.example.test",

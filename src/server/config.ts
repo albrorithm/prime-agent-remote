@@ -31,6 +31,9 @@ export interface GatewayConfig {
   sessionTtlMs: number;
   webPush?: WebPushConfig;
   webPushStorePath: string;
+  /** Where an unconfigured gateway keeps the token it minted for itself. */
+  pairingTokenPath: string;
+  deviceStorePath: string;
 }
 
 const MIN_PRODUCTION_PAIRING_TOKEN_CHARS = 32;
@@ -92,14 +95,14 @@ function parseWebPush(env: NodeJS.ProcessEnv): WebPushConfig | undefined {
  * session that authorized it — that is the entire point of push — so it cannot
  * live beside the in-memory sessions.
  */
-function webPushStorePath(env: NodeJS.ProcessEnv): string {
-  const configured = env.PRIME_WEB_PUSH_STORE?.trim();
+function configFilePath(env: NodeJS.ProcessEnv, variable: string, filename: string): string {
+  const configured = env[variable]?.trim();
   if (configured) {
-    if (!path.isAbsolute(configured)) throw new Error("PRIME_WEB_PUSH_STORE must be an absolute path");
+    if (!path.isAbsolute(configured)) throw new Error(`${variable} must be an absolute path`);
     return configured;
   }
   const configHome = env.XDG_CONFIG_HOME?.trim() || path.join(homedir(), ".config");
-  return path.join(configHome, "prime-agent-web", "push-subscriptions.json");
+  return path.join(configHome, "prime-agent-web", filename);
 }
 
 function parseBackend(value: string | undefined): GatewayConfig["backend"] {
@@ -115,13 +118,15 @@ export function loadConfig(env = process.env): GatewayConfig {
   if (production && !configuredOrigins) {
     throw new Error("PRIME_WEB_ALLOWED_ORIGINS is required in production");
   }
-  if (production && !configuredPairingToken) {
-    throw new Error("PRIME_WEB_PAIRING_TOKEN is required in production");
-  }
+  // Production no longer demands the variable. An unset token is now minted at
+  // 32 random bytes and persisted at mode 0600, which is stronger than a
+  // human-chosen one and keeps a long-lived secret out of the process
+  // environment, where any `ps` can read it. What production still refuses is
+  // a *weak* token, checked below.
   if (configuredPairingToken && configuredPairingToken.length > MAX_PAIRING_TOKEN_CHARS) {
     throw new Error(`PRIME_WEB_PAIRING_TOKEN must be at most ${MAX_PAIRING_TOKEN_CHARS} characters`);
   }
-  if (production && configuredPairingToken!.length < MIN_PRODUCTION_PAIRING_TOKEN_CHARS) {
+  if (production && configuredPairingToken && configuredPairingToken.length < MIN_PRODUCTION_PAIRING_TOKEN_CHARS) {
     throw new Error(`PRIME_WEB_PAIRING_TOKEN must be at least ${MIN_PRODUCTION_PAIRING_TOKEN_CHARS} characters in production`);
   }
 
@@ -152,6 +157,8 @@ export function loadConfig(env = process.env): GatewayConfig {
     daemonSocket: env.PRIME_AGENT_DAEMON_SOCKET?.trim() || undefined,
     sessionTtlMs: parseInteger("PRIME_WEB_SESSION_TTL_MS", env.PRIME_WEB_SESSION_TTL_MS, 12 * 60 * 60 * 1000, 100, 7 * 24 * 60 * 60 * 1000),
     webPush: parseWebPush(env),
-    webPushStorePath: webPushStorePath(env),
+    webPushStorePath: configFilePath(env, "PRIME_WEB_PUSH_STORE", "push-subscriptions.json"),
+    pairingTokenPath: configFilePath(env, "PRIME_WEB_PAIRING_TOKEN_FILE", "pairing-token"),
+    deviceStorePath: configFilePath(env, "PRIME_WEB_DEVICE_STORE", "devices.json"),
   };
 }

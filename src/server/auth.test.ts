@@ -16,6 +16,8 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     primeModule: "compatible-module",
     sessionTtlMs: 60_000,
     webPushStorePath: "/dev/null/push-subscriptions.json",
+    pairingTokenPath: "/dev/null/pairing-token",
+    deviceStorePath: "/dev/null/devices.json",
     ...overrides,
   };
 }

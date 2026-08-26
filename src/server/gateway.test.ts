@@ -32,6 +32,8 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     // startGateway always overrides this with a path inside the test's own
     // temp directory; the default only exists to satisfy the type.
     webPushStorePath: join(tmpdir(), "prime-gateway-test-unused-push-store.json"),
+    pairingTokenPath: join(tmpdir(), "prime-gateway-test-unused-pairing-token"),
+    deviceStorePath: join(tmpdir(), "prime-gateway-test-unused-devices.json"),
     ...overrides,
   };
 }
