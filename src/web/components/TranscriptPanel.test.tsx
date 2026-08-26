@@ -606,7 +606,9 @@ describe("turn grouping in the panel", () => {
     const group = list.querySelector(":scope > .turn-group")!;
     expect(group).not.toBeNull();
     expect(group.querySelector("details.turn-work")).not.toBeNull();
-    expect(screen.getByText("1 step")).toBeInTheDocument();
+    // The one work row is a bash tool call with no python duration, yet the turn
+    // spans 00:01 to 00:03 — the summary reports that wall clock, not 0.
+    expect(screen.getByText("1 step · 2m")).toBeInTheDocument();
 
     // The legacy row renders as a direct sibling, outside any group.
     const legacy = screen.getByText("Session resumed from an earlier save.").closest("article")!;
@@ -618,7 +620,9 @@ describe("turn grouping in the panel", () => {
     setState(turnMessages(), "Refactored the trimming helper end to end");
     render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
     expect(screen.getByText("Refactored the trimming helper end to end")).toBeInTheDocument();
-    expect(screen.getByText("1 step")).toBeInTheDocument();
+    // The one work row is a bash tool call with no python duration, yet the turn
+    // spans 00:01 to 00:03 — the summary reports that wall clock, not 0.
+    expect(screen.getByText("1 step · 2m")).toBeInTheDocument();
   });
 
   it("search mode renders a flat list and clearing the search restores grouping", async () => {

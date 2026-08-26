@@ -88,13 +88,34 @@ export function summarizeTurnWork(work: readonly TranscriptMessage[]): { steps: 
   return { steps: work.length, durationMs };
 }
 
+/**
+ * How long the turn actually took, first row to last.
+ *
+ * The summary used to show summarizeTurnWork's durationMs, which only ever
+ * added up python cell durations — so a turn that spent four minutes in tool
+ * calls, model latency and network waits announced itself as "689ms". Row
+ * timestamps are the only end-to-end clock the transcript carries. Returns 0
+ * when the span is unusable (single row, unparseable or backwards timestamps),
+ * and the caller then shows the step count alone rather than a wrong number.
+ */
+export function turnWallClockMs(rows: readonly TranscriptMessage[]): number {
+  if (rows.length < 2) return 0;
+  const start = Date.parse(rows[0].createdAt);
+  const end = Date.parse(rows[rows.length - 1].createdAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max(0, end - start);
+}
+
 export function formatWorkDuration(durationMs: number): string {
   if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
   const seconds = durationMs / 1000;
   if (seconds < 10) return `${Math.round(seconds * 10) / 10}s`;
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${Math.round(seconds % 60)}s`;
+  const remainder = Math.round(seconds % 60);
+  // Wall-clock spans land on whole minutes often enough that "2m 0s" would be
+  // the common case; drop the empty tail.
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
 }
 
 export interface TurnGroupProps {
@@ -118,7 +139,8 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   // user is watching. `turnsCollapsed` only decides where a turn lands once
   // it settles, and any explicit choice still wins over both.
   const open = userChoice ?? (settled ? !settings.turnsCollapsed : true);
-  const { steps, durationMs } = summarizeTurnWork(work);
+  const { steps } = summarizeTurnWork(work);
+  const durationMs = turnWallClockMs(rows);
   const stepsLabel = `${steps} step${steps === 1 ? "" : "s"}`;
   const countsLabel = durationMs > 0 ? `${stepsLabel} · ${formatWorkDuration(durationMs)}` : stepsLabel;
   const useRecap = settled && Boolean(recap);

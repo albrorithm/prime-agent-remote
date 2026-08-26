@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage, TranscriptPresentation } from "../../protocol";
 import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, useSettings, type Settings } from "../settings";
-import { formatWorkDuration, groupIntoTurns, splitTurn, TurnGroup, turnSettled } from "./TurnGroup";
+import { formatWorkDuration, groupIntoTurns, splitTurn, TurnGroup, turnSettled, turnWallClockMs } from "./TurnGroup";
 
 function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
@@ -48,6 +48,12 @@ function thinkingRow(id: string, turnId: string): TranscriptMessage {
 
 function answer(id: string, turnId: string, state: TranscriptMessage["state"] = "complete"): TranscriptMessage {
   return row(id, { turnId, state, text: `answer ${id}` });
+}
+
+/** Stamps a turn's rows with an increasing wall clock so the summary can show a span. */
+function spanning(rows: TranscriptMessage[], stepMs: number): TranscriptMessage[] {
+  const base = Date.parse("2026-01-01T00:00:00.000Z");
+  return rows.map((entry, index) => ({ ...entry, createdAt: new Date(base + index * stepMs).toISOString() }));
 }
 
 const renderPlainRow = (message: TranscriptMessage) => <div key={message.id} data-row={message.id}>{message.text}</div>;
@@ -142,6 +148,22 @@ describe("formatWorkDuration", () => {
     expect(formatWorkDuration(3100)).toBe("3.1s");
     expect(formatWorkDuration(48_000)).toBe("48s");
     expect(formatWorkDuration(96_000)).toBe("1m 36s");
+    expect(formatWorkDuration(120_000)).toBe("2m");
+  });
+});
+
+describe("turnWallClockMs", () => {
+  it("spans the first row to the last, not the python compute inside it", () => {
+    const rows = spanning([prompt("u1", "u1"), pythonRow("p1", "u1", "complete", 420), answer("a1", "u1")], 60_000);
+    expect(turnWallClockMs(rows)).toBe(120_000);
+  });
+
+  it("returns 0 for a span it cannot trust", () => {
+    expect(turnWallClockMs([])).toBe(0);
+    expect(turnWallClockMs([prompt("u1", "u1")])).toBe(0);
+    expect(turnWallClockMs([row("a", { createdAt: "not a date" }), row("b")])).toBe(0);
+    const backwards = [row("a", { createdAt: "2026-01-01T00:01:00.000Z" }), row("b", { createdAt: "2026-01-01T00:00:00.000Z" })];
+    expect(turnWallClockMs(backwards)).toBe(0);
   });
 });
 
@@ -151,7 +173,12 @@ describe("TurnGroup", () => {
   }
 
   function settledRows(turnId = "u1"): TranscriptMessage[] {
-    return [prompt("u1", turnId), thinkingRow("t1", turnId), pythonRow("p1", turnId, "complete", 420), answer("a1", turnId)];
+    // 30s between rows, so the 90s wall clock is nothing like the 420ms of
+    // python compute the summary used to report.
+    return spanning(
+      [prompt("u1", turnId), thinkingRow("t1", turnId), pythonRow("p1", turnId, "complete", 420), answer("a1", turnId)],
+      30_000,
+    );
   }
 
   it("keeps a live turn's work open, then auto-collapses exactly when the answer lands", () => {
@@ -162,7 +189,7 @@ describe("TurnGroup", () => {
 
     view.rerender(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     expect(details().open).toBe(false);
-    expect(screen.getByText("2 steps · 420ms")).toBeInTheDocument();
+    expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
   });
 
   it("keeps the prompt and answer outside the collapsible work region", () => {
@@ -195,6 +222,12 @@ describe("TurnGroup", () => {
     expect(view.container.querySelector("details")).toBeNull();
   });
 
+  it("reports the turn's wall clock, not the python time inside it", () => {
+    render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
+    expect(screen.queryByText("2 steps · 420ms")).toBeNull();
+  });
+
   it("omits the duration when no work row carries one", () => {
     const rows = [prompt("u1", "u1"), thinkingRow("t1", "u1"), answer("a1", "u1")];
     render(<TurnGroup turnId="u1" rows={rows} renderRow={renderPlainRow} />);
@@ -204,7 +237,7 @@ describe("TurnGroup", () => {
   it("prefers the session recap for a settled turn's summary, keeping the counts as meta", () => {
     render(<TurnGroup turnId="u1" rows={settledRows()} recap="Refactored the cell renderer" renderRow={renderPlainRow} />);
     expect(screen.getByText("Refactored the cell renderer")).toBeInTheDocument();
-    expect(screen.getByText("2 steps · 420ms")).toBeInTheDocument();
+    expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
   });
 
   it("ignores the recap while the turn is still live", () => {
