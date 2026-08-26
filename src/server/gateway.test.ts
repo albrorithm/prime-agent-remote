@@ -652,6 +652,49 @@ describe("gateway API routes", () => {
     expect(snapshotGone.status).toBe(404);
   });
 
+  it("deletes a session whose own name the creation schema would reject", async () => {
+    // `uniqueSessionName` appends a disambiguating suffix, which can carry a
+    // 200-character name past the bound that governs names entering the
+    // system. The confirmation echoes a name already in it, so validating the
+    // echo against the stricter rule would leave this session showing a delete
+    // control that could never succeed — the offer-but-refuse bug this whole
+    // task started from.
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const longName = "x".repeat(200);
+    for (let index = 0; index < 2; index += 1) {
+      const created = await fetch(`${t.baseUrl}/api/v1/sessions`, {
+        method: "POST",
+        headers: mutationHeaders(client),
+        body: JSON.stringify({ requestId: randomUUID(), cwd: "/", name: longName }),
+      });
+      expect(created.status).toBe(202);
+    }
+    const collided = (await bootstrap(t, client)).catalog.agents.find((agent) => agent.name.length > 200);
+    if (!collided) throw new Error("Expected a disambiguated name past the creation bound");
+
+    const stopped = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(collided.id)}/stop`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: await agentRevision(t, client, collided.id) }),
+    });
+    expect(stopped.status).toBe(202);
+
+    const deletable = (await bootstrap(t, client)).catalog.agents.find((agent) => agent.id === collided.id);
+    expect(deletable?.capabilities.delete).toBe(true);
+    const deleted = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(collided.id)}/delete`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, collided.id),
+        confirmName: deletable!.name,
+      }),
+    });
+    expect(deleted.status).toBe(202);
+    expect((await bootstrap(t, client)).catalog.agents.some((agent) => agent.id === collided.id)).toBe(false);
+  });
+
   it("answers a backend that refuses to rename with 403 rather than 500", async () => {
     // The UI decides what to offer from the capability bits, but the gateway
     // must still turn a backend's refusal into a refusal — not an error.

@@ -927,11 +927,20 @@ export const stopAgentRequestSchema = z.object({
  * it — so it carries the name the caller believes it is deleting, and the
  * backend refuses if that is not the session's current name. A confirmation
  * the browser could skip would not be one.
+ *
+ * `confirmName` deliberately does not reuse `sessionNameSchema`. That schema
+ * governs a name entering the system; this is an echo of one already in it,
+ * and the two are not the same constraint. A projected name can legitimately
+ * fail the stricter rule — demo's `uniqueSessionName` appends a disambiguating
+ * suffix that can carry a 200-character name past the bound — and validating
+ * the echo against it would reject the only string that could ever match,
+ * leaving a delete control that is offered and can never succeed. The bound
+ * here exists to cap the request; the equality check does the real work.
  */
 export const deleteAgentRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
-  confirmName: sessionNameSchema,
+  confirmName: z.string().min(1).max(4_096),
 }).strict();
 
 export const problemDetailsSchema = z.object({
