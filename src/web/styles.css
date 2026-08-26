@@ -84,7 +84,10 @@
   --text-scale: 1;
   --radius: 14px;
   --drawer-width: min(88vw, 352px);
-  --header-height: 54px;
+  /* A text measure, not a chrome constant: the header is sized by the title
+     inside it, so this has to grow with --text-scale like the type does.
+     3.375rem is exactly 54px at scale 1. */
+  --header-height: 3.375rem;
   --composer-safe-bottom: max(9px, env(safe-area-inset-bottom, 0px));
 }
 
@@ -243,7 +246,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .search-field { display: flex; min-height: 42px; flex: 0 0 auto; align-items: center; gap: 8px; margin: 10px 12px 8px; padding: 0 11px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg); }
 .search-field:focus-within { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .search-field svg { width: 15px; height: 15px; color: var(--muted); }
-.search-field input { min-width: 0; width: 100%; height: 40px; border: 0; outline: 0; background: transparent; }
+.search-field input { min-width: 0; width: 100%; min-height: 2.5rem; border: 0; outline: 0; background: transparent; }
 .search-field input::placeholder { color: var(--muted-2); }
 .agent-tree { width: 100%; min-width: 0; padding: 0 7px max(18px, env(safe-area-inset-bottom)); overflow: hidden; }
 .agent-row { --tree-depth: 0; display: flex; width: 100%; min-width: 0; max-width: 100%; min-height: 54px; align-items: center; overflow: hidden; margin: 2px 0; padding: 5px 7px 5px max(3px, calc(var(--tree-depth) * 14px)); border: 1px solid transparent; border-radius: 10px; user-select: none; }
@@ -264,7 +267,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .agent-copy strong { overflow: hidden; font-size: .8125rem; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .agent-copy > span { overflow: hidden; color: var(--muted); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
-.state-pill { max-width: 88px; flex: 0 0 auto; overflow: hidden; padding: 3px 6px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .5625rem; font-weight: 650; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
+.state-pill { max-width: 5.5rem; flex: 0 0 auto; overflow: hidden; padding: 3px 6px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .5625rem; font-weight: 650; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
 /* Same attention/failed conflation as .agent-state.attention above — grayscale until AgentTree.tsx splits the classes. */
 .state-pill.attention { border-color: var(--border-active); color: var(--text); background: var(--panel-raised-3); }
 .row-stop { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-soft); background: var(--panel-raised-3); }
@@ -273,7 +276,11 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .row-stop svg { width: 11px; height: 11px; fill: currentColor; }
 
 .transcript-panel { position: relative; background: var(--bg); }
-.conversation-header { display: flex; min-height: var(--header-height); flex: 0 0 var(--header-height); align-items: center; gap: 3px; padding: 5px 7px; border-bottom: 1px solid var(--border-soft); background: var(--scrim); backdrop-filter: blur(18px); }
+/* `flex: 0 0 auto` with a min-height, never `flex: 0 0 <height>`: the basis
+   form pins the bar at 54px, and the root-agent title stacks a name over a
+   cwd, which already needs 57px at 100% and clips outright as the text
+   scales. .drawer-header has always been written this way. */
+.conversation-header { display: flex; min-height: var(--header-height); flex: 0 0 auto; align-items: center; gap: 3px; padding: 5px 7px; border-bottom: 1px solid var(--border-soft); background: var(--scrim); backdrop-filter: blur(18px); }
 .agent-hierarchy { display: flex; min-width: 0; flex: 1; align-items: center; }
 .agent-lineage { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; overflow-x: auto; scrollbar-width: none; }
 .agent-lineage::-webkit-scrollbar { display: none; }
@@ -323,7 +330,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .agent-status-chip.failed { color: var(--tone-danger); }
 .agent-status-chip.inactive, .agent-status-chip.stopped { color: var(--muted-2); }
 .activity-trigger { position: relative; }
-.activity-trigger > span { position: absolute; top: 3px; right: 1px; display: grid; min-width: 16px; height: 16px; place-items: center; padding: 0 4px; border: 1px solid var(--bg); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
+.activity-trigger > span { position: absolute; top: 3px; right: 1px; display: grid; min-width: 1rem; min-height: 1rem; place-items: center; padding: 1px 4px; border: 1px solid var(--bg); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
 .transcript-scroll { padding: 18px 14px 24px; scroll-padding-bottom: 20px; }
 .transcript-content { width: min(100%, 760px); min-height: 100%; margin: 0 auto; }
 .message-list { display: flex; flex-direction: column; gap: 20px; }
@@ -371,7 +378,9 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .thinking-disclosure[open] .thinking-chevron { transform: rotate(180deg); }
 .thinking-disclosure[open] > summary .timeline-preview { white-space: normal; }
 .thinking-full { margin: 4px 0 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); color: var(--text-soft); font: 500 .8125rem/1.55 Inter, ui-sans-serif, system-ui, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
-.streaming-indicator { display: inline-block; width: 5px; height: 14px; margin-left: 3px; vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(1) infinite; }
+/* 1em, so the caret is the height of whatever line it is trailing rather than
+   a fixed 14px that shrinks against the text as the scale rises. */
+.streaming-indicator { display: inline-block; width: 5px; height: 1em; margin-left: 3px; vertical-align: text-bottom; background: var(--accent); animation: blink 1s steps(1) infinite; }
 .empty-transcript { display: grid; min-height: 46vh; gap: 10px; place-items: center; color: var(--muted); text-align: center; }
 .empty-transcript button { min-height: 36px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 99px; color: var(--text); background: transparent; font-weight: 600; }
 .empty-transcript button:hover { background: var(--accent-soft); }
@@ -389,12 +398,19 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .attention-action { min-height: 40px; padding: 7px 12px; border: 1px solid var(--border-bright); border-radius: 9px; background: var(--panel-raised-3); font-size: .75rem; font-weight: 700; }
 .attention-action.safe { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
 .attention-action.danger { color: var(--tone-danger); }
-.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(78px + env(safe-area-inset-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
+/* Sits above the composer, so it is derived from the composer's own parts —
+   the textarea's 2.75rem floor plus its 9px/9px padding, the 1px rule and a
+   15px gap — instead of the single baked 78px that silently went wrong the
+   moment the textarea could grow. */
+.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(2.75rem + 34px + env(safe-area-inset-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
 .jump-latest svg { width: 13px; }
 
 .sessions-trigger { position: relative; }
-.sessions-trigger .icon-badge { position: absolute; top: 3px; right: 1px; display: grid; min-width: 16px; height: 16px; place-items: center; padding: 0 4px; border: 1px solid var(--bg); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
-.tree-unread { display: grid; flex: 0 0 auto; min-width: 17px; height: 17px; place-items: center; margin-right: 6px; padding: 0 4px; border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
+/* min-height, not height: these hold digits, and a fixed box crops them the
+   moment the reader asks for larger text. The padding keeps the pill from
+   closing on the glyphs once it is the text, not the box, setting the size. */
+.sessions-trigger .icon-badge { position: absolute; top: 3px; right: 1px; display: grid; min-width: 1rem; min-height: 1rem; place-items: center; padding: 1px 4px; border: 1px solid var(--bg); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
+.tree-unread { display: grid; flex: 0 0 auto; min-width: 1.0625rem; min-height: 1.0625rem; place-items: center; margin-right: 6px; padding: 1px 4px; border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
 .message.user.pending { opacity: .55; }
 mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: var(--accent); }
 .message-body { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
@@ -458,7 +474,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .transcript-search input { width: 100%; min-width: 0; min-height: 38px; border: 0; outline: 0; background: transparent; }
 .transcript-search input::placeholder { color: var(--muted-2); }
 .search-count { flex: 0 0 auto; color: var(--muted); font-size: .625rem; white-space: nowrap; }
-.gesture-hint { position: fixed; z-index: 70; top: calc(env(safe-area-inset-top) + 62px); left: 14px; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 28px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-bright); border-radius: 12px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 10px 34px var(--shadow); font-size: .6875rem; font-weight: 650; }
+.gesture-hint { position: fixed; z-index: 70; top: calc(env(safe-area-inset-top) + var(--header-height) + .5rem); left: 14px; display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 28px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-bright); border-radius: 12px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 10px 34px var(--shadow); font-size: .6875rem; font-weight: 650; }
 .gesture-hint::before { content: ""; position: absolute; top: 50%; left: -9px; width: 12px; height: 32px; transform: translateY(-50%); border-right: 2px solid var(--accent); border-radius: 0 8px 8px 0; opacity: .7; animation: blink 1.4s ease-in-out infinite; }
 .gesture-hint button { display: grid; width: 24px; height: 24px; place-items: center; border: 0; border-radius: 50%; color: var(--muted); background: transparent; }
 .gesture-hint button svg { width: 13px; height: 13px; }
