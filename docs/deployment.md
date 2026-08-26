@@ -31,7 +31,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_PAIRING_TOKEN` | random at startup outside production; required in production | Setup token (32 or more characters in production) |
 | `PRIME_WEB_SECURE_COOKIE` | true in production | Add the cookie `Secure` attribute; accepts only `true`, `false`, `1`, or `0` |
 | `PRIME_WEB_BACKEND` | `demo` | `demo` or `prime`; other values fail startup |
-| `PRIME_AGENT_MODULE` | package name | Compatible Prime Agent root module or built file path |
+| `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |
 | `PRIME_AGENT_DAEMON_SOCKET` | Prime default | Optional daemon socket override |
 | `PRIME_WEB_SESSION_TTL_MS` | `43200000` (12 hours) | In-memory HTTP and WebSocket session lifetime |
 | `PRIME_WEB_VAPID_PUBLIC_KEY` | unset (push off) | VAPID application server key, base64url; must decode to 65 bytes |

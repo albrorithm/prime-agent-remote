@@ -60,14 +60,24 @@ The gateway binds to `127.0.0.1:8787` by default.
 
 ## Live Prime Agent mode
 
-The audited daemon APIs are available from the root export of a compatible `@earendil-works/pi-coding-agent` build. Point the gateway to that built module when it is not installed as this application's dependency:
+The gateway finds Prime Agent by itself. Prime Agent is normally a global
+install (`npm install -g prime-agent`), which a bare import from this package
+cannot see, so the gateway looks in order at `PRIME_AGENT_MODULE`, its own
+dependencies, and the global `npm root -g` directory, and uses the first build
+that exports the daemon API. It logs which one it chose.
 
 ```bash
 PRIME_WEB_BACKEND=prime \
-PRIME_AGENT_MODULE='/path/to/prime-agent/packages/coding-agent/dist/index.js' \
 PRIME_WEB_PAIRING_TOKEN='replace-with-a-long-random-token' \
 PRIME_WEB_ALLOWED_ORIGINS='http://127.0.0.1:8787' \
 npm start
+```
+
+Set `PRIME_AGENT_MODULE` only to override that search, for example when
+running against a build from source:
+
+```bash
+PRIME_AGENT_MODULE='/path/to/prime-agent/dist/index.js' npm start
 ```
 
 Optional:
@@ -82,7 +92,11 @@ The compatible module must export:
 - `DaemonAgentConnection`
 - `defaultDaemonSocketPath`
 
-The current public npm registry line uses a different package API. The gateway therefore checks these exports at startup instead of silently using an incompatible client.
+These exports are checked at startup rather than assumed. The name is worth
+care: the `@earendil-works/pi-coding-agent` package on npm is an older publish
+line whose current versions contain none of them, so a build that imports
+cleanly can still be the wrong one. The package that ships the daemon client is
+`prime-agent`.
 
 ## Tailscale Serve
 

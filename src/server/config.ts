@@ -21,7 +21,12 @@ export interface GatewayConfig {
   generatedPairingToken: boolean;
   secureCookie: boolean;
   backend: "demo" | "prime";
-  primeModule: string;
+  /**
+   * Only an explicit operator override. Undefined means "discover it", which
+   * is the normal case: Prime Agent is usually a global install that a bare
+   * specifier from this package cannot see.
+   */
+  primeModule?: string;
   daemonSocket?: string;
   sessionTtlMs: number;
   webPush?: WebPushConfig;
@@ -143,7 +148,7 @@ export function loadConfig(env = process.env): GatewayConfig {
     generatedPairingToken: !configuredPairingToken,
     secureCookie: parseBoolean("PRIME_WEB_SECURE_COOKIE", env.PRIME_WEB_SECURE_COOKIE, production),
     backend: parseBackend(env.PRIME_WEB_BACKEND),
-    primeModule: env.PRIME_AGENT_MODULE?.trim() || "@earendil-works/pi-coding-agent",
+    primeModule: env.PRIME_AGENT_MODULE?.trim() || undefined,
     daemonSocket: env.PRIME_AGENT_DAEMON_SOCKET?.trim() || undefined,
     sessionTtlMs: parseInteger("PRIME_WEB_SESSION_TTL_MS", env.PRIME_WEB_SESSION_TTL_MS, 12 * 60 * 60 * 1000, 100, 7 * 24 * 60 * 60 * 1000),
     webPush: parseWebPush(env),

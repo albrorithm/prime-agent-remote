@@ -4,7 +4,7 @@ import { opendir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { pathToFileURL } from "node:url";
+import { resolvePrimeModule } from "./prime-module.js";
 import {
   DIRECT_SLASH_COMMAND_NAMES,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
@@ -1369,12 +1369,11 @@ function dashboardContextUsage(stats: PrimeSessionStats): SessionContextUsage | 
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
-function resolveModuleSpecifier(specifier: string): string {
-  if (specifier.startsWith(".") || path.isAbsolute(specifier)) {
-    return pathToFileURL(path.resolve(process.cwd(), specifier)).href;
-  }
-  return specifier;
-}
+/**
+ * Resolution lives in prime-module.ts because the CLI has to answer "which
+ * Prime Agent build would the gateway use?" before starting anything, and two
+ * implementations of that question would drift.
+ */
 
 export class PrimeBackend implements AgentBackend {
   readonly kind = "prime" as const;
@@ -1416,7 +1415,7 @@ export class PrimeBackend implements AgentBackend {
   private closed = false;
 
   constructor(
-    private readonly moduleSpecifier: string,
+    private readonly moduleSpecifier?: string,
     private readonly socketOverride?: string,
   ) {}
 
@@ -1426,13 +1425,16 @@ export class PrimeBackend implements AgentBackend {
 
   async initialize(hub: EventHub): Promise<void> {
     this.hub = hub;
-    const loaded = (await import(resolveModuleSpecifier(this.moduleSpecifier))) as Partial<PrimeModule>;
-    if (!loaded.DaemonClient || !loaded.DaemonAgentConnection || !loaded.defaultDaemonSocketPath) {
-      throw new Error(
-        "The configured Prime Agent module does not export DaemonClient, DaemonAgentConnection, and defaultDaemonSocketPath. Use a compatible Prime Agent build.",
-      );
+    // An explicit specifier is offered first but is not the only candidate: a
+    // stale PRIME_AGENT_MODULE left in a shell profile should fall through to a
+    // working install rather than fail the gateway. Which one won is logged.
+    const resolution = await resolvePrimeModule({
+      env: this.moduleSpecifier ? { PRIME_AGENT_MODULE: this.moduleSpecifier } : {},
+    });
+    if (resolution.origin !== "env") {
+      console.log(`Prime Agent module resolved from the ${resolution.origin} install: ${resolution.specifier}`);
     }
-    this.module = loaded as PrimeModule;
+    this.module = resolution.module as unknown as PrimeModule;
     this.client = new this.module.DaemonClient(this.socketOverride || this.module.defaultDaemonSocketPath());
     await this.client.connect(5_000);
     this.observeClientDisconnect(this.client);
