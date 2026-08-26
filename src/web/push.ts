@@ -133,6 +133,27 @@ export async function revokePushLocally(): Promise<void> {
 }
 
 /**
+ * Re-registers an existing subscription under the current session.
+ *
+ * Records are bound to the session that created them, and sign-out revokes by
+ * session id. Without this, a device that subscribed under a session which has
+ * since expired would survive the sign-out of the session the user is actually
+ * holding, and server-side revocation would quietly leak. Asks for nothing —
+ * it runs only when permission is already granted and a subscription already
+ * exists — so it is safe on every launch.
+ */
+export async function reclaimPushSubscription(
+  available: { enabled: boolean } | null,
+  csrfToken: string,
+): Promise<void> {
+  if (!available?.enabled || !csrfToken || pushPermission() !== "granted") return;
+  const subscription = await currentPushSubscription();
+  const body = subscription && requestBody(subscription);
+  if (!body) return;
+  await api.subscribeToPush(csrfToken, body);
+}
+
+/**
  * Resolves the control's state without asking for anything, so the panel can
  * render honestly on open.
  */

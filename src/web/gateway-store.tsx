@@ -28,7 +28,7 @@ import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../pro
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
 import { useAppBadge } from "./hooks/useAppBadge";
-import { revokePushLocally } from "./push";
+import { reclaimPushSubscription, revokePushLocally } from "./push";
 import type { PreparedImage } from "./image-attachments";
 
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
@@ -384,6 +384,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const initializeRef = useRef<() => Promise<void>>(async () => {});
   // `undefined` until the launch URL has been read; null once consumed.
   const requestedAgentId = useRef<string | null | undefined>(undefined);
+  // The CSRF token of the session this device last claimed its push
+  // subscription for. Changes exactly when the session does.
+  const pushClaimedFor = useRef<string | null>(null);
   stateRef.current = state;
 
   useEffect(() => {
@@ -688,6 +691,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
           source: "http",
           allowEqualRevision: loaded.allowEqualRevision,
         });
+      }
+      if (pushClaimedFor.current !== value.csrfToken) {
+        pushClaimedFor.current = value.csrfToken;
+        // Best-effort and silent: a device that cannot re-claim its
+        // subscription still works, it just keeps its old session binding.
+        void reclaimPushSubscription(value.push, value.csrfToken).catch(() => {});
       }
       if (!socketRetryBlocked.current) showError(null);
       updateSocketPhase();

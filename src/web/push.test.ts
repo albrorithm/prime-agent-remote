@@ -13,6 +13,7 @@ import {
   enablePush,
   pushSupported,
   readPushState,
+  reclaimPushSubscription,
   revokePushLocally,
 } from "./push";
 
@@ -215,5 +216,40 @@ describe("revokePushLocally", () => {
     installBrowser({ serviceWorker: false });
     await expect(revokePushLocally()).resolves.toBeUndefined();
     await expect(currentPushSubscription()).resolves.toBeNull();
+  });
+});
+
+describe("reclaimPushSubscription", () => {
+  // Records are bound to the session that created them and sign-out revokes by
+  // session id, so a device whose original session expired has to re-claim its
+  // subscription or it will outlive the sign-out that was meant to kill it.
+  it("re-registers an existing subscription under the current session", async () => {
+    pushManager.getSubscription.mockResolvedValue(fakeSubscription());
+    installBrowser({ permission: "granted" });
+
+    await reclaimPushSubscription({ enabled: true }, "new-session-csrf");
+    expect(apiMock.subscribeToPush).toHaveBeenCalledWith("new-session-csrf", {
+      endpoint: "https://push.example.test/device",
+      keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },
+    });
+  });
+
+  // It runs on every launch, so it must never turn into a prompt or a
+  // subscription this device did not already have.
+  it("asks for nothing when there is nothing to re-claim", async () => {
+    installBrowser({ permission: "granted" });
+    await reclaimPushSubscription({ enabled: true }, "csrf");
+
+    pushManager.getSubscription.mockResolvedValue(fakeSubscription());
+    installBrowser({ permission: "default" });
+    await reclaimPushSubscription({ enabled: true }, "csrf");
+    await reclaimPushSubscription({ enabled: false }, "csrf");
+    await reclaimPushSubscription(null, "csrf");
+
+    installBrowser({ permission: "granted" });
+    await reclaimPushSubscription({ enabled: true }, "");
+
+    expect(apiMock.subscribeToPush).not.toHaveBeenCalled();
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
   });
 });
