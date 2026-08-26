@@ -199,6 +199,18 @@ function TranscriptImages({
 }
 
 /**
+ * Last path segment of a working directory, matching the Prime Agent TUI, whose
+ * window title is `APP_TITLE - sessionName - cwdBasename`. A trailing slash is
+ * not a segment, and filesystem root stands for itself.
+ */
+export function cwdBasename(cwd: string | undefined): string {
+  if (!cwd) return "";
+  const trimmed = cwd.replace(/\/+$/, "");
+  if (!trimmed) return "/";
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1);
+}
+
+/**
  * Ids of the message rows that should print an author line: the first
  * message-shaped row, then every one whose speaker differs from the previous
  * message-shaped row. Timeline rows (thinking, tool, python, refine, notice,
@@ -431,7 +443,17 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                 <span className="lineage-item">
                   {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
                   {index === displayedLineage.length - 1 ? (
-                    <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
+                    // A root agent IS the session, so it titles by session name and
+                    // carries the working directory the way the TUI does. A subagent
+                    // titles by agent name — its lineage already names the session.
+                    !agent.parentId && cwdBasename(agent.cwd) ? (
+                      <span className="lineage-title">
+                        <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
+                        <span className="lineage-cwd" title={agent.cwd}>{cwdBasename(agent.cwd)}</span>
+                      </span>
+                    ) : (
+                      <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
+                    )
                   ) : (
                     <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
                   )}

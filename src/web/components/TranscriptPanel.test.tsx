@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
 import type { useGateway } from "../gateway-store";
 import { SETTINGS_KEY, SettingsProvider } from "../settings";
-import { authorLineIds, deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
+import { authorLineIds, cwdBasename, deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
 
 type GatewayMockState = Pick<
   ReturnType<typeof useGateway>,
@@ -540,6 +540,51 @@ describe("agent switching resets scroll state", () => {
     expect(screen.queryByRole("dialog", { name: "Ancestors" })).not.toBeInTheDocument();
   });
 
+});
+
+describe("session title", () => {
+  it("reduces a working directory to its last segment", () => {
+    expect(cwdBasename("/srv/projects/mobile-ui")).toBe("mobile-ui");
+    expect(cwdBasename("/srv/projects/mobile-ui/")).toBe("mobile-ui");
+    expect(cwdBasename("/")).toBe("/");
+    expect(cwdBasename("")).toBe("");
+    expect(cwdBasename(undefined)).toBe("");
+  });
+
+  function setSelected(selectedAgent: AgentSummary, agents: AgentSummary[]) {
+    gatewayMock.state = {
+      catalog: { revision: 0, agents },
+      selectedAgent,
+      selectedSnapshot: { revision: 1, agentId: selectedAgent.id, messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+  }
+
+  it("titles a root agent by session name over its working directory", () => {
+    const root = { ...agent("Nightly sweep", null, 0), cwd: "/srv/projects/mobile-ui" };
+    setSelected(root, [root]);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Nightly sweep");
+    expect(view.container.querySelector(".lineage-cwd")).toHaveTextContent("mobile-ui");
+  });
+
+  it("leaves a subagent titled by agent name with no directory line", () => {
+    const root = { ...agent("Nightly sweep", null, 0), cwd: "/srv/projects/mobile-ui" };
+    const child = { ...agent("api-reviewer", "Nightly sweep", 1), cwd: "/srv/projects/mobile-ui" };
+    setSelected(child, [root, child]);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("api-reviewer");
+    expect(view.container.querySelector(".lineage-cwd")).toBeNull();
+  });
+
+  it("falls back to the bare title when a root reports no directory", () => {
+    const root = agent("Nightly sweep", null, 0);
+    setSelected(root, [root]);
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Nightly sweep");
+    expect(view.container.querySelector(".lineage-title")).toBeNull();
+  });
 });
 
 describe("authorLineIds", () => {
