@@ -1,7 +1,17 @@
+import { homedir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 
 const strongToken = "a-random-production-pairing-token-0001";
+// A real generated pair; only the decoded lengths (65 and 32 bytes) matter here.
+const vapidPublicKey = "BF1JW243veaons7uO0bcdtRHXVUTVJ74A_OzX7wiGhY114OpWvn0BOBrfXu2AhV3cmc0Nrb_LIRZHbFY4L8Xmgw";
+const vapidPrivateKey = "IPDx2j8nr-ShPjNWSqXsCAK3fA0W2cM78tjLvtG0jLA";
+const vapid = {
+  PRIME_WEB_VAPID_PUBLIC_KEY: vapidPublicKey,
+  PRIME_WEB_VAPID_PRIVATE_KEY: vapidPrivateKey,
+  PRIME_WEB_VAPID_SUBJECT: "mailto:operator@example.test",
+};
 
 describe("loadConfig", () => {
   it("requires an explicit origin allowlist and strong configured token in production", () => {
@@ -53,5 +63,49 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ PRIME_WEB_SECURE_COOKIE: "TRUE" })).toThrow("PRIME_WEB_SECURE_COOKIE");
     expect(() => loadConfig({ PRIME_WEB_BACKEND: "production" })).toThrow("PRIME_WEB_BACKEND");
     expect(() => loadConfig({ PRIME_WEB_BACKEND: " prime " })).toThrow("PRIME_WEB_BACKEND");
+  });
+
+  // Push is an addition, not a requirement: the default deployment has no keys
+  // and must still start and run exactly as it did before push existed.
+  it("leaves push off when no VAPID keys are configured", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).webPush).toBeUndefined();
+  });
+
+  it("accepts a complete VAPID configuration", () => {
+    const value = loadConfig({ NODE_ENV: "test", ...vapid });
+    expect(value.webPush).toEqual({
+      publicKey: vapidPublicKey,
+      privateKey: vapidPrivateKey,
+      subject: "mailto:operator@example.test",
+    });
+  });
+
+  it("refuses a half-configured keypair rather than offering a dead switch", () => {
+    for (const missing of Object.keys(vapid)) {
+      const partial = { ...vapid, [missing]: undefined };
+      expect(() => loadConfig({ NODE_ENV: "test", ...partial })).toThrow("must be set together");
+    }
+  });
+
+  it("rejects a truncated or non-base64url VAPID key and a bare subject", () => {
+    expect(() => loadConfig({ NODE_ENV: "test", ...vapid, PRIME_WEB_VAPID_PUBLIC_KEY: vapidPrivateKey }))
+      .toThrow("must decode to 65 bytes");
+    expect(() => loadConfig({ NODE_ENV: "test", ...vapid, PRIME_WEB_VAPID_PRIVATE_KEY: vapidPublicKey }))
+      .toThrow("must decode to 32 bytes");
+    expect(() => loadConfig({ NODE_ENV: "test", ...vapid, PRIME_WEB_VAPID_PRIVATE_KEY: "not+base64url/at=all" }))
+      .toThrow("must be base64url");
+    expect(() => loadConfig({ NODE_ENV: "test", ...vapid, PRIME_WEB_VAPID_SUBJECT: "operator@example.test" }))
+      .toThrow("mailto: or https:// URL");
+  });
+
+  it("defaults the subscription store under the config directory and demands an absolute override", () => {
+    expect(loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: "/srv/config" }).webPushStorePath)
+      .toBe("/srv/config/prime-agent-web/push-subscriptions.json");
+    expect(loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: undefined }).webPushStorePath)
+      .toBe(path.join(homedir(), ".config", "prime-agent-web", "push-subscriptions.json"));
+    expect(loadConfig({ NODE_ENV: "test", PRIME_WEB_PUSH_STORE: "/var/lib/prime/push.json" }).webPushStorePath)
+      .toBe("/var/lib/prime/push.json");
+    expect(() => loadConfig({ NODE_ENV: "test", PRIME_WEB_PUSH_STORE: "push.json" }))
+      .toThrow("must be an absolute path");
   });
 });

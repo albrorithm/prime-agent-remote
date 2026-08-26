@@ -1,4 +1,17 @@
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
+import path from "node:path";
+
+/**
+ * VAPID identifies this gateway to the push services it hands encrypted
+ * payloads to. Absent keys are not an error — push is simply off, and the
+ * gateway runs exactly as it did before it could push at all.
+ */
+export interface WebPushConfig {
+  publicKey: string;
+  privateKey: string;
+  subject: string;
+}
 
 export interface GatewayConfig {
   host: string;
@@ -11,6 +24,8 @@ export interface GatewayConfig {
   primeModule: string;
   daemonSocket?: string;
   sessionTtlMs: number;
+  webPush?: WebPushConfig;
+  webPushStorePath: string;
 }
 
 const MIN_PRODUCTION_PAIRING_TOKEN_CHARS = 32;
@@ -31,6 +46,55 @@ function parseInteger(name: string, value: string | undefined, fallback: number,
     throw new Error(`${name} must be between ${minimum} and ${maximum}`);
   }
   return parsed;
+}
+
+/**
+ * A VAPID key is a raw P-256 point (65 bytes) or scalar (32 bytes) in
+ * base64url. Checking the decoded length here turns a truncated paste into a
+ * startup error instead of a push that silently fails on every send.
+ */
+function parseVapidKey(name: string, value: string, expectedBytes: number): string {
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) throw new Error(`${name} must be base64url`);
+  if (Buffer.from(value, "base64url").byteLength !== expectedBytes) {
+    throw new Error(`${name} must decode to ${expectedBytes} bytes`);
+  }
+  return value;
+}
+
+function parseWebPush(env: NodeJS.ProcessEnv): WebPushConfig | undefined {
+  const publicKey = env.PRIME_WEB_VAPID_PUBLIC_KEY?.trim();
+  const privateKey = env.PRIME_WEB_VAPID_PRIVATE_KEY?.trim();
+  const subject = env.PRIME_WEB_VAPID_SUBJECT?.trim();
+  if (!publicKey && !privateKey && !subject) return undefined;
+  // All three or none. A half-configured keypair would leave the Settings
+  // panel offering a control that cannot work, which is the one outcome the
+  // "push is off" path exists to avoid.
+  if (!publicKey || !privateKey || !subject) {
+    throw new Error("PRIME_WEB_VAPID_PUBLIC_KEY, PRIME_WEB_VAPID_PRIVATE_KEY, and PRIME_WEB_VAPID_SUBJECT must be set together");
+  }
+  if (!subject.startsWith("mailto:") && !subject.startsWith("https://")) {
+    throw new Error("PRIME_WEB_VAPID_SUBJECT must be a mailto: or https:// URL");
+  }
+  return {
+    publicKey: parseVapidKey("PRIME_WEB_VAPID_PUBLIC_KEY", publicKey, 65),
+    privateKey: parseVapidKey("PRIME_WEB_VAPID_PRIVATE_KEY", privateKey, 32),
+    subject,
+  };
+}
+
+/**
+ * The gateway's only persistent state. A push subscription has to outlive the
+ * session that authorized it — that is the entire point of push — so it cannot
+ * live beside the in-memory sessions.
+ */
+function webPushStorePath(env: NodeJS.ProcessEnv): string {
+  const configured = env.PRIME_WEB_PUSH_STORE?.trim();
+  if (configured) {
+    if (!path.isAbsolute(configured)) throw new Error("PRIME_WEB_PUSH_STORE must be an absolute path");
+    return configured;
+  }
+  const configHome = env.XDG_CONFIG_HOME?.trim() || path.join(homedir(), ".config");
+  return path.join(configHome, "prime-agent-web", "push-subscriptions.json");
 }
 
 function parseBackend(value: string | undefined): GatewayConfig["backend"] {
@@ -82,5 +146,7 @@ export function loadConfig(env = process.env): GatewayConfig {
     primeModule: env.PRIME_AGENT_MODULE?.trim() || "@earendil-works/pi-coding-agent",
     daemonSocket: env.PRIME_AGENT_DAEMON_SOCKET?.trim() || undefined,
     sessionTtlMs: parseInteger("PRIME_WEB_SESSION_TTL_MS", env.PRIME_WEB_SESSION_TTL_MS, 12 * 60 * 60 * 1000, 100, 7 * 24 * 60 * 60 * 1000),
+    webPush: parseWebPush(env),
+    webPushStorePath: webPushStorePath(env),
   };
 }
