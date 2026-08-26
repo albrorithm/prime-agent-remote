@@ -140,13 +140,10 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           <Choice
             name="text-scale"
             legend="Text size"
-            disabled
             value={String(settings.textScale)}
             options={TEXT_SCALES.map((scale, index) => ({ value: String(scale), label: TEXT_SCALE_LABELS[index] }))}
             onChange={(value) => setSetting("textScale", Number(value))}
-          >
-            <p className="settings-hint">Not yet wired up — the type scale still uses fixed sizes.</p>
-          </Choice>
+          />
         </section>
 
         <section className="settings-group" aria-labelledby="settings-reading">

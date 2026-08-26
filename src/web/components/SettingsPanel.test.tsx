@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { axe } from "vitest-axe";
 import { PROTOCOL_VERSION } from "../../protocol";
 import { DRAFTS_KEY } from "../hooks/useComposerDrafts";
@@ -27,6 +27,11 @@ function storedSettings(): Record<string, unknown> {
 beforeEach(() => {
   gatewayMock.backend = "demo";
   gatewayMock.signOut = vi.fn().mockResolvedValue(undefined);
+});
+
+// The panel stamps --text-scale on the document, which outlives the render.
+afterEach(() => {
+  document.documentElement.style.removeProperty("--text-scale");
 });
 
 describe("SettingsPanel", () => {
@@ -88,10 +93,19 @@ describe("SettingsPanel", () => {
     expect(storedSettings().theme).toBe("light");
   });
 
-  it("still offers text size only as a preview, since no rule reads --text-scale yet", () => {
+  it("scales the type, since every size in the stylesheet is now a rem off the root", async () => {
+    const user = userEvent.setup();
     renderPanel();
 
-    expect(screen.getByRole("radio", { name: "Larger" })).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: "Larger" }));
+
+    expect(document.documentElement.style.getPropertyValue("--text-scale")).toBe("1.15");
+    expect(storedSettings().textScale).toBe(1.15);
+
+    await user.click(screen.getByRole("radio", { name: "Largest" }));
+
+    expect(document.documentElement.style.getPropertyValue("--text-scale")).toBe("1.3");
+    expect(storedSettings().textScale).toBe(1.3);
   });
 
   it("reports the backend and protocol version", () => {
