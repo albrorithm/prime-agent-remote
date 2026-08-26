@@ -17,7 +17,8 @@ The gateway currently permits these live operations:
 - answer supported extension confirmation and selection requests;
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker;
-- explicitly sign out, invalidating the session and clearing its cookie.
+- register and revoke a browser push subscription for this device;
+- explicitly sign out, invalidating the session, clearing its cookie, and revoking that session's push subscriptions.
 
 Experimental detected extension commands can run with the local capabilities already granted to Prime Agent, while detected prompt and skill commands can create model turns. This expands the paired browser’s trust boundary and retains a catalog-reload race that may turn command text into a model prompt.
 
@@ -36,6 +37,20 @@ A setup token is exchanged for an in-memory gateway session. The browser receive
 
 The setup token is never stored by the browser application. Production requires an explicitly configured setup token of at least 32 characters. Sessions expire in memory after the configured TTL, and an explicit sign-out invalidates the session immediately and clears the cookie with the same attributes it was set with. A WebSocket is bound to the session used during its upgrade and is closed when that session expires or is signed out, including a second tab sharing the session.
 
+## Push notifications
+
+Push is off unless the operator configures VAPID keys. With none set the routes refuse a subscription and the gateway behaves exactly as it did before push existed.
+
+A push subscription is a long-lived capability to wake a device, and it deliberately outlives the session cookie that authorized it. That is the point: a subscription that died with the 12-hour session TTL would stop working overnight, which is the window it exists for. The consequences are stated plainly rather than mitigated away:
+
+- Subscriptions are the gateway's only persistent state. They live in a JSON file at `PRIME_WEB_PUSH_STORE`, written mode `0600` through a temp file and rename, bounded in record count and per-field size. A corrupt or unreadable store falls back to empty rather than failing startup.
+- Payloads carry a session name, an attention kind, opaque agent and attention ids, and a count. They never carry prompt text, transcript text, dialog titles or messages, or option labels. Agent output does not reach a lock screen. A test builds a payload from an attention request whose every daemon-authored field is a sentinel and asserts none survive.
+- Push fires only on an authoritative `AttentionRequest`. It never fires on `needsInput`, which the protocol documents as an advisory daemon guess and never a queue.
+- Sign-out revokes: the logout route drops every record bound to that session, and the browser drops its own subscription before the request. Session expiry revokes nothing. A device re-registers its existing subscription on each new session so that sign-out can always find it.
+- A record is otherwise removed only by an explicit unsubscribe or by a push service reporting the endpoint permanently gone (`404`/`410`). Not by time.
+- Endpoints are device identifiers and are never written to logs.
+- Rotating the VAPID keypair invalidates every existing subscription; devices must be turned on again.
+
 ## Browser checks
 
 - Exact origin allowlist for pairing and mutations.
@@ -52,7 +67,7 @@ Tailscale provides encrypted transport and tailnet membership. It is not treated
 
 ## Caching
 
-The service worker excludes `/api/` and `/ws`. It precaches the built application-shell index, fingerprinted JavaScript and CSS, manifest, and icons. Transcripts, prompts, cookies, and API responses are not added to its cache.
+The service worker excludes `/api/` and `/ws`. It precaches the built application-shell index, fingerprinted JavaScript and CSS, manifest, and icons. Transcripts, prompts, cookies, and API responses are not added to its cache. Its `push` handler shows a notification and sets the app badge; nothing it receives is written to the cache.
 
 Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Validation checks canonical base64, container structure, checksums where available, dimensions, and per-image and per-request pixel limits before admission. Browser transcript snapshots receive only content-addressed metadata. Attachment responses require authentication, use private no-store headers, and never include local filenames.
 
@@ -63,5 +78,7 @@ Before a broad deployment:
 - persist session revocation across gateway restarts if required;
 - add a session-management screen listing and revoking other sessions;
 - validate all Prime extension UI request shapes before adding free-text responses;
-- perform a physical-device and reverse-proxy security test;
-- add privacy-minimal push only after authoritative attention transitions are stable.
+- perform a physical-device and reverse-proxy security test, including a real push delivered to an installed PWA with the app closed;
+- add a device-management screen listing and revoking individual push subscriptions, which currently can only be revoked from the device that created one or by signing that session out.
+
+Privacy-minimal push is now implemented against authoritative attention transitions, and its payload boundary is stated above. What remains is operational rather than a design question: subscriptions survive gateway restarts by design, so the store file is a credential-bearing artifact that belongs in the same backup and disposal policy as any other.
