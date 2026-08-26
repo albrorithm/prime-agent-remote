@@ -604,6 +604,64 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(result.current.snapshots["agent-a"]?.revision).toBe(1);
   });
 
+  /* The transcript-never-loads deadlock, from the client's side.
+
+     "stream_gone" used to be terminal whatever the reason. For an agent that
+     merely had no stream yet — the ordinary state right after a gateway
+     restart, when the hub holds `catalog` and nothing else — that was
+     unrecoverable: the agent is evicted, the HTTP snapshot that lands next is
+     refused because the agent is "gone", and only a WebSocket snapshot clears
+     that flag, which needs the attach the eviction just discarded. The spinner
+     never resolves, and switching sessions does not help because that path is
+     HTTP too.
+
+     Catalog membership is what separates the two meanings: a deleted agent
+     leaves the catalog, one that is not ready yet does not. */
+  const attachCount = (socket: MockWebSocket, streamId: string) =>
+    socket.sent.filter((frame) => frame.includes('"attach"') && frame.includes(streamId)).length;
+
+  it("retries the attach when a still-listed agent reports stream_gone", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    const before = attachCount(socket, "agent:agent-a");
+    act(() => socket.message({
+      type: "detached", version: 1, streamId: "agent:agent-a", reason: "stream_gone",
+    }));
+
+    // Still listed, so this was not a deletion: attach again rather than write
+    // the agent off. Counted across the frame, because the socket re-attaches
+    // every subscription on open anyway.
+    expect(attachCount(socket, "agent:agent-a")).toBeGreaterThan(before);
+    expect(result.current.snapshots["agent-a"]).toBeDefined();
+  });
+
+  it("keeps accepting HTTP snapshots for a still-listed agent it gave up on", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    const http = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockReturnValue(http.promise);
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-a", expect.anything()));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    // Past the retry cap, so the agent really is written off.
+    const gone = { type: "detached", version: 1, streamId: "agent:agent-a", reason: "stream_gone" };
+    act(() => socket.message(gone));
+    act(() => socket.message(gone));
+    expect(result.current.snapshots["agent-a"]).toBeUndefined();
+
+    // ...and the transcript still resolves, because the catalog says the agent
+    // exists. Without this the spinner is permanent: nothing else can clear the
+    // flag, and no attach is left to deliver the snapshot that would.
+    http.resolve(snapshot("agent-a"));
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+  });
+
   it("does not restore a late HTTP snapshot after its stream is gone", async () => {
     const http = deferred<AgentSnapshot>();
     apiMock.loadAgent.mockReturnValue(http.promise);

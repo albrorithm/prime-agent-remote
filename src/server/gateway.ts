@@ -23,6 +23,7 @@ import {
   type ProblemDetails,
   type PushAccepted,
   type ServerFrame,
+  type StreamCursor,
 } from "../protocol.js";
 import { AuthService, type AuthenticatedSession } from "./auth.js";
 import {
@@ -102,6 +103,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   // same file, so a credential issued through one would not verify in the other.
   const auth = deps.auth ?? new AuthService(config, deviceStore);
   const staticRoot = deps.staticRoot ?? path.resolve(process.cwd(), "dist");
+  const AGENT_STREAM_PREFIX = "agent:";
   const mutationCache = new MutationCache<unknown>(10 * 60_000);
   const mutationLimiter = deps.mutationLimiter
     ?? new SlidingWindowLimiter(MUTATION_WINDOW_MS, MAX_MUTATIONS_PER_SESSION, MAX_TRACKED_MUTATION_SESSIONS);
@@ -603,8 +605,54 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     }
   }
 
+  /**
+   * Bring an agent's event stream into existence before attaching to it.
+   *
+   * A stream is registered as a side effect of `backend.agentSnapshot()`, so an
+   * agent could sit in the catalog — real, listed, selectable — with no stream
+   * of its own. `hub.attach()` cannot tell that apart from an agent that was
+   * deleted: both are a missing key, and both used to be answered
+   * `stream_gone`, which the web client reads as terminal. It detaches, evicts
+   * the agent and then refuses the HTTP snapshot that lands afterwards, and
+   * since only a WebSocket snapshot clears that state and no attach is left to
+   * deliver one, the transcript spinner never resolves.
+   *
+   * Worst right after a restart, when the hub holds `catalog` and nothing else,
+   * so every agent attach bounces until something happens to ask for a snapshot
+   * first. `createSession` already registers eagerly for this exact reason; this
+   * is the same guarantee for every other way an agent is reached.
+   *
+   * Shared across sockets and de-duplicated: projecting a snapshot can mean
+   * parsing tens of megabytes of session file, and two phones attaching at once
+   * must not each pay for it. After this, `stream_gone` means what it says.
+   */
+  const streamWarmups = new Map<string, Promise<void>>();
+
+  function warmAgentStream(streamId: string): Promise<void> | null {
+    if (hub.has(streamId) || !streamId.startsWith(AGENT_STREAM_PREFIX)) return null;
+    const agentId = streamId.slice(AGENT_STREAM_PREFIX.length);
+    // Catalog membership is the bound: an id nobody lists does no work here.
+    if (!backend.catalog().agents.some((agent) => agent.id === agentId)) return null;
+    const existing = streamWarmups.get(streamId);
+    if (existing) return existing;
+    const warmup = backend.agentSnapshot(agentId)
+      .then(() => undefined, () => undefined)
+      .finally(() => streamWarmups.delete(streamId));
+    streamWarmups.set(streamId, warmup);
+    return warmup;
+  }
+
   function configureWebSocket(ws: WebSocket, session: AuthenticatedSession): void {
     const subscriptions = new Map<string, () => void>();
+    const finishAttach = (streamId: string, since: StreamCursor | null | undefined): void => {
+      const attached = hub.attach(streamId, since, send);
+      if (!attached) {
+        send({ type: "detached", version: PROTOCOL_VERSION, streamId, reason: "stream_gone" });
+        return;
+      }
+      subscriptions.set(streamId, attached.detach);
+      send(attached.initial);
+    };
     let expiryTimer: NodeJS.Timeout | undefined;
     let cleaned = false;
 
@@ -678,13 +726,19 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
           return;
         }
         subscriptions.get(frame.streamId)?.();
-        const attached = hub.attach(frame.streamId, frame.since, send);
-        if (!attached) {
-          send({ type: "detached", version: PROTOCOL_VERSION, streamId: frame.streamId, reason: "stream_gone" });
+        const warmup = warmAgentStream(frame.streamId);
+        if (warmup) {
+          const streamId = frame.streamId;
+          const since = frame.since;
+          void warmup.then(() => {
+            // The socket may have gone, or its session expired, while a large
+            // session file was being read. Both are ordinary.
+            if (ws.readyState !== ws.OPEN || !auth.isSessionActive(session)) return;
+            finishAttach(streamId, since);
+          });
           return;
         }
-        subscriptions.set(frame.streamId, attached.detach);
-        send(attached.initial);
+        finishAttach(frame.streamId, frame.since);
       } catch {
         closeWebSocket(ws, 1011, "WebSocket processing failed");
       }

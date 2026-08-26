@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
-import type { AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
+import type { AgentSnapshot, AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
 import { BackendCapabilityError, type AttentionListener } from "./backend.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
+import { EventHub } from "./event-hub.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
 import { PushService, type PushSender } from "./push-service.js";
 import { PushSubscriptionStore } from "./push-store.js";
@@ -49,6 +50,35 @@ interface TestGateway {
 }
 
 const active: TestGateway[] = [];
+
+/**
+ * A DemoBackend that registers agent streams the way PrimeBackend does:
+ * lazily, as a side effect of projecting a snapshot.
+ *
+ * DemoBackend registers every stream in initialize(), which is exactly the
+ * state the transcript bug cannot occur in — so a test built on it proves
+ * nothing about the bug. This stands in for the real backend: the agent is in
+ * the catalog from the start, its stream does not exist until someone asks for
+ * its snapshot, and after a restart the hub holds `catalog` and nothing else.
+ */
+class LazyStreamBackend extends DemoBackend {
+  private lazyHub!: EventHub;
+
+  override async initialize(hub: EventHub): Promise<void> {
+    await super.initialize(hub);
+    this.lazyHub = hub;
+    // Undo the eager registration: only `catalog` survives a fresh start.
+    for (const agent of this.catalog().agents) hub.unregister(`agent:${agent.id}`);
+  }
+
+  override async agentSnapshot(agentId: string): Promise<AgentSnapshot | null> {
+    const snapshot = await super.agentSnapshot(agentId);
+    if (snapshot && !this.lazyHub.has(`agent:${agentId}`)) {
+      this.lazyHub.register(`agent:${agentId}`, snapshot);
+    }
+    return snapshot;
+  }
+}
 
 async function startGateway(options: {
   config?: Partial<GatewayConfig>;
@@ -359,6 +389,55 @@ describe("gateway sign-out", () => {
 
     const closes = await Promise.all(sockets.map((socket) => once(socket, "close")));
     for (const [code] of closes) expect(code).toBe(1008);
+  });
+
+  /* The socket-level half of the transcript-never-loads fix.
+
+     A client that attaches to an agent before anything has asked for that
+     agent's snapshot used to be told `stream_gone` — the same answer a deleted
+     agent gets — because the stream is registered as a side effect of
+     projecting a snapshot. The web client treats that as terminal and then
+     discards the HTTP snapshot that follows, so the transcript spins forever.
+     This is the ordinary order of events right after a restart, when the hub
+     holds `catalog` and nothing else. */
+  it("attaches to a listed agent that has never had a snapshot requested", async () => {
+    const t = await startGateway({ backend: new LazyStreamBackend() });
+    const client = await pairClient(t);
+    const body = await bootstrap(t, client);
+    const agentId = body.catalog.agents[0].id;
+
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+
+    // No GET /snapshot first: this is an attach arriving on its own.
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId: `agent:${agentId}`, since: null }));
+
+    await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    const detached = frames.find((frame) => frame.type === "detached");
+    expect(detached, `attach was refused: ${JSON.stringify(detached)}`).toBeUndefined();
+    expect(frames.some((frame) => frame.type === "snapshot" || frame.type === "event")).toBe(true);
+
+    socket.close();
+  });
+
+  it("still reports stream_gone for an agent that does not exist", async () => {
+    const t = await startGateway({ backend: new LazyStreamBackend() });
+    const client = await pairClient(t);
+    await bootstrap(t, client);
+
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId: "agent:no-such-agent", since: null }));
+
+    await vi.waitFor(() => expect(frames.some((frame) => frame.type === "detached")).toBe(true));
+    expect(frames.find((frame) => frame.type === "detached")).toMatchObject({ reason: "stream_gone" });
+
+    socket.close();
   });
 
   it("leaves another session's websocket connected", async () => {

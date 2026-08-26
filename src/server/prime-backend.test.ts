@@ -620,6 +620,48 @@ describe("projectPrimeTranscript", () => {
 });
 
 describe("PrimeBackend", () => {
+  /* The transcript-never-loads bug, at its source.
+
+     A stream is registered only as a side effect of agentSnapshot(), so an
+     agent can be in the catalog — real, listed, selectable — while its stream
+     does not exist. hub.attach() cannot tell that apart from a deleted agent:
+     both are a missing key. Answering "stream_gone" for the second case made
+     the web client detach, evict the agent, and then refuse the HTTP snapshot
+     that arrived afterwards — and since only a WebSocket snapshot clears that
+     state, and no attach was left to deliver one, the spinner never resolved.
+
+     This test pins the precondition. The gateway closes it by warming the
+     stream before attaching (see warmAgentStream); the socket-level proof is
+     in gateway.test.ts. */
+  it("registers an agent stream on demand, not only when a snapshot is asked for", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const summary = backend.catalog().agents[0];
+      expect(summary).toBeDefined();
+
+      // Listed in the catalog the client just bootstrapped from, and the socket
+      // itself is fine, because the catalog stream exists from startup.
+      expect(backend.catalog().agents.some((agent) => agent.id === summary.id)).toBe(true);
+      expect(hub.has("catalog")).toBe(true);
+
+      // Its own stream, however, does not exist yet. This is the state a client
+      // attaching before the first snapshot request finds.
+      expect(hub.has(`agent:${summary.id}`)).toBe(false);
+
+      // Asking for the snapshot is what creates it — which is why the gateway
+      // now does exactly that before deciding an attach has nothing to join.
+      await backend.agentSnapshot(summary.id);
+      expect(hub.has(`agent:${summary.id}`)).toBe(true);
+      expect(hub.attach(`agent:${summary.id}`, null, () => {})).not.toBeNull();
+    } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
   it("uses the public daemon adapter and validates browser approval choices", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     fixture.attachOptions = null;

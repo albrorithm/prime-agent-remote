@@ -49,6 +49,9 @@ const SNAPSHOT_CAP = 24;
 const ERROR_TTL_MS = 6000;
 export const SOCKET_PING_INTERVAL_MS = 25_000;
 export const SOCKET_PONG_TIMEOUT_MS = 10_000;
+/** One retry, then believe it. See the stream_gone handler. */
+const STREAM_GONE_RETRY_LIMIT = 1;
+
 export const SOCKET_OPEN_TIMEOUT_MS = 12_000;
 
 export function imageInputsForRequest(images: PreparedImage[]): ImageAttachmentInput[] {
@@ -253,7 +256,13 @@ function reducer(state: State, action: Action): State {
       const current = state.snapshots[action.value.agentId];
       // A stream that was explicitly declared gone must never be resurrected by a
       // late HTTP response, even though there is no current snapshot to protect.
-      if (!current && action.source === "http" && state.goneAgentIds.has(action.value.agentId)) return state;
+      // ...unless the catalog still lists it, in which case it was never
+      // deleted and refusing the snapshot leaves the transcript spinning with
+      // nothing able to clear the flag.
+      if (!current
+        && action.source === "http"
+        && state.goneAgentIds.has(action.value.agentId)
+        && !state.catalog.agents.some((agent) => agent.id === action.value.agentId)) return state;
       if (current && action.value.revision < current.revision) return state;
       if (current
         && action.value.revision === current.revision
@@ -380,6 +389,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const requestBaselinesRef = useRef(new Map<string, string[]>());
   const createRequestIdsRef = useRef(new Map<string, string>());
   const stateRef = useRef(state);
+  /* A stream that answered "gone" while its agent was still listed, and how
+     many times. One retry is enough against a gateway that warms the stream
+     before answering; the cap is what stops an attach/gone ping-pong if some
+     future server disagrees. */
+  const streamGoneRetries = useRef(new Map<string, number>());
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const retryCount = useRef(0);
@@ -448,6 +462,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markRealtimeUpdate = useCallback((streamId: string) => {
+    // Anything delivered on the stream means the attach took.
+    streamGoneRetries.current.delete(streamId);
     realtimeVersions.current.set(streamId, (realtimeVersions.current.get(streamId) ?? 0) + 1);
   }, []);
 
@@ -605,8 +621,24 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (frame.reason === "stream_gone") {
-          detach(frame.streamId);
           const agentId = frame.streamId.startsWith("agent:") ? frame.streamId.slice(6) : null;
+          // "Gone" used to arrive for an agent that was merely not registered
+          // yet, and evicting on it is unrecoverable: the HTTP snapshot is then
+          // refused, and only a WebSocket snapshot clears that — which needs the
+          // attach this just threw away. The gateway now warms a stream before
+          // answering, so this should not happen; catalog membership is the
+          // second opinion, because a deleted agent leaves the catalog.
+          const stillListed = agentId !== null
+            && stateRef.current.catalog.agents.some((agent) => agent.id === agentId);
+          const attempts = streamGoneRetries.current.get(frame.streamId) ?? 0;
+          if (stillListed && attempts < STREAM_GONE_RETRY_LIMIT) {
+            streamGoneRetries.current.set(frame.streamId, attempts + 1);
+            cursors.current.delete(frame.streamId);
+            attach(frame.streamId);
+            return;
+          }
+          streamGoneRetries.current.delete(frame.streamId);
+          detach(frame.streamId);
           if (agentId) dispatch({ type: "evict_snapshot", agentId });
           return;
         }
