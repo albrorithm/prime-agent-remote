@@ -694,7 +694,14 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     // Realtime recovery must not wait for the HTTP bootstrap or root snapshot.
     connect();
     try {
-      const value = await api.bootstrap({ signal: controller.signal });
+      // ownsUnauthorized: the catch below answers a 401 by resuming from the
+      // device credential, and it cannot do that if the central handler has
+      // already run. resetForUnauthorized() bumps initializationGeneration and
+      // aborts this very controller, synchronously, while this call is still
+      // unwinding — so both guards in the catch would fire and return before
+      // reaching the resume. That is what made every gateway restart ask for
+      // the pairing token again, with the resume path sitting there unused.
+      const value = await api.bootstrap({ signal: controller.signal, ownsUnauthorized: true });
       if (generation !== initializationGeneration.current || controller.signal.aborted) return;
       if (requestedAgentId.current === undefined) requestedAgentId.current = takeRequestedAgentId();
       dispatch({ type: "bootstrap", value, requestedAgentId: requestedAgentId.current });
@@ -734,7 +741,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (!resumeAttempted.current) {
           resumeAttempted.current = true;
           try {
-            await api.resume();
+            // Also ownsUnauthorized: a 401 here is the ordinary "this browser
+            // has never paired" answer, and the line below is already the
+            // reset. Letting the central handler fire as well would reset once
+            // from inside this call and once after it.
+            await api.resume({ ownsUnauthorized: true });
             void initializeRef.current();
             return;
           } catch {

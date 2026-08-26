@@ -13,6 +13,7 @@ const apiMock = vi.hoisted(() => {
     bootstrap: vi.fn(),
     loadAgent: vi.fn(),
     pair: vi.fn(),
+    resume: vi.fn(),
     onUnauthorized: vi.fn(),
     createSession: vi.fn(),
     sendMessage: vi.fn(),
@@ -28,6 +29,22 @@ const apiMock = vi.hoisted(() => {
   };
 });
 
+/**
+ * A 401 exactly as the real api.ts produces one.
+ *
+ * `decode()` runs every central onUnauthorized handler SYNCHRONOUSLY and only
+ * then throws, unless the caller passed `ownsUnauthorized`. Mocks that merely
+ * rejected with an ApiError were kinder than the real thing, and that is what
+ * hid a bug where the handler tore the session down before the caller's own
+ * catch could spend the device credential.
+ */
+function unauthorized(message = "Session expired") {
+  return async (options?: { ownsUnauthorized?: boolean }) => {
+    if (!options?.ownsUnauthorized) apiMock.unauthorized?.();
+    throw new apiMock.ApiError(401, message);
+  };
+}
+
 const pushMock = vi.hoisted(() => ({ revokePushLocally: vi.fn(async () => {}) }));
 vi.mock("./push", () => pushMock);
 
@@ -36,6 +53,7 @@ vi.mock("./api", () => ({
   bootstrap: apiMock.bootstrap,
   loadAgent: apiMock.loadAgent,
   pair: apiMock.pair,
+  resume: apiMock.resume,
   onUnauthorized: apiMock.onUnauthorized,
   createSession: apiMock.createSession,
   sendMessage: apiMock.sendMessage,
@@ -322,6 +340,44 @@ describe("GatewayProvider recovery and state ownership", () => {
 
     act(() => { vi.advanceTimersByTime(1_000); });
     expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+
+  /* The bug this pair of tests exists for.
+     A device that has paired once keeps a 400-day credential, and a gateway
+     restart is supposed to be invisible: bootstrap 401s, the store spends the
+     credential on a fresh session, and the reader never sees the token screen.
+     It never happened. decode() runs the central onUnauthorized handlers
+     synchronously before throwing, resetForUnauthorized() bumps
+     initializationGeneration and aborts the in-flight controller, and both
+     guards at the top of initialize()'s catch then returned early — so
+     api.resume() was unreachable. Every restart asked for the token again.
+     The old mocks rejected without firing the handler, so no test could see it. */
+  it("spends the device credential on a restart instead of asking for the token again", async () => {
+    apiMock.bootstrap
+      .mockImplementationOnce(unauthorized())
+      .mockResolvedValueOnce(bootstrap([summary("agent-a")]));
+    apiMock.resume.mockResolvedValueOnce({ csrfToken: "csrf-resumed" });
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+    expect(apiMock.resume).toHaveBeenCalledTimes(1);
+    expect(result.current.authRequired).toBe(false);
+    expect(apiMock.pair).not.toHaveBeenCalled();
+  });
+
+  it("falls through to pairing when the device credential is gone", async () => {
+    apiMock.bootstrap.mockImplementation(unauthorized());
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.authRequired).toBe(true));
+    // Attempted, not attempted exactly once: the credential is tried once per
+    // initialize, and a retry that re-initializes is entitled to try again.
+    expect(apiMock.resume).toHaveBeenCalled();
   });
 
   it("re-initializes after 2 consecutive socket failures and routes a 401 to pairing", async () => {

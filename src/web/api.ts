@@ -28,6 +28,15 @@ export const API_REQUEST_TIMEOUT_MS = 15_000;
 export interface ApiRequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Keep a 401 from reaching the central `onUnauthorized` handlers.
+   *
+   * A caller that answers 401 itself — by spending the device credential on a
+   * new session — has to, because those handlers tear the session down
+   * synchronously while this request is still unwinding, and the caller's own
+   * catch never gets to run.
+   */
+  ownsUnauthorized?: boolean;
 }
 
 export class ApiError extends Error {
@@ -65,7 +74,7 @@ export function onUnauthorized(handler: UnauthorizedHandler): () => void {
   return () => unauthorizedHandlers.delete(handler);
 }
 
-async function decode<T>(response: Response, schema?: ZodType<T>): Promise<T> {
+async function decode<T>(response: Response, schema?: ZodType<T>, ownsUnauthorized = false): Promise<T> {
   if (!response.ok) {
     const rawProblem = await response.json().catch(() => null) as unknown;
     const parsedProblem = rawProblem === null ? null : problemDetailsSchema.safeParse(rawProblem);
@@ -74,7 +83,7 @@ async function decode<T>(response: Response, schema?: ZodType<T>): Promise<T> {
     const problem: ProblemDetails | null = parsedProblem?.success
       ? parsedProblem.data
       : (rawProblem as ProblemDetails | null);
-    if (response.status === 401) {
+    if (response.status === 401 && !ownsUnauthorized) {
       for (const handler of unauthorizedHandlers) handler();
     }
     throw new ApiError(response.status, problem?.detail || problem?.title || `HTTP ${response.status}`);
@@ -104,7 +113,7 @@ async function request<T>(
 
   try {
     const response = await fetch(input, { ...init, signal: controller.signal });
-    return await decode(response, schema);
+    return await decode(response, schema, options.ownsUnauthorized);
   } catch (error) {
     if (timedOut) throw new ApiError(408, "The request timed out");
     throw error;
