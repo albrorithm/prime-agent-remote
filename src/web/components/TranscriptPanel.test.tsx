@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, TranscriptMessage } from "../../protocol";
 import type { useGateway } from "../gateway-store";
 import { SETTINGS_KEY, SettingsProvider } from "../settings";
-import { deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
+import { authorLineIds, deriveAgentLineage, TranscriptEntry, TranscriptPanel } from "./TranscriptPanel";
 
 type GatewayMockState = Pick<
   ReturnType<typeof useGateway>,
@@ -540,6 +540,33 @@ describe("agent switching resets scroll state", () => {
     expect(screen.queryByRole("dialog", { name: "Ancestors" })).not.toBeInTheDocument();
   });
 
+});
+
+describe("authorLineIds", () => {
+  function msg(id: string, role: TranscriptMessage["role"], presentation?: TranscriptMessage["presentation"]): TranscriptMessage {
+    return { id, role, text: id, state: "complete", createdAt: "2026-01-01T00:00:00.000Z", ...(presentation ? { presentation } : {}) };
+  }
+
+  it("attributes the first message and every change of speaker", () => {
+    const ids = authorLineIds([msg("u1", "user"), msg("a1", "assistant"), msg("a2", "assistant"), msg("u2", "user")]);
+    expect([...ids]).toEqual(["u1", "a1", "u2"]);
+  });
+
+  it("does not let timeline rows restate the speaker mid-answer", () => {
+    const ids = authorLineIds([
+      msg("u1", "user"),
+      msg("a1", "assistant"),
+      msg("t1", "system", { kind: "tool", label: "bash", status: "complete" }),
+      msg("think", "assistant", { kind: "thinking" }),
+      msg("a2", "assistant"),
+    ]);
+    expect([...ids]).toEqual(["u1", "a1"]);
+  });
+
+  it("returns nothing for a transcript of pure timeline rows", () => {
+    expect(authorLineIds([msg("t1", "system", { kind: "tool", label: "bash", status: "complete" })]).size).toBe(0);
+    expect(authorLineIds([]).size).toBe(0);
+  });
 });
 
 describe("turn grouping in the panel", () => {

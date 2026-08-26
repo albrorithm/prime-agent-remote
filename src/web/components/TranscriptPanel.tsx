@@ -198,15 +198,37 @@ function TranscriptImages({
   );
 }
 
+/**
+ * Ids of the message rows that should print an author line: the first
+ * message-shaped row, then every one whose speaker differs from the previous
+ * message-shaped row. Timeline rows (thinking, tool, python, refine, notice,
+ * error) are not messages and never break a run, so one answer interrupted by
+ * tool calls stays a single attributed block instead of restating the agent's
+ * name after every step.
+ */
+export function authorLineIds(messages: readonly TranscriptMessage[]): Set<string> {
+  const ids = new Set<string>();
+  let previousRole: TranscriptMessage["role"] | null = null;
+  for (const message of messages) {
+    if (message.presentation) continue;
+    if (message.role !== previousRole) ids.add(message.id);
+    previousRole = message.role;
+  }
+  return ids;
+}
+
 export function TranscriptEntry({
   message,
   agentName,
   searchTerm,
+  showAuthor = true,
   onImageLoad,
 }: {
   message: TranscriptMessage;
   agentName: string;
   searchTerm?: string;
+  /** False for a message continuing the previous speaker's run. */
+  showAuthor?: boolean;
   onImageLoad?: () => void;
 }) {
   const { settings } = useSettings();
@@ -278,11 +300,19 @@ export function TranscriptEntry({
   }
   return (
     <article className={`message ${message.role} ${message.state}`}>
-      <div className="message-author">
-        {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
-        <span>{message.role === "user" ? "You" : agentName}</span>
-        {settings.timestamps && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
-      </div>
+      {/* A continuation keeps the timestamp when the setting asks for one — the
+          author line is the redundant part, not the clock. */}
+      {showAuthor ? (
+        <div className="message-author">
+          {message.role === "user" ? <User aria-hidden="true" /> : <Bot aria-hidden="true" />}
+          <span>{message.role === "user" ? "You" : agentName}</span>
+          {settings.timestamps && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
+        </div>
+      ) : settings.timestamps ? (
+        <div className="message-author is-continuation">
+          <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+        </div>
+      ) : null}
       <div className="message-body">
         <TranscriptImages
           onLoad={onImageLoad}
@@ -367,6 +397,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   // the correct (and only meaningful) memo key.
   const snapshotMessages = selectedSnapshot?.messages;
   const turnItems = useMemo(() => groupIntoTurns(snapshotMessages ?? []), [snapshotMessages]);
+  const authorIds = useMemo(() => authorLineIds(snapshotMessages ?? []), [snapshotMessages]);
   const lastItem = turnItems.at(-1);
   const lastTurnKey = lastItem?.kind === "turn" ? lastItem.key : null;
   const sessionRecap = selectedSnapshot?.dashboard?.recap;
@@ -500,11 +531,11 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                       rows={item.rows}
                       recap={item.key === lastTurnKey ? sessionRecap : undefined}
                       renderRow={(message) => (
-                        <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
+                        <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} showAuthor={authorIds.has(message.id)} onImageLoad={handleTranscriptImageLoad} />
                       )}
                     />
                   ) : (
-                    <TranscriptEntry key={item.key} message={item.row} agentName={selectedAgent.name} onImageLoad={handleTranscriptImageLoad} />
+                    <TranscriptEntry key={item.key} message={item.row} agentName={selectedAgent.name} showAuthor={authorIds.has(item.row.id)} onImageLoad={handleTranscriptImageLoad} />
                   ))}
                   {pendingMessages.map((message) => (
                     <article key={message.id} className="message user pending" aria-label="Sending">
