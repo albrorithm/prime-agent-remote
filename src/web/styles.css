@@ -564,63 +564,8 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
   :root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }
 }
 
-@media (max-width: 1099px) {
-  .agent-lineage h1 { font-size: 16px; }
-  .agent-lineage button { font-size: 14px; }
-  .agent-hierarchy .lineage-forward-trigger { font-size: 13px; }
-  .message-author { font-size: 11px; }
-  .message-author svg { width: 14px; height: 14px; }
-  .message-author time { font-size: 11px; }
-  .message p, .markdown-list { font-size: 16px; line-height: 1.58; }
-  .timeline-row { font-size: 13px; line-height: 1.45; }
-  /* The expanded body of a thinking row must not be smaller than the row
-     that opened it, and the card that is asking a question must not carry
-     the smallest body text on screen. */
-  .thinking-full { font-size: 14px; }
-  .attention-card > p { font-size: 15px; }
-  .timeline-row > svg { width: 15px; height: 15px; flex-basis: 15px; }
-  .markdown-heading-1 { font-size: 24px; }
-  .markdown-heading-2 { font-size: 21px; }
-  .markdown-heading-3 { font-size: 18px; }
-  .markdown-heading-4, .markdown-heading-5, .markdown-heading-6 { font-size: 16px; }
-  .markdown-table { font-size: 14px; }
-  .markdown-math-block code { font-size: 14px; }
-  .code-block-bar { font-size: 10px; }
-  .code-block code { font-size: 13px; }
-  .jump-latest { font-size: 12px; }
-}
-
 @media (min-width: 721px) {
   .message.assistant .message-body { max-width: 65ch; }
-}
-
-@media (max-width: 430px) {
-  .agent-lineage h1 { max-width: 34vw; }
-  /* No breadcrumb competes for the row when the root is selected, so the
-     session title may use the width the ancestors would have taken. */
-  .lineage-title h1 { max-width: 58vw; }
-  .lineage-title { max-width: 58vw; }
-  .agent-lineage button { max-width: 84px; }
-  .lineage-forward-label { display: none; }
-  .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
-  .state-pill { display: none; }
-  /* Seven of the eight tones are circle-family lucide glyphs at 12px. Icon-only,
-     Circle (idle) and CircleMinus (inactive) are the same smudge on a phone, so
-     hiding the label here cost the chip its meaning. Spend width where the state
-     needs an action: the two quiet tones collapse to a presence dot (the
-     pre-chip behaviour, and the same language as .agent-state-dot), and the
-     tones that ask for something keep icon AND word. */
-  .agent-status-chip-label { display: none; }
-  .agent-status-chip { padding: 5px; }
-  .agent-status-chip.attention .agent-status-chip-label,
-  .agent-status-chip.blocked .agent-status-chip-label,
-  .agent-status-chip.failed .agent-status-chip-label { display: inline; }
-  .agent-status-chip.attention, .agent-status-chip.blocked, .agent-status-chip.failed { padding: 3px 7px; }
-  .agent-status-chip.idle > svg, .agent-status-chip.inactive > svg { display: none; }
-  .agent-status-chip.idle::before, .agent-status-chip.inactive::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
-  .agent-status-chip.idle::before { background: var(--border-emphasis); }
-  /* Hollow reads as "asleep" against idle's filled dot without adding a hue. */
-  .agent-status-chip.inactive::before { box-shadow: inset 0 0 0 1px var(--border-emphasis); }
 }
 
 @media (min-width: 1100px) {
@@ -752,13 +697,6 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .python-cell-fetch-error { color: var(--tone-danger); font-size: 11px; }
 .python-cell-note { margin: 0; color: var(--muted-2); font-size: 10px; }
 
-@media (max-width: 1099px) {
-  .python-cell-summary { font-size: 14px; line-height: 1.45; }
-  .python-cell-summary > svg { width: 16px; height: 16px; flex-basis: 16px; }
-  .python-cell-chevron { width: 16px; height: 16px; }
-  .python-cell-output code { font-size: 13px; }
-}
-
 /* === SessionDashboard (ws5) === */
 .session-dashboard { background: var(--panel); }
 .dashboard-scroll { display: flex; flex-direction: column; gap: 14px; padding: 13px 14px max(20px, env(safe-area-inset-bottom)); }
@@ -833,11 +771,6 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 .error-row-copy strong { color: var(--tone-danger); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .error-row-copy p { margin: 0; color: var(--tone-danger-text); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 
-@media (max-width: 1099px) {
-  .turn-summary { font-size: 13px; line-height: 1.45; }
-  .turn-chevron { width: 15px; height: 15px; flex-basis: 15px; }
-}
-
 /* === Settings panel === */
 .settings-scroll { display: flex; flex-direction: column; gap: 22px; padding: 16px 14px max(24px, env(safe-area-inset-bottom)); }
 .settings-group { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
@@ -872,3 +805,75 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 
 /* codeWrap setting: SyntaxHighlight stamps data-wrap so blocks soft-wrap instead of scrolling. */
 .code-block code[data-wrap] { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* === The mobile tier ===
+   Every max-width override lives here, at the end, rather than beside the
+   component it adjusts. Three separate 1099px blocks had accumulated as
+   components were added, and a block sitting ABOVE a later base rule loses to
+   it at equal specificity — .turn-summary's base rule outranked its own mobile
+   font-size that way. Keeping the tier last makes that class of silent
+   regression impossible, so a new override only has to land in the right
+   block, not at the right line. 430px stays after 1099px: the narrow-phone
+   rules refine the same properties and must win. */
+@media (max-width: 1099px) {
+  .agent-lineage h1 { font-size: 16px; }
+  .agent-lineage button { font-size: 14px; }
+  .agent-hierarchy .lineage-forward-trigger { font-size: 13px; }
+  .message-author { font-size: 11px; }
+  .message-author svg { width: 14px; height: 14px; }
+  .message-author time { font-size: 11px; }
+  .message p, .markdown-list { font-size: 16px; line-height: 1.58; }
+  .timeline-row { font-size: 13px; line-height: 1.45; }
+  /* The expanded body of a thinking row must not be smaller than the row
+     that opened it, and the card that is asking a question must not carry
+     the smallest body text on screen. */
+  .thinking-full { font-size: 14px; }
+  .attention-card > p { font-size: 15px; }
+  .timeline-row > svg { width: 15px; height: 15px; flex-basis: 15px; }
+  .markdown-heading-1 { font-size: 24px; }
+  .markdown-heading-2 { font-size: 21px; }
+  .markdown-heading-3 { font-size: 18px; }
+  .markdown-heading-4, .markdown-heading-5, .markdown-heading-6 { font-size: 16px; }
+  .markdown-table { font-size: 14px; }
+  .markdown-math-block code { font-size: 14px; }
+  .code-block-bar { font-size: 10px; }
+  .code-block code { font-size: 13px; }
+  .jump-latest { font-size: 12px; }
+  /* PythonCellRow */
+  .python-cell-summary { font-size: 14px; line-height: 1.45; }
+  .python-cell-summary > svg { width: 16px; height: 16px; flex-basis: 16px; }
+  .python-cell-chevron { width: 16px; height: 16px; }
+  .python-cell-output code { font-size: 13px; }
+  /* TurnGroup */
+  .turn-summary { font-size: 13px; line-height: 1.45; }
+  .turn-chevron { width: 15px; height: 15px; flex-basis: 15px; }
+}
+
+@media (max-width: 430px) {
+  .agent-lineage h1 { max-width: 34vw; }
+  /* No breadcrumb competes for the row when the root is selected, so the
+     session title may use the width the ancestors would have taken. */
+  .lineage-title h1 { max-width: 58vw; }
+  .lineage-title { max-width: 58vw; }
+  .agent-lineage button { max-width: 84px; }
+  .lineage-forward-label { display: none; }
+  .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
+  .state-pill { display: none; }
+  /* Seven of the eight tones are circle-family lucide glyphs at 12px. Icon-only,
+     Circle (idle) and CircleMinus (inactive) are the same smudge on a phone, so
+     hiding the label here cost the chip its meaning. Spend width where the state
+     needs an action: the two quiet tones collapse to a presence dot (the
+     pre-chip behaviour, and the same language as .agent-state-dot), and the
+     tones that ask for something keep icon AND word. */
+  .agent-status-chip-label { display: none; }
+  .agent-status-chip { padding: 5px; }
+  .agent-status-chip.attention .agent-status-chip-label,
+  .agent-status-chip.blocked .agent-status-chip-label,
+  .agent-status-chip.failed .agent-status-chip-label { display: inline; }
+  .agent-status-chip.attention, .agent-status-chip.blocked, .agent-status-chip.failed { padding: 3px 7px; }
+  .agent-status-chip.idle > svg, .agent-status-chip.inactive > svg { display: none; }
+  .agent-status-chip.idle::before, .agent-status-chip.inactive::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
+  .agent-status-chip.idle::before { background: var(--border-emphasis); }
+  /* Hollow reads as "asleep" against idle's filled dot without adding a hue. */
+  .agent-status-chip.inactive::before { box-shadow: inset 0 0 0 1px var(--border-emphasis); }
+}
