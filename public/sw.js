@@ -63,3 +63,69 @@ self.addEventListener("fetch", (event) => {
   }
   event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
 });
+
+const NOTIFICATION_FALLBACK_TITLE = "Prime Agent";
+const NOTIFICATION_FALLBACK_BODY = "A session needs your attention";
+
+function readPushPayload(event) {
+  try {
+    const value = event.data ? event.data.json() : null;
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    // A payload this worker cannot read still has to produce a notification:
+    // browsers revoke the push subscription of a worker that stays silent.
+    return null;
+  }
+}
+
+function boundedText(value, fallback) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+// The worker sets the badge itself rather than leaving it to the app. A badge
+// only written by the running app goes stale exactly when it matters, which is
+// while the app is closed — the state this notification just interrupted.
+async function applyBadge(count) {
+  const badging = self.navigator;
+  if (!badging) return;
+  try {
+    if (count > 0) await badging.setAppBadge?.(count);
+    else await (badging.clearAppBadge?.() ?? badging.setAppBadge?.(0));
+  } catch {
+    // iOS resolves this into nothing until notification permission is granted.
+  }
+}
+
+async function showAttention(payload) {
+  const badge = Number.isSafeInteger(payload?.badge) && payload.badge > 0 ? payload.badge : 0;
+  await applyBadge(badge);
+  const agentId = typeof payload?.agentId === "string" ? payload.agentId : null;
+  await self.registration.showNotification(boundedText(payload?.title, NOTIFICATION_FALLBACK_TITLE), {
+    body: boundedText(payload?.body, NOTIFICATION_FALLBACK_BODY),
+    icon: "/prime-mark-192.png",
+    badge: "/prime-mark-192.png",
+    // One notification per session: a second request from the same agent
+    // replaces the first rather than stacking up on the lock screen.
+    tag: agentId ? `attention:${agentId}` : "attention",
+    renotify: true,
+    data: { agentId },
+  });
+}
+
+self.addEventListener("push", (event) => {
+  event.waitUntil(showAttention(readPushPayload(event)));
+});
+
+async function openApp(agentId) {
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const existing = windows.find((client) => client.url.startsWith(self.location.origin));
+  // Focus rather than open a second window: the app the user already has is
+  // holding a connected socket and a scrolled transcript.
+  if (existing) return existing.focus();
+  return self.clients.openWindow(agentId ? `/?agent=${encodeURIComponent(agentId)}` : "/");
+}
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(openApp(event.notification.data ? event.notification.data.agentId : null));
+});

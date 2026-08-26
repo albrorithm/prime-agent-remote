@@ -172,6 +172,33 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/");
+});
+
+describe("GatewayProvider notification routing", () => {
+  // A notification tap opens `/?agent=<id>`; without this the app would land
+  // on the first root session and the user would have to find the one that
+  // buzzed them.
+  it("selects the agent a notification tap named, ahead of the first root", async () => {
+    window.history.replaceState(null, "", "/?agent=agent-b");
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-b"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
+    expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", expect.anything());
+    // Stripped, so a reload does not keep dragging the user back.
+    expect(window.location.search).toBe("");
+  });
+
+  it("ignores an agent the catalog does not have", async () => {
+    window.history.replaceState(null, "", "/?agent=agent-deleted");
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-a"));
+  });
 });
 
 describe("GatewayProvider recovery and state ownership", () => {

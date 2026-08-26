@@ -125,8 +125,26 @@ interface State {
   hadSession: boolean;
 }
 
+/**
+ * A notification tap opens `/?agent=<id>`. The id is read once per app launch
+ * and stripped from the URL immediately, so a reload or a shared link does not
+ * keep re-selecting a session the user has since navigated away from.
+ */
+export function takeRequestedAgentId(): string | null {
+  try {
+    const url = new URL(window.location.href);
+    const requested = url.searchParams.get("agent");
+    if (!requested) return null;
+    url.searchParams.delete("agent");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    return requested;
+  } catch {
+    return null;
+  }
+}
+
 type Action =
-  | { type: "bootstrap"; value: BootstrapResponse }
+  | { type: "bootstrap"; value: BootstrapResponse; requestedAgentId?: string | null }
   | { type: "auth_required"; signedOut?: true }
   | { type: "connection"; value: ConnectionPhase }
   | { type: "catalog"; value: CatalogSnapshot }
@@ -186,6 +204,12 @@ function reducer(state: State, action: Action): State {
         ? state.catalog
         : action.value.catalog;
       const first = catalog.agents.find((agent) => agent.parentId === null)?.id ?? null;
+      // A notification tap outranks a preserved selection: the user just told
+      // us which session they came here for.
+      const requested = action.requestedAgentId
+        && catalog.agents.some((agent) => agent.id === action.requestedAgentId)
+        ? action.requestedAgentId
+        : null;
       return {
         ...state,
         authRequired: false,
@@ -193,10 +217,11 @@ function reducer(state: State, action: Action): State {
         csrfToken: action.value.csrfToken,
         backend: action.value.backend,
         catalog,
-        selectedAgentId: state.selectedAgentId
-          && catalog.agents.some((agent) => agent.id === state.selectedAgentId)
-          ? state.selectedAgentId
-          : first,
+        selectedAgentId: requested
+          ?? (state.selectedAgentId
+            && catalog.agents.some((agent) => agent.id === state.selectedAgentId)
+            ? state.selectedAgentId
+            : first),
         error: null,
         hadSession: true,
       };
@@ -351,6 +376,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // Holds the latest `initialize` so the socket-retry scheduler (defined before
   // `initialize` exists) can call it without a circular useCallback dependency.
   const initializeRef = useRef<() => Promise<void>>(async () => {});
+  // `undefined` until the launch URL has been read; null once consumed.
+  const requestedAgentId = useRef<string | null | undefined>(undefined);
   stateRef.current = state;
 
   useEffect(() => {
@@ -639,8 +666,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     try {
       const value = await api.bootstrap({ signal: controller.signal });
       if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-      dispatch({ type: "bootstrap", value });
-      const first = value.catalog.agents.find((agent) => agent.parentId === null);
+      if (requestedAgentId.current === undefined) requestedAgentId.current = takeRequestedAgentId();
+      dispatch({ type: "bootstrap", value, requestedAgentId: requestedAgentId.current });
+      const first = value.catalog.agents.find((agent) => agent.id === requestedAgentId.current)
+        ?? value.catalog.agents.find((agent) => agent.parentId === null);
       if (first) {
         const streamId = `agent:${first.id}`;
         subscriptions.current.add(streamId);
