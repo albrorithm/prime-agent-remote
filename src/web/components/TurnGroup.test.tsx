@@ -192,8 +192,37 @@ describe("TurnGroup", () => {
     expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
   });
 
-  it("keeps the prompt and answer outside the collapsible work region", () => {
+  it("mounts no work rows while a settled turn is collapsed", () => {
     const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    expect(view.container.querySelector("details.turn-work")!.hasAttribute("open")).toBe(false);
+    expect(view.container.querySelector("[data-row='t1']")).toBeNull();
+    expect(view.container.querySelector("[data-row='p1']")).toBeNull();
+    // The summary still reports what is inside without paying for it.
+    expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
+  });
+
+  it("mounts work rows on first expand and keeps them after re-collapsing", async () => {
+    const user = userEvent.setup();
+    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    expect(view.container.querySelector("[data-row='t1']")).toBeNull();
+
+    await user.click(screen.getByText("2 steps · 1m 30s"));
+    expect(view.container.querySelector("[data-row='t1']")).not.toBeNull();
+
+    await user.click(screen.getByText("2 steps · 1m 30s"));
+    expect(view.container.querySelector("details.turn-work")!.hasAttribute("open")).toBe(false);
+    // Still mounted, so anything the user expanded inside survives the toggle.
+    expect(view.container.querySelector("[data-row='t1']")).not.toBeNull();
+  });
+
+  it("mounts a live turn's work rows immediately", () => {
+    const view = render(<TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
+    expect(view.container.querySelector("[data-row='t1']")).not.toBeNull();
+  });
+
+  it("keeps the prompt and answer outside the collapsible work region", () => {
+    // Opened, because a collapsed turn deliberately mounts no work rows at all.
+    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />, { turnsCollapsed: false });
     const details = view.container.querySelector("details.turn-work")!;
     expect(details.querySelector("[data-row='t1']")).not.toBeNull();
     expect(details.querySelector("[data-row='p1']")).not.toBeNull();

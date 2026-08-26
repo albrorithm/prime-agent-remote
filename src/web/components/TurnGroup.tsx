@@ -139,6 +139,13 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   // user is watching. `turnsCollapsed` only decides where a turn lands once
   // it settles, and any explicit choice still wins over both.
   const open = userChoice ?? (settled ? !settings.turnsCollapsed : true);
+  // Work rows stay unmounted until the turn is first opened. A closed <details>
+  // contributes none of their height, so this changes nothing on screen — but at
+  // a realistic 20 steps per turn those rows are ~89% of the transcript's DOM
+  // nodes and most of its heap. Once a turn has been opened its rows stay
+  // mounted, so re-collapsing preserves whatever the user expanded inside them.
+  const [everOpened, setEverOpened] = useState(open);
+  const mountWork = open || everOpened;
   const { steps } = summarizeTurnWork(work);
   const durationMs = turnWallClockMs(rows);
   const stepsLabel = `${steps} step${steps === 1 ? "" : "s"}`;
@@ -156,6 +163,7 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
             aria-label={`Turn details, ${countsLabel}`}
             onClick={(event) => {
               event.preventDefault();
+              if (!open) setEverOpened(true);
               setUserChoice(!open);
             }}
           >
@@ -163,7 +171,7 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
             <span className="turn-summary-text">{summaryText}</span>
             {useRecap && <span className="turn-summary-meta">{countsLabel}</span>}
           </summary>
-          <div className="turn-work-rows">{work.map(renderRow)}</div>
+          <div className="turn-work-rows">{mountWork ? work.map(renderRow) : null}</div>
         </details>
       )}
       {tail.map(renderRow)}
