@@ -8,46 +8,60 @@ import { WebSocket } from "ws";
 const port = 18787;
 const origin = `http://127.0.0.1:${port}`;
 const pairingToken = "smoke-test-token";
-const child = spawn(process.execPath, ["dist-server/server/index.js"], {
-  cwd: process.cwd(),
-  env: {
-    ...process.env,
-    NODE_ENV: "test",
-    PRIME_WEB_PORT: String(port),
-    PRIME_WEB_HOST: "127.0.0.1",
-    PRIME_WEB_ALLOWED_ORIGINS: origin,
-    PRIME_WEB_PAIRING_TOKEN: pairingToken,
-    PRIME_WEB_BACKEND: "demo",
-    PRIME_WEB_SECURE_COOKIE: "false",
-    // Deliberately no VAPID keys: this is the default deployment, and the
-    // whole gateway has to keep working without them.
-    PRIME_WEB_PUSH_STORE: join(mkdtempSync(join(tmpdir(), "prime-smoke-push-")), "push-subscriptions.json"),
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
+// A real generated pair, used only for its shape: nothing here reaches a push
+// service, and the default deployment below runs with no keys at all.
+const VAPID_ENV = {
+  PRIME_WEB_VAPID_PUBLIC_KEY: "BF1JW243veaons7uO0bcdtRHXVUTVJ74A_OzX7wiGhY114OpWvn0BOBrfXu2AhV3cmc0Nrb_LIRZHbFY4L8Xmgw",
+  PRIME_WEB_VAPID_PRIVATE_KEY: "IPDx2j8nr-ShPjNWSqXsCAK3fA0W2cM78tjLvtG0jLA",
+  PRIME_WEB_VAPID_SUBJECT: "mailto:operator@example.test",
+};
 
-let stderr = "";
-child.stderr.on("data", (chunk) => { stderr += chunk; });
+const gateways = [];
 
-function stop() {
-  if (!child.killed) child.kill("SIGTERM");
-}
-
-async function waitForServer() {
-  await new Promise((resolve, reject) => {
+function startGateway(gatewayPort, extraEnv = {}) {
+  const gatewayOrigin = `http://127.0.0.1:${gatewayPort}`;
+  const gateway = spawn(process.execPath, ["dist-server/server/index.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PRIME_WEB_PORT: String(gatewayPort),
+      PRIME_WEB_HOST: "127.0.0.1",
+      PRIME_WEB_ALLOWED_ORIGINS: gatewayOrigin,
+      PRIME_WEB_PAIRING_TOKEN: pairingToken,
+      PRIME_WEB_BACKEND: "demo",
+      PRIME_WEB_SECURE_COOKIE: "false",
+      // Never the operator's real store.
+      PRIME_WEB_PUSH_STORE: join(mkdtempSync(join(tmpdir(), "prime-smoke-push-")), "push-subscriptions.json"),
+      ...extraEnv,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  gateway.stderr.on("data", (chunk) => { stderr += chunk; });
+  gateways.push(gateway);
+  const ready = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`Gateway did not start. ${stderr}`)), 8_000);
-    child.once("exit", (code) => {
+    gateway.once("exit", (code) => {
       clearTimeout(timeout);
       reject(new Error(`Gateway exited early with ${code}. ${stderr}`));
     });
-    child.stdout.on("data", (chunk) => {
+    gateway.stdout.on("data", (chunk) => {
       if (String(chunk).includes("gateway listening")) {
         clearTimeout(timeout);
         resolve();
       }
     });
   });
+  return { origin: gatewayOrigin, ready };
 }
+
+function stop() {
+  for (const gateway of gateways) if (!gateway.killed) gateway.kill("SIGTERM");
+}
+
+// The default deployment: no VAPID keys. Everything below has to work in it.
+const defaultGateway = startGateway(port);
 
 async function json(response) {
   const value = await response.json();
@@ -81,7 +95,7 @@ function websocketFrame(cookie, streamId) {
 }
 
 try {
-  await waitForServer();
+  await defaultGateway.ready;
 
   const unauthenticated = await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin } });
   if (unauthenticated.status !== 401) throw new Error(`Expected unauthenticated 401, got ${unauthenticated.status}`);
@@ -301,6 +315,48 @@ try {
   });
   if (unsubscribe.status !== 202) {
     throw new Error(`Expected unsubscribe 202, got ${unsubscribe.status} ${await unsubscribe.text()}`);
+  }
+
+  // The configured path, end to end through the built server. Every other push
+  // assertion above runs with keys absent, so this is the only place a
+  // successful subscription is admitted by dist-server rather than by a unit
+  // test's in-process gateway.
+  const configured = startGateway(port + 1, VAPID_ENV);
+  await configured.ready;
+  const configuredPairResponse = await fetch(`${configured.origin}/api/v1/auth/pair`, {
+    method: "POST",
+    headers: { Origin: configured.origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: pairingToken }),
+  });
+  const configuredPair = await json(configuredPairResponse);
+  const configuredCookie = configuredPairResponse.headers.get("set-cookie")?.split(";", 1)[0];
+  if (!configuredCookie) throw new Error("Push-enabled gateway did not issue a cookie");
+  const configuredHeaders = {
+    Origin: configured.origin,
+    Cookie: configuredCookie,
+    "Content-Type": "application/json",
+    "X-CSRF-Token": configuredPair.csrfToken,
+  };
+  const configuredBootstrap = await json(await fetch(`${configured.origin}/api/v1/bootstrap`, {
+    headers: { Origin: configured.origin, Cookie: configuredCookie },
+  }));
+  if (configuredBootstrap.push?.enabled !== true
+    || configuredBootstrap.push.publicKey !== VAPID_ENV.PRIME_WEB_VAPID_PUBLIC_KEY) {
+    throw new Error("Bootstrap must publish the application server key when push is configured");
+  }
+  const subscribe = await fetch(`${configured.origin}/api/v1/push/subscribe`, {
+    method: "POST",
+    headers: configuredHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), subscription: pushSubscription }),
+  });
+  if (subscribe.status !== 202) throw new Error(`Subscribe failed: ${subscribe.status} ${await subscribe.text()}`);
+  const configuredUnsubscribe = await fetch(`${configured.origin}/api/v1/push/unsubscribe`, {
+    method: "POST",
+    headers: configuredHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), endpoint: pushSubscription.endpoint }),
+  });
+  if (configuredUnsubscribe.status !== 202) {
+    throw new Error(`Configured unsubscribe failed: ${configuredUnsubscribe.status}`);
   }
 
   console.log("Gateway smoke test passed");
