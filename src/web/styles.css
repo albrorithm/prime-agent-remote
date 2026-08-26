@@ -292,13 +292,30 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .session-action-note { margin: 0; color: var(--muted); font-size: .75rem; line-height: 1.45; }
 .session-action-group input { width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg); }
 .session-action-group input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
-.session-action-group .primary-button:disabled { opacity: .45; }
+/* Unfilled rather than a faded accent. `opacity: .45` over the accent lands on
+   a mid-grey slab that reads as heavier than the enabled outline buttons
+   beside it — the disabled control ends up the loudest thing in the view. */
+.session-action-group .primary-button:disabled { border: 1px solid var(--border); color: var(--muted); background: transparent; }
 /* Ending a session is reversible — it stays saved and resumable — so it reads
    as a considered choice rather than a danger. Delete is the one that shouts. */
 .secondary-button { display: flex; min-height: 48px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border-strong); border-radius: 11px; color: var(--text); background: var(--panel-raised-2); font-weight: 680; }
 .secondary-button:hover:not(:disabled) { border-color: var(--border-emphasis); background: var(--panel-raised-3); }
 .secondary-button:disabled { opacity: .45; }
 .secondary-button svg { width: 17px; height: 17px; }
+/* The one group in this view that destroys something, and the only one that
+   looks like it. It borrows the same danger hue as .attention-action.danger
+   and .composer-action.stop rather than inventing a second red. The colour is
+   a warning, not the guard: the button is disabled until the session name is
+   typed back. */
+.session-action-group.danger { border-color: var(--tone-danger-soft); }
+.session-action-group.danger h3 { color: var(--tone-danger); }
+.session-action-group.danger strong { overflow-wrap: anywhere; color: var(--text); font: 600 .8125rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Unfilled with a danger edge and glyph, matching .composer-action.stop: a
+   filled red block reads as the primary action of the view, and it is not. */
+.danger-button { display: flex; min-height: 48px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--tone-danger-soft); border-radius: 11px; color: var(--tone-danger); background: var(--panel-raised); font-weight: 750; }
+.danger-button:hover:not(:disabled) { border-color: var(--tone-danger); background: var(--panel-raised-2); }
+.danger-button:disabled { border-color: var(--border); color: var(--muted); background: transparent; }
+.danger-button svg { width: 17px; height: 17px; }
 
 .transcript-panel { position: relative; background: var(--bg); }
 /* `flex: 0 0 auto` with a min-height, never `flex: 0 0 <height>`: the basis

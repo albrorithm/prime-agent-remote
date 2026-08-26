@@ -1,4 +1,4 @@
-import { LoaderCircle, Power, SlidersHorizontal, X } from "lucide-react";
+import { LoaderCircle, Power, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import type { AgentSummary } from "../../protocol";
 import { MAX_SESSION_NAME_CHARS } from "../../protocol";
@@ -15,7 +15,7 @@ interface SessionActionsProps {
  * lead somewhere with nothing on it.
  */
 export function hasSessionActions(agent: AgentSummary): boolean {
-  return agent.capabilities.rename || agent.capabilities.stop;
+  return agent.capabilities.rename || agent.capabilities.stop || agent.capabilities.delete;
 }
 
 /**
@@ -25,13 +25,19 @@ export function hasSessionActions(agent: AgentSummary): boolean {
  * for that.
  */
 export function SessionActions({ agent, onClose }: SessionActionsProps) {
-  const { rename, stop } = useGateway();
+  const { deleteSession, rename, stop } = useGateway();
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [confirmName, setConfirmName] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   const trimmed = name.trim();
   const renameReady = agent.capabilities.rename && Boolean(trimmed) && trimmed !== agent.name && !renaming;
+  // Typed, not tapped. Delete is the one operation here that destroys
+  // something, and it sits in a view whose other controls are single taps —
+  // so confirming it has to be an act you could not perform by accident.
+  const deleteReady = agent.capabilities.delete && confirmName.trim() === agent.name && !deleting;
 
   async function submitRename() {
     if (!renameReady) return;
@@ -56,6 +62,20 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
       // The gateway store surfaces the error. Staying open lets the user see
       // the session's new state rather than guessing whether it ended.
       setStopping(false);
+    }
+  }
+
+  async function submitDelete() {
+    if (!deleteReady) return;
+    setDeleting(true);
+    try {
+      await deleteSession(agent.id, agent.name);
+      onClose();
+    } catch {
+      // The gateway store surfaces the error. Nothing was deleted, so the
+      // typed confirmation is cleared rather than left primed.
+      setConfirmName("");
+      setDeleting(false);
     }
   }
 
@@ -104,6 +124,29 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
             <button className="secondary-button" disabled={stopping} onClick={() => void submitStop()}>
               {stopping ? <LoaderCircle className="spin" aria-hidden="true" /> : <Power aria-hidden="true" />}
               {stopping ? "Ending session…" : "End session"}
+            </button>
+          </section>
+        )}
+        {agent.capabilities.delete && (
+          <section className="session-action-group danger" aria-labelledby="session-delete-heading">
+            <h3 id="session-delete-heading">Delete this session</h3>
+            <p className="session-action-note">
+              Deletes the session and its whole transcript from this machine. This cannot be undone
+              and there is no copy to restore from.
+            </p>
+            <p className="session-action-note">
+              Type <strong>{agent.name}</strong> to confirm.
+            </p>
+            <input
+              value={confirmName}
+              onChange={(event) => setConfirmName(event.target.value)}
+              aria-label="Type the session name to confirm deletion"
+              autoComplete="off"
+              maxLength={MAX_SESSION_NAME_CHARS}
+            />
+            <button className="danger-button" disabled={!deleteReady} onClick={() => void submitDelete()}>
+              {deleting ? <LoaderCircle className="spin" aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
+              {deleting ? "Deleting…" : "Delete permanently"}
             </button>
           </section>
         )}

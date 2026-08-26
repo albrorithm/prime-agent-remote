@@ -279,8 +279,21 @@ function reducer(state: State, action: Action): State {
     }
     case "event": {
       if (action.value.event.kind === "catalog.replaced") {
-        if (action.value.event.payload.revision < state.catalog.revision) return state;
-        return { ...state, catalog: action.value.event.payload };
+        const catalog = action.value.event.payload;
+        if (catalog.revision < state.catalog.revision) return state;
+        // A session can leave the catalog while it is the one on screen —
+        // deleted from here, or ended from anywhere else. Falling back to the
+        // first root keeps the app pointed at something real rather than at a
+        // selection the catalog no longer contains.
+        const stillListed = state.selectedAgentId !== null
+          && catalog.agents.some((agent) => agent.id === state.selectedAgentId);
+        return {
+          ...state,
+          catalog,
+          selectedAgentId: stillListed
+            ? state.selectedAgentId
+            : catalog.agents.find((agent) => agent.parentId === null)?.id ?? null,
+        };
       }
       const agentId = action.value.streamId.startsWith("agent:") ? action.value.streamId.slice(6) : null;
       if (!agentId) return state;
@@ -349,6 +362,7 @@ interface GatewayContextValue extends State {
   abort: (agentId?: string) => Promise<void>;
   rename: (agentId: string, name: string) => Promise<void>;
   stop: (agentId: string) => Promise<void>;
+  deleteSession: (agentId: string, confirmName: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   signOut: () => Promise<void>;
   reconnect: () => void;
@@ -1018,6 +1032,38 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     }
   }, [loadedRevision, runMutation, showError]);
 
+  // Irreversible, so it is the one mutation that names what it believes it is
+  // deleting: the gateway refuses if `confirmName` is not the session's
+  // current name.
+  const deleteSession = useCallback(async (agentId: string, confirmName: string) => {
+    const current = stateRef.current;
+    const generation = sessionGeneration.current;
+    try {
+      const revision = await loadedRevision(agentId, generation);
+      await runMutation(
+        agentId,
+        (next) => api.deleteAgent(agentId, current.csrfToken, next, confirmName),
+        revision,
+      );
+      if (generation !== sessionGeneration.current) return;
+      // Deliberately no `agent_revision` dispatch: there is no agent left to
+      // carry one. The catalog event removes the row, and the reducer moves
+      // the selection off it — this only has to reopen whatever it landed on,
+      // because a selection alone does not load a transcript.
+      dispatch({ type: "evict_snapshot", agentId });
+      const next = stateRef.current.selectedAgentId;
+      if (next && next !== agentId && !stateRef.current.snapshots[next]) {
+        await openAgent(next).catch(() => {});
+      }
+      showError(null);
+    } catch (error) {
+      if (generation === sessionGeneration.current) {
+        showError(humanizeError(error, "Could not delete the session"));
+      }
+      throw error;
+    }
+  }, [loadedRevision, openAgent, runMutation, showError]);
+
   const rename = useCallback(async (agentId: string, name: string) => {
     const current = stateRef.current;
     const generation = sessionGeneration.current;
@@ -1115,11 +1161,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       abort,
       rename,
       stop,
+      deleteSession,
       respond,
       signOut,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, respond, signOut, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, deleteSession, respond, signOut, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

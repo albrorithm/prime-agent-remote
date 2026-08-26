@@ -258,6 +258,26 @@ export function stopAgent(
   }, options, mutationAcceptedSchema);
 }
 
+/**
+ * Irreversible. `confirmName` is the name the user typed to confirm; the
+ * gateway refuses if it is not the session's current name, so a stale catalog
+ * deletes nothing rather than the wrong session.
+ */
+export function deleteAgent(
+  agentId: string,
+  csrfToken: string,
+  expectedRevision: number,
+  confirmName: string,
+  requestId: string = crypto.randomUUID(),
+  options?: ApiRequestOptions,
+) {
+  return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/delete`, csrfToken, {
+    requestId,
+    expectedRevision,
+    confirmName,
+  }, options, mutationAcceptedSchema);
+}
+
 export function respondToAttention(
   attentionId: string,
   csrfToken: string,

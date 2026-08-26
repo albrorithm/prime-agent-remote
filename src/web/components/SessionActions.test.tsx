@@ -6,9 +6,10 @@ import { hasSessionActions, SessionActions } from "./SessionActions";
 
 const rename = vi.fn();
 const stop = vi.fn();
+const deleteSession = vi.fn();
 
 vi.mock("../gateway-store", () => ({
-  useGateway: () => ({ rename, stop }),
+  useGateway: () => ({ deleteSession, rename, stop }),
 }));
 
 function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
@@ -43,7 +44,9 @@ function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
 
 describe("hasSessionActions", () => {
   it("is false for a session with nothing to manage", () => {
-    expect(hasSessionActions(makeAgent({ capabilities: { rename: false, stop: false } as AgentSummary["capabilities"] }))).toBe(false);
+    expect(hasSessionActions(makeAgent({
+      capabilities: { rename: false, stop: false, delete: false } as AgentSummary["capabilities"],
+    }))).toBe(false);
   });
 
   it("is true for a session that can only be stopped", () => {
@@ -59,12 +62,13 @@ describe("SessionActions", () => {
   it("offers nothing to rename when the backend refuses the capability", () => {
     render(
       <SessionActions
-        agent={makeAgent({ capabilities: { rename: false, stop: false } as AgentSummary["capabilities"] })}
+        agent={makeAgent({ capabilities: { rename: false, stop: false, delete: false } as AgentSummary["capabilities"] })}
         onClose={vi.fn()}
       />,
     );
     expect(screen.queryByRole("button", { name: "Rename session" })).toBeNull();
     expect(screen.queryByRole("button", { name: "End session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
   });
 
   it("offers to end a session only when the backend says it has one to end", async () => {
@@ -148,5 +152,73 @@ describe("SessionActions", () => {
     await waitFor(() => expect(rename).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText("Session name")).toHaveValue("Attempted name");
+  });
+
+  it("will not delete until the session name is typed back exactly", async () => {
+    const user = userEvent.setup();
+    deleteSession.mockReset().mockResolvedValue(undefined);
+    render(
+      <SessionActions
+        agent={makeAgent({ capabilities: { delete: true } as AgentSummary["capabilities"] })}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const confirm = screen.getByLabelText("Type the session name to confirm deletion");
+    const submit = screen.getByRole("button", { name: "Delete permanently" });
+    // Nothing typed, a near miss, and the wrong case all leave it inert.
+    expect(submit).toBeDisabled();
+    await user.type(confirm, "Original nam");
+    expect(submit).toBeDisabled();
+    await user.clear(confirm);
+    await user.type(confirm, "original name");
+    expect(submit).toBeDisabled();
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    await user.clear(confirm);
+    await user.type(confirm, "Original name");
+    expect(submit).toBeEnabled();
+  });
+
+  it("deletes with the session's own name, not the typed string", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    deleteSession.mockReset().mockResolvedValue(undefined);
+    render(
+      <SessionActions
+        agent={makeAgent({ capabilities: { delete: true } as AgentSummary["capabilities"] })}
+        onClose={onClose}
+      />,
+    );
+
+    // Surrounding whitespace still confirms, but what is sent is the name the
+    // catalog holds — the gateway checks it against the same thing.
+    await user.type(screen.getByLabelText("Type the session name to confirm deletion"), "  Original name  ");
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith("agent-1", "Original name"));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("clears the confirmation when the delete is refused", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    deleteSession.mockReset().mockRejectedValue(new Error("That is not this session's name"));
+    render(
+      <SessionActions
+        agent={makeAgent({ capabilities: { delete: true } as AgentSummary["capabilities"] })}
+        onClose={onClose}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Type the session name to confirm deletion"), "Original name");
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    await waitFor(() => expect(deleteSession).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+    // Nothing was deleted, so the confirmation is not left primed for a
+    // second tap.
+    expect(screen.getByLabelText("Type the session name to confirm deletion")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Delete permanently" })).toBeDisabled();
   });
 });

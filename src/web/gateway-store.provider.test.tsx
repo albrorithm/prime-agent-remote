@@ -21,6 +21,7 @@ const apiMock = vi.hoisted(() => {
     abortAgent: vi.fn(),
     renameAgent: vi.fn(),
     stopAgent: vi.fn(),
+    deleteAgent: vi.fn(),
     respondToAttention: vi.fn(),
     signOut: vi.fn(),
     unauthorized: null as null | (() => void),
@@ -43,6 +44,7 @@ vi.mock("./api", () => ({
   abortAgent: apiMock.abortAgent,
   renameAgent: apiMock.renameAgent,
   stopAgent: apiMock.stopAgent,
+  deleteAgent: apiMock.deleteAgent,
   respondToAttention: apiMock.respondToAttention,
   signOut: apiMock.signOut,
   humanizeError: (error: unknown, fallback: string) =>
@@ -174,6 +176,7 @@ beforeEach(() => {
   apiMock.abortAgent.mockReset();
   apiMock.renameAgent.mockReset();
   apiMock.stopAgent.mockReset();
+  apiMock.deleteAgent.mockReset();
   apiMock.respondToAttention.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
   pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
@@ -690,6 +693,63 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(apiMock.stopAgent).toHaveBeenCalledWith("agent-b", "csrf", 4);
     expect(result.current.snapshots["agent-b"].revision).toBe(5);
     expect(result.current.selectedAgentId).toBe("agent-a");
+  });
+
+  it("drops the deleted session's snapshot and carries the typed name through", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id, id === "agent-b" ? 6 : 1)));
+    apiMock.deleteAgent.mockResolvedValue({ accepted: true, requestId: "request", revision: 7 });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(() => result.current.deleteSession("agent-b", "agent-b"));
+
+    expect(apiMock.deleteAgent).toHaveBeenCalledWith("agent-b", "csrf", 6, "agent-b");
+    // No revision is recorded for an agent that no longer exists.
+    expect(result.current.snapshots["agent-b"]).toBeUndefined();
+    expect(result.current.selectedAgentId).toBe("agent-a");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("keeps the session when the delete is refused", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a", 2));
+    apiMock.deleteAgent.mockRejectedValue(new apiMock.ApiError(403, "That is not this session's name"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(async () => {
+      await expect(result.current.deleteSession("agent-a", "wrong")).rejects.toMatchObject({ status: 403 });
+    });
+
+    expect(result.current.error).toBe("That is not this session's name");
+    expect(result.current.snapshots["agent-a"].revision).toBe(2);
+  });
+
+  it("moves the selection off a session that leaves the catalog", async () => {
+    // Deleted from here, or ended anywhere else — either way the app must not
+    // be left pointing at a row the catalog no longer has.
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-a"));
+
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    act(() => socket.message({
+      type: "event",
+      version: 1,
+      envelope: {
+        version: 1,
+        streamId: "catalog",
+        epoch: "epoch",
+        seq: 2,
+        emittedAt: "2026-01-01T00:00:00.000Z",
+        event: { kind: "catalog.replaced", payload: { revision: 2, agents: [summary("agent-b")] } },
+      },
+    }));
+
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
   });
 
   it("applies an attention response to its owning agent after selection changes", async () => {

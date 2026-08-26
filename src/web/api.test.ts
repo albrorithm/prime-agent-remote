@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut, stopAgent } from "./api";
+import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut, stopAgent } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -271,5 +271,27 @@ describe("stopAgent", () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
     expect(init.headers["X-CSRF-Token"]).toBe("csrf");
     expect(JSON.parse(init.body as string)).toEqual({ requestId, expectedRevision: 1 });
+  });
+});
+
+describe("deleteAgent", () => {
+  it("carries the confirming name to the agent's own delete route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 9,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteAgent("agent-1", "csrf", 8, "Previous session", requestId);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent-1/delete");
+    const init = fetchMock.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
+    expect(init.headers["X-CSRF-Token"]).toBe("csrf");
+    expect(JSON.parse(init.body as string)).toEqual({
+      requestId,
+      expectedRevision: 8,
+      confirmName: "Previous session",
+    });
   });
 });
