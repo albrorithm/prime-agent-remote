@@ -4,12 +4,15 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
-import type { CellOutput } from "../protocol.js";
+import type { AttentionRequest, CellOutput } from "../protocol.js";
+import type { AttentionListener } from "./backend.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
+import { PushService, type PushSender } from "./push-service.js";
+import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 
 const ORIGIN = "https://gateway.example.test";
@@ -49,6 +52,7 @@ async function startGateway(options: {
   mutationLimiter?: SlidingWindowLimiter;
   staticRootName?: string;
   backend?: DemoBackend;
+  pushService?: PushService;
 } = {}): Promise<TestGateway> {
   const tmpDir = await mkdtemp(join(tmpdir(), "gateway-test-"));
   const staticRoot = join(tmpDir, options.staticRootName ?? "static");
@@ -59,6 +63,7 @@ async function startGateway(options: {
     backend: options.backend ?? new DemoBackend(),
     staticRoot,
     mutationLimiter: options.mutationLimiter,
+    pushService: options.pushService,
   });
   const server = createServer(gateway.requestListener);
   server.on("upgrade", gateway.upgradeListener);
@@ -820,5 +825,89 @@ describe("push subscription routes", () => {
     });
     expect(t.gateway.pushStore.list().map((record) => record.endpoint))
       .toEqual(["https://push.example.test/staying"]);
+  });
+});
+
+/**
+ * The demo backend never raises attention, so this adds the hook the prime
+ * backend calls from `publishAttentionAdded`.
+ */
+class AttentionRaisingBackend extends DemoBackend {
+  private readonly listeners: AttentionListener[] = [];
+
+  onAttentionAdded(listener: AttentionListener): void {
+    this.listeners.push(listener);
+  }
+
+  raise(attention: AttentionRequest): void {
+    for (const listener of this.listeners) listener(attention);
+  }
+}
+
+describe("attention fan-out to push", () => {
+  it("pushes the session name and attention kind, and nothing the daemon wrote", async () => {
+    const sent: string[] = [];
+    const sender: PushSender = async (_subscription, payload) => {
+      sent.push(payload);
+      return { statusCode: 201 };
+    };
+    const storeDir = await mkdtemp(join(tmpdir(), "gateway-fanout-"));
+    try {
+      const store = new PushSubscriptionStore(join(storeDir, "push-subscriptions.json"));
+      await store.load();
+      await store.upsert({
+        endpoint: "https://push.example.test/phone",
+        p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU",
+        auth: "3v0fHqQhH3xQ1r6mB3dOsg",
+        sessionId: "session-a",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const backend = new AttentionRaisingBackend();
+      await startGateway({
+        config: { webPush: VAPID },
+        backend,
+        pushService: new PushService(store, VAPID, sender),
+      });
+
+      backend.raise({
+        id: "attention-9",
+        agentId: "child-review",
+        kind: "dialog",
+        title: "SENTINEL-daemon-authored-title",
+        detail: "SENTINEL-daemon-authored-detail",
+        revision: 3,
+        options: [{ id: "confirm", label: "SENTINEL-daemon-authored-option", tone: "safe" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+      expect(sent[0]).not.toContain("SENTINEL");
+      expect(JSON.parse(sent[0])).toMatchObject({
+        // "Security reviewer" is the demo agent that carries attention, and
+        // the badge counts it once across the whole catalog.
+        title: "Security reviewer",
+        body: "Waiting on your decision",
+        agentId: "child-review",
+        attentionId: "attention-9",
+        badge: 1,
+      });
+    } finally {
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent when the gateway has no VAPID keys", async () => {
+    const backend = new AttentionRaisingBackend();
+    const t = await startGateway({ backend });
+    expect(() => backend.raise({
+      id: "attention-9",
+      agentId: "child-review",
+      kind: "dialog",
+      title: "Anything",
+      revision: 3,
+      options: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    })).not.toThrow();
+    expect(t.gateway.pushStore.list()).toEqual([]);
   });
 });

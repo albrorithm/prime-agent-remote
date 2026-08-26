@@ -6,6 +6,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   abortRequestSchema,
+  attentionAgentCount,
   attentionResponseSchema,
   cellOutputSchema,
   clientFrameSchema,
@@ -39,6 +40,8 @@ import {
   MAX_IMAGE_REQUEST_BASE64_CHARS,
   validateImageAttachments,
 } from "./image-attachments.js";
+import { buildAttentionPushPayload } from "./push-payload.js";
+import { PushService } from "./push-service.js";
 import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import {
@@ -69,6 +72,7 @@ export interface GatewayDeps {
   staticRoot?: string;
   mutationLimiter?: SlidingWindowLimiter;
   pushStore?: PushSubscriptionStore;
+  pushService?: PushService;
 }
 
 export interface Gateway {
@@ -95,6 +99,25 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   // Never throws: an unreadable store leaves push inert, which must not stop
   // the gateway from serving everything else.
   await pushStore.load();
+  const pushService = deps.pushService
+    ?? (config.webPush ? new PushService(pushStore, config.webPush) : null);
+
+  // Push fires only on an authoritative attention request — a real
+  // AttentionRequest the daemon raised and is waiting on. Never on
+  // `needsInput`, which the protocol documents as an advisory guess and never
+  // a queue; waking a phone for a guess teaches people to ignore the ones that
+  // matter.
+  if (pushService) {
+    backend.onAttentionAdded?.((attention) => {
+      const agents = backend.catalog().agents;
+      const payload = buildAttentionPushPayload(
+        attention,
+        agents.find((agent) => agent.id === attention.agentId)?.name,
+        attentionAgentCount(agents),
+      );
+      void pushService.notify(payload);
+    });
+  }
 
   function securityHeaders(res: ServerResponse): void {
     res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");

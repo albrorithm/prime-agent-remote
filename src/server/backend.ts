@@ -1,6 +1,7 @@
 import type {
   AgentSnapshot,
   AgentSummary,
+  AttentionRequest,
   CatalogSnapshot,
   CellOutput,
   DirectoryListing,
@@ -239,9 +240,23 @@ export class CoalescedRefreshQueue {
   }
 }
 
+/**
+ * Notified for every authoritative attention request, whether or not anything
+ * is listening to the agent's stream.
+ *
+ * This deliberately does not ride on `EventHub`. `agent.attention_added` is
+ * only published when a client is attached to that agent's stream, which is
+ * never true in the case that matters most: phone locked, app closed, nobody
+ * attached. Anything that must react to attention regardless — push — needs a
+ * signal that does not depend on someone already watching.
+ */
+export type AttentionListener = (attention: AttentionRequest) => void;
+
 export interface AgentBackend {
   readonly kind: "demo" | "prime";
   initialize(hub: EventHub): Promise<void>;
+  /** Optional: a backend that never raises attention need not implement it. */
+  onAttentionAdded?(listener: AttentionListener): void;
   catalog(): CatalogSnapshot;
   agentSnapshot(agentId: string): Promise<AgentSnapshot | null>;
   sendMessage(input: SendMessageInput): Promise<MutationAccepted>;

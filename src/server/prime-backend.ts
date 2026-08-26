@@ -48,6 +48,7 @@ import {
   type AttachmentData,
   type AbortInput,
   type AgentBackend,
+  type AttentionListener,
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
   type ResolveAttentionInput,
@@ -1375,6 +1376,7 @@ function resolveModuleSpecifier(specifier: string): string {
 export class PrimeBackend implements AgentBackend {
   readonly kind = "prime" as const;
   private hub!: EventHub;
+  private readonly attentionListeners: AttentionListener[] = [];
   private module!: PrimeModule;
   private client!: PrimeDaemonClient;
   private catalogState: CatalogSnapshot = { revision: 0, agents: [] };
@@ -1414,6 +1416,10 @@ export class PrimeBackend implements AgentBackend {
     private readonly moduleSpecifier: string,
     private readonly socketOverride?: string,
   ) {}
+
+  onAttentionAdded(listener: AttentionListener): void {
+    this.attentionListeners.push(listener);
+  }
 
   async initialize(hub: EventHub): Promise<void> {
     this.hub = hub;
@@ -2475,9 +2481,12 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private publishAttentionAdded(id: string, pending: PendingExtension): void {
+    // Projected unconditionally. The stream publication below is skipped when
+    // nobody is attached, but the attention listener must fire either way —
+    // "nobody is attached" is the phone-locked case push exists for.
+    const attention = this.projectAttention(id, pending);
     const snapshot = this.snapshots.get(pending.publicAgentId);
     if (snapshot) {
-      const attention = this.projectAttention(id, pending);
       snapshot.attention = [...snapshot.attention.filter((item) => item.id !== id), attention];
       snapshot.revision = Math.max(snapshot.revision + 1, pending.revision);
       pending.revision = snapshot.revision;
@@ -2489,6 +2498,15 @@ export class PrimeBackend implements AgentBackend {
       }
     }
     this.publishCatalogAttention(pending.publicAgentId);
+    // Last, so a listener that reads the catalog sees this request counted.
+    for (const listener of this.attentionListeners) {
+      try {
+        listener(attention);
+      } catch (error) {
+        // An observer must never break the daemon's attention path.
+        console.error("An attention listener failed", error);
+      }
+    }
   }
 
   private removePendingAttention(id: string, pending: PendingExtension, publish: boolean): boolean {

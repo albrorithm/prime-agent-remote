@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
-import type { ServerFrame } from "../protocol.js";
+import type { AttentionRequest, ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
@@ -1280,6 +1280,41 @@ describe("PrimeBackend", () => {
       expect(fixture.attachOptions).toMatchObject({ activeSessionId: "private-active-replaced" });
     } finally {
       fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  // The event `agent.attention_added` is only published when a client is
+  // attached to that agent's stream, which is never true in the case push
+  // exists for: phone locked, app closed, nothing watching. So the listener
+  // has to fire independently of the hub.
+  it("notifies attention listeners even when nothing is attached to the agent stream", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    const seen: AttentionRequest[] = [];
+    backend.onAttentionAdded((attention) => seen.push(attention));
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      hub.unregister(`agent:${agentId}`);
+      expect(hub.has(`agent:${agentId}`)).toBe(false);
+
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      listener({
+        type: "extension_ui_request",
+        request: { id: "app-was-closed", method: "confirm", payload: { title: "Approve?" } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ id: "app-was-closed", agentId, kind: "dialog" });
+    } finally {
       hub.close();
       await backend.close();
     }
