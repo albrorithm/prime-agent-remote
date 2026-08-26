@@ -293,10 +293,22 @@ export interface AgentSnapshot {
   goal?: AgentGoal;
 }
 
+/**
+ * Whether this gateway can push at all. The Settings panel needs to tell an
+ * operator who has configured no VAPID keys that push is off, rather than
+ * offering a switch that silently does nothing.
+ */
+export interface WebPushAvailability {
+  enabled: boolean;
+  /** VAPID application server key, base64url. Public by design; null when off. */
+  publicKey: string | null;
+}
+
 export interface BootstrapResponse {
   protocolVersion: typeof PROTOCOL_VERSION;
   csrfToken: string;
   backend: "demo" | "prime";
+  push: WebPushAvailability;
   catalog: CatalogSnapshot;
 }
 
@@ -588,6 +600,7 @@ export const bootstrapResponseSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   csrfToken: z.string(),
   backend: z.enum(["demo", "prime"]),
+  push: z.object({ enabled: z.boolean(), publicKey: z.string().nullable() }),
   catalog: catalogSnapshotSchema,
 });
 
@@ -752,6 +765,46 @@ export const abortRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
 });
+
+export const MAX_PUSH_ENDPOINT_CHARS = 1024;
+export const MAX_PUSH_KEY_CHARS = 256;
+
+/**
+ * The browser's PushSubscription, narrowed to the three fields an encrypted
+ * send needs. Strict on purpose: `toJSON()` also carries `expirationTime`, and
+ * a client that sends more than the gateway asked for should hear about it.
+ */
+export const pushSubscriptionSchema = z.object({
+  endpoint: z.string().url().max(MAX_PUSH_ENDPOINT_CHARS),
+  keys: z.object({
+    p256dh: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
+    auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
+  }).strict(),
+}).strict();
+
+export type PushSubscriptionInput = z.infer<typeof pushSubscriptionSchema>;
+
+export const pushSubscribeRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  subscription: pushSubscriptionSchema,
+}).strict();
+
+export const pushUnsubscribeRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  endpoint: z.string().url().max(MAX_PUSH_ENDPOINT_CHARS),
+}).strict();
+
+// Push has no agent and therefore no revision to echo, so it cannot reuse
+// mutationAcceptedSchema.
+export const pushAcceptedSchema = z.object({
+  accepted: z.literal(true),
+  requestId: z.string(),
+});
+
+export interface PushAccepted {
+  accepted: true;
+  requestId: string;
+}
 
 export const slashCommandResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("session_accepted") }),

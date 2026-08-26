@@ -26,6 +26,9 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     backend: "demo",
     primeModule: "unused-in-tests",
     sessionTtlMs: 60_000,
+    // startGateway always overrides this with a path inside the test's own
+    // temp directory; the default only exists to satisfy the type.
+    webPushStorePath: join(tmpdir(), "prime-gateway-test-unused-push-store.json"),
     ...overrides,
   };
 }
@@ -49,7 +52,10 @@ async function startGateway(options: {
 } = {}): Promise<TestGateway> {
   const tmpDir = await mkdtemp(join(tmpdir(), "gateway-test-"));
   const staticRoot = join(tmpDir, options.staticRootName ?? "static");
-  const gateway = await createGateway(testConfig(options.config), {
+  const gateway = await createGateway(testConfig({
+    webPushStorePath: join(tmpDir, "push-subscriptions.json"),
+    ...options.config,
+  }), {
     backend: options.backend ?? new DemoBackend(),
     staticRoot,
     mutationLimiter: options.mutationLimiter,
@@ -111,6 +117,7 @@ function mutationHeaders(client: PairedClient): Record<string, string> {
 interface BootstrapBody {
   csrfToken: string;
   backend: string;
+  push: { enabled: boolean; publicKey: string | null };
   catalog: {
     agents: Array<{
       id: string;
@@ -651,5 +658,167 @@ describe("gateway static serving", () => {
     const other = await fetch(`${t.baseUrl}/missing.js`);
     expect(other.status).toBe(404);
     expect(((await other.json()) as { title: string }).title).toBe("Not found");
+  });
+});
+
+const VAPID = {
+  publicKey: "BF1JW243veaons7uO0bcdtRHXVUTVJ74A_OzX7wiGhY114OpWvn0BOBrfXu2AhV3cmc0Nrb_LIRZHbFY4L8Xmgw",
+  privateKey: "IPDx2j8nr-ShPjNWSqXsCAK3fA0W2cM78tjLvtG0jLA",
+  subject: "mailto:operator@example.test",
+};
+
+function subscriptionBody(endpoint = "https://push.example.test/device-one") {
+  return {
+    requestId: randomUUID(),
+    subscription: { endpoint, keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" } },
+  };
+}
+
+function pushRequest(t: TestGateway, client: PairedClient, action: "subscribe" | "unsubscribe", body: unknown) {
+  return fetch(`${t.baseUrl}/api/v1/push/${action}`, {
+    method: "POST",
+    headers: mutationHeaders(client),
+    body: JSON.stringify(body),
+  });
+}
+
+describe("push subscription routes", () => {
+  it("advertises push as off when the gateway has no VAPID keys", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    expect((await bootstrap(t, client)).push).toEqual({ enabled: false, publicKey: null });
+  });
+
+  it("advertises the application server key when push is configured", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    expect((await bootstrap(t, client)).push).toEqual({ enabled: true, publicKey: VAPID.publicKey });
+  });
+
+  // The default deployment has no keys. Refusing here is what keeps the
+  // browser from handing over a permission this gateway can never act on.
+  it("refuses a subscription when push is not configured", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const response = await pushRequest(t, client, "subscribe", subscriptionBody());
+    expect(response.status).toBe(503);
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  it("stores a subscription bound to the requesting session", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    const response = await pushRequest(t, client, "subscribe", subscriptionBody());
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ accepted: true });
+    expect(t.gateway.pushStore.list()).toHaveLength(1);
+    expect(t.gateway.pushStore.list()[0].endpoint).toBe("https://push.example.test/device-one");
+  });
+
+  it("inherits the mutation gate: Origin, CSRF, and request-ID binding", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+
+    const noCsrf = await fetch(`${t.baseUrl}/api/v1/push/subscribe`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: client.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(subscriptionBody()),
+    });
+    expect(noCsrf.status).toBe(403);
+
+    const unauthenticated = await fetch(`${t.baseUrl}/api/v1/push/subscribe`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify(subscriptionBody()),
+    });
+    expect(unauthenticated.status).toBe(401);
+
+    const body = subscriptionBody();
+    expect((await pushRequest(t, client, "subscribe", body)).status).toBe(202);
+    expect((await pushRequest(t, client, "subscribe", body)).status).toBe(202);
+    expect(t.gateway.pushStore.list()).toHaveLength(1);
+
+    const rebound = await pushRequest(t, client, "subscribe", {
+      ...body,
+      subscription: { ...body.subscription, endpoint: "https://push.example.test/other" },
+    });
+    expect(rebound.status).toBe(409);
+  });
+
+  it("rejects a malformed subscription", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    for (const body of [
+      { requestId: randomUUID(), subscription: { endpoint: "not-a-url", keys: { p256dh: "k", auth: "a" } } },
+      { requestId: randomUUID(), subscription: { endpoint: "https://push.example.test/x" } },
+      { requestId: "not-a-uuid", subscription: subscriptionBody().subscription },
+      // Strict: `toJSON()` carries expirationTime, which the gateway did not ask for.
+      { requestId: randomUUID(), subscription: { ...subscriptionBody().subscription, expirationTime: null } },
+    ]) {
+      expect((await pushRequest(t, client, "subscribe", body)).status).toBe(400);
+    }
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  it("unsubscribes an endpoint, and succeeds for one it never held", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    await pushRequest(t, client, "subscribe", subscriptionBody());
+
+    const unknown = await pushRequest(t, client, "unsubscribe", {
+      requestId: randomUUID(),
+      endpoint: "https://push.example.test/never-seen",
+    });
+    expect(unknown.status).toBe(202);
+    expect(t.gateway.pushStore.list()).toHaveLength(1);
+
+    const removed = await pushRequest(t, client, "unsubscribe", {
+      requestId: randomUUID(),
+      endpoint: "https://push.example.test/device-one",
+    });
+    expect(removed.status).toBe(202);
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  // The asymmetry that makes push worth having: a TTL lapse must leave the
+  // subscription alive, or push stops working overnight.
+  it("revokes on sign-out but not on session expiry", async () => {
+    const t = await startGateway({ config: { webPush: VAPID, sessionTtlMs: 150 } });
+    const expiring = await pairClient(t);
+    await pushRequest(t, expiring, "subscribe", subscriptionBody("https://push.example.test/overnight"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: expiring.cookie } })).status).toBe(401);
+    expect(t.gateway.pushStore.list()).toHaveLength(1);
+
+    // The device re-registers under its new session, which is what lets the
+    // sign-out below find a record the expired session originally created.
+    const client = await pairClient(t);
+    await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/overnight"));
+    await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/second-device"));
+
+    const signOut = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(signOut.status).toBe(200);
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  it("leaves another session's subscriptions alone on sign-out", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const leaving = await pairClient(t);
+    const staying = await pairClient(t);
+    await pushRequest(t, leaving, "subscribe", subscriptionBody("https://push.example.test/leaving"));
+    await pushRequest(t, staying, "subscribe", subscriptionBody("https://push.example.test/staying"));
+
+    await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(leaving),
+      body: "{}",
+    });
+    expect(t.gateway.pushStore.list().map((record) => record.endpoint))
+      .toEqual(["https://push.example.test/staying"]);
   });
 });

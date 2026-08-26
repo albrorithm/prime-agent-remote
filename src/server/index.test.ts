@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createServer as createNetServer, connect } from "node:net";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -30,6 +31,8 @@ async function unusedPort(): Promise<number> {
 
 async function startGateway(extraEnv: Record<string, string> = {}): Promise<RunningGateway> {
   const port = await unusedPort();
+  // Keep the spawned gateway off the operator's real subscription store.
+  const pushStore = join(await mkdtemp(join(tmpdir(), "gateway-push-")), "push-subscriptions.json");
   const origin = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "src/server/index.ts")], {
     cwd: process.cwd(),
@@ -42,6 +45,7 @@ async function startGateway(extraEnv: Record<string, string> = {}): Promise<Runn
       PRIME_WEB_PAIRING_TOKEN: "transport-test-token",
       PRIME_WEB_BACKEND: "demo",
       PRIME_WEB_SECURE_COOKIE: "false",
+      PRIME_WEB_PUSH_STORE: pushStore,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],

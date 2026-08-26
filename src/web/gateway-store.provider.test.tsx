@@ -132,6 +132,7 @@ function bootstrap(agents: AgentSummary[] = []): BootstrapResponse {
     protocolVersion: 1,
     csrfToken: "csrf",
     backend: "demo",
+    push: { enabled: false, publicKey: null },
     catalog: { revision: 1, agents },
   };
 }

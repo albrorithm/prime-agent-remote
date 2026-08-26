@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import process from "node:process";
 import { WebSocket } from "ws";
 
@@ -16,6 +19,9 @@ const child = spawn(process.execPath, ["dist-server/server/index.js"], {
     PRIME_WEB_PAIRING_TOKEN: pairingToken,
     PRIME_WEB_BACKEND: "demo",
     PRIME_WEB_SECURE_COOKIE: "false",
+    // Deliberately no VAPID keys: this is the default deployment, and the
+    // whole gateway has to keep working without them.
+    PRIME_WEB_PUSH_STORE: join(mkdtempSync(join(tmpdir(), "prime-smoke-push-")), "push-subscriptions.json"),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -251,6 +257,51 @@ try {
     }),
   });
   if (unknownCommand.status !== 403) throw new Error(`Expected unknown command rejection, got ${unknownCommand.status}`);
+
+  const pushSubscription = {
+    endpoint: "https://push.example.invalid/smoke-endpoint",
+    keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },
+  };
+  const bootstrapPush = resumedBootstrap.push;
+  if (bootstrapPush?.enabled !== false || bootstrapPush.publicKey !== null) {
+    throw new Error("Bootstrap must report push off when no VAPID keys are configured");
+  }
+  // Without keys the gateway cannot send, so it must refuse the subscription
+  // rather than bank a permission it can never act on.
+  const subscribeWithoutKeys = await fetch(`${origin}/api/v1/push/subscribe`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), subscription: pushSubscription }),
+  });
+  if (subscribeWithoutKeys.status !== 503) {
+    throw new Error(`Expected unconfigured push 503, got ${subscribeWithoutKeys.status}`);
+  }
+  const subscribeWithoutCsrf = await fetch(`${origin}/api/v1/push/subscribe`, {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: crypto.randomUUID(), subscription: pushSubscription }),
+  });
+  if (subscribeWithoutCsrf.status !== 403) {
+    throw new Error(`Expected push CSRF rejection, got ${subscribeWithoutCsrf.status}`);
+  }
+  const malformedSubscribe = await fetch(`${origin}/api/v1/push/subscribe`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), subscription: { endpoint: "not-a-url" } }),
+  });
+  if (malformedSubscribe.status !== 400) {
+    throw new Error(`Expected malformed subscription 400, got ${malformedSubscribe.status}`);
+  }
+  // Unsubscribe stays open with push off: a device must always be able to
+  // stop, even from a gateway whose keys were removed under it.
+  const unsubscribe = await fetch(`${origin}/api/v1/push/unsubscribe`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), endpoint: pushSubscription.endpoint }),
+  });
+  if (unsubscribe.status !== 202) {
+    throw new Error(`Expected unsubscribe 202, got ${unsubscribe.status} ${await unsubscribe.text()}`);
+  }
 
   console.log("Gateway smoke test passed");
 } finally {

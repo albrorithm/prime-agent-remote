@@ -13,8 +13,11 @@ import {
   executeSlashCommandRequestSchema,
   pairRequestSchema,
   PROTOCOL_VERSION,
+  pushSubscribeRequestSchema,
+  pushUnsubscribeRequestSchema,
   sendMessageRequestSchema,
   type ProblemDetails,
+  type PushAccepted,
   type ServerFrame,
 } from "../protocol.js";
 import { AuthService, type AuthenticatedSession } from "./auth.js";
@@ -36,6 +39,7 @@ import {
   MAX_IMAGE_REQUEST_BASE64_CHARS,
   validateImageAttachments,
 } from "./image-attachments.js";
+import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import {
   enforceOutboundFrameLimits,
@@ -64,6 +68,7 @@ export interface GatewayDeps {
   auth?: AuthService;
   staticRoot?: string;
   mutationLimiter?: SlidingWindowLimiter;
+  pushStore?: PushSubscriptionStore;
 }
 
 export interface Gateway {
@@ -72,6 +77,7 @@ export interface Gateway {
   backend: AgentBackend;
   hub: EventHub;
   auth: AuthService;
+  pushStore: PushSubscriptionStore;
   shutdown(): Promise<void>;
 }
 
@@ -85,6 +91,10 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   const mutationLimiter = deps.mutationLimiter
     ?? new SlidingWindowLimiter(MUTATION_WINDOW_MS, MAX_MUTATIONS_PER_SESSION, MAX_TRACKED_MUTATION_SESSIONS);
   const sessionSockets = new Map<string, Set<WebSocket>>();
+  const pushStore = deps.pushStore ?? new PushSubscriptionStore(config.webPushStorePath);
+  // Never throws: an unreadable store leaves push inert, which must not stop
+  // the gateway from serving everything else.
+  await pushStore.load();
 
   function securityHeaders(res: ServerResponse): void {
     res.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'");
@@ -196,6 +206,10 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         protocolVersion: PROTOCOL_VERSION,
         csrfToken: session.csrfToken,
         backend: backend.kind,
+        // So Settings can say "the gateway has no keys" instead of offering a
+        // switch that silently does nothing. The VAPID public key is public by
+        // design — it is what the browser subscribes with.
+        push: { enabled: Boolean(config.webPush), publicKey: config.webPush?.publicKey ?? null },
         catalog: backend.catalog(),
       });
       return true;
@@ -277,6 +291,13 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // id, and this call destroys that session, so a replay 401s before it
       // could ever reach a cached entry.
       await readJson(req);
+      // Sign-out revokes push; a TTL lapse deliberately does not. Revocation
+      // is attempted first so the wake capability dies with the session, but a
+      // failure to persist must not make the session unsignoutable: the record
+      // is already out of this process's memory either way.
+      await pushStore.removeSession(session.id).catch((error: unknown) => {
+        console.error("Could not persist push revocation on sign-out", error);
+      });
       const sockets = [...(sessionSockets.get(session.id) ?? [])];
       auth.signOut(res, session);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Signed out");
@@ -347,6 +368,43 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         parsed.data.requestId,
         mutationBinding(`abort:${agentId}`, parsed.data),
         () => backend.abort({ agentId, ...parsed.data }),
+      );
+      json(res, 202, result);
+      return true;
+    }
+
+    if (req.method === "POST" && (pathname === "/api/v1/push/subscribe" || pathname === "/api/v1/push/unsubscribe")) {
+      const subscribing = pathname.endsWith("/subscribe");
+      const schema = subscribing ? pushSubscribeRequestSchema : pushUnsubscribeRequestSchema;
+      const parsed = schema.safeParse(await readJson(req));
+      if (!parsed.success) { problem(res, 400, "Invalid push subscription request"); return true; }
+      // Storing a subscription this gateway can never send to would leave the
+      // browser holding a permission it gave for nothing.
+      if (subscribing && !config.webPush) {
+        problem(res, 503, "Push notifications are not configured", "The gateway has no VAPID keys.");
+        return true;
+      }
+      const request = parsed.data;
+      const result = await deduplicated<PushAccepted>(
+        session,
+        request.requestId,
+        mutationBinding(subscribing ? "push-subscribe" : "push-unsubscribe", request),
+        async () => {
+          if ("subscription" in request) {
+            await pushStore.upsert({
+              endpoint: request.subscription.endpoint,
+              p256dh: request.subscription.keys.p256dh,
+              auth: request.subscription.keys.auth,
+              sessionId: session.id,
+              createdAt: new Date().toISOString(),
+            });
+          } else {
+            // Unsubscribing an endpoint this gateway never had is the goal
+            // state, so it succeeds rather than 404s.
+            await pushStore.removeEndpoint(request.endpoint);
+          }
+          return { accepted: true, requestId: request.requestId };
+        },
       );
       json(res, 202, result);
       return true;
@@ -589,5 +647,5 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     for (const client of wss.clients) client.close(1001, "Server shutdown");
   }
 
-  return { requestListener, upgradeListener, backend, hub, auth, shutdown };
+  return { requestListener, upgradeListener, backend, hub, auth, pushStore, shutdown };
 }
