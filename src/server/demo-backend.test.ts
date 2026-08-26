@@ -246,6 +246,37 @@ describe("DemoBackend", () => {
     }
   });
 
+  it("never advertises a capability it has no method for", async () => {
+    // The UI decides what to put on screen from these bits, so an advertised
+    // capability with nothing behind it is a control that fails when pressed.
+    // Keyed off the backend method rather than a literal expectation, so this
+    // stays honest as each operation lands instead of needing an edit per bit.
+    const backedBy: Record<string, keyof DemoBackend> = {
+      abort: "abort",
+      rename: "rename",
+      stop: "stop",
+      deactivate: "deactivate",
+      delete: "delete",
+    };
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      for (const agent of backend.catalog().agents) {
+        for (const [capability, method] of Object.entries(backedBy)) {
+          if (typeof (backend as unknown as Record<string, unknown>)[method] === "function") continue;
+          expect(
+            agent.capabilities[capability as keyof typeof agent.capabilities],
+            `${agent.id} advertises ${capability} with no ${method}()`,
+          ).toBe(false);
+        }
+      }
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
   it("covers every TranscriptPresentation kind in the demo snapshots (WS10)", async () => {
     // Derive the kind list from the protocol schema itself (rather than a
     // hand-copied literal list) so a future presentation kind fails this

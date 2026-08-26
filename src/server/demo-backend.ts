@@ -50,14 +50,19 @@ const DEMO_MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
 // Two intentional divergences from the live Prime adapter: demo always reports
 // images: false, and the /model and /effort slash-command options are
 // hardcoded here rather than derived from a provider.
+//
+// Every other bit states what this backend actually implements. A capability
+// advertised but unimplemented is worse than an absent one: the UI reads these
+// bits to decide what to offer, so a `true` here puts a control on screen that
+// fails when pressed — and it fails only in demo mode, which is the default.
 const fullCapabilities: AgentCapabilities = {
   send: true,
   abort: true,
   resume: false,
-  rename: true,
-  stop: true,
-  deactivate: true,
-  delete: true,
+  rename: false,
+  stop: false,
+  deactivate: false,
+  delete: false,
   respond: true,
   images: false,
 };
