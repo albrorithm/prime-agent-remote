@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
-import { access, constants } from "node:fs/promises";
+import { access, constants, copyFile, mkdir } from "node:fs/promises";
 import { connect } from "node:net";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -51,6 +51,7 @@ Usage:
   prime-agent-mobile status            Say whether it is running, and where
   prime-agent-mobile stop              Stop it
   prime-agent-mobile token [--rotate]  Print the setup token
+  prime-agent-mobile install-command   Add /webui to Prime Agent
   prime-agent-mobile help
 
 Options for start:
@@ -313,6 +314,27 @@ async function token(options: Options): Promise<number> {
   return 0;
 }
 
+/**
+ * Installs the /webui slash command globally, so it exists in every Prime
+ * Agent session rather than only inside this checkout.
+ */
+async function installCommand(): Promise<number> {
+  const source = path.join(projectRoot, "extensions", "webui.ts");
+  if (!await exists(source)) {
+    line(`Could not find ${source}.`);
+    return 1;
+  }
+  const target = path.join(homedir(), ".prime", "agent", "extensions");
+  await mkdir(target, { recursive: true });
+  const destination = path.join(target, "webui.ts");
+  await copyFile(source, destination);
+  line(`Installed /webui to ${destination}`);
+  line();
+  line("Start a new Prime Agent session and run `/webui`.");
+  line("It reports where the web UI is, and starts it if it is not running.");
+  return 0;
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   let options: Options;
   try {
@@ -326,6 +348,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "status": return status();
     case "stop": return stop();
     case "token": return token(options);
+    case "install-command": return installCommand();
     case "help":
     case "--help":
     case "-h":

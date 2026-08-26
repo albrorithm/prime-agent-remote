@@ -55,6 +55,7 @@
     "dist",
     "dist-server",
     "docs",
+    "extensions",
     "README.md",
     "LICENSE"
   ]
