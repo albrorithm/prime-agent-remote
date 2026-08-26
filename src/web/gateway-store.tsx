@@ -403,6 +403,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // The CSRF token of the session this device last claimed its push
   // subscription for. Changes exactly when the session does.
   const pushClaimedFor = useRef<string | null>(null);
+  /**
+   * Guards the one automatic resume per initialize attempt. Without it a
+   * revoked credential and a 401 would call each other forever.
+   */
+  const resumeAttempted = useRef(false);
   stateRef.current = state;
 
   useEffect(() => {
@@ -714,11 +719,28 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         // subscription still works, it just keeps its old session binding.
         void reclaimPushSubscription(value.push, value.csrfToken).catch(() => {});
       }
+      // A working session means a later 401 (a restart, an expiry) is allowed
+      // its own resume attempt.
+      resumeAttempted.current = false;
       if (!socketRetryBlocked.current) showError(null);
       updateSocketPhase();
     } catch (error) {
       if (generation !== initializationGeneration.current || controller.signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) {
+        // A paired device can start a new session on its own, which is what
+        // makes a gateway restart invisible here. Tried once per attempt: if
+        // the credential is missing or revoked this 401s too, and falling
+        // through to the pairing screen is the right answer.
+        if (!resumeAttempted.current) {
+          resumeAttempted.current = true;
+          try {
+            await api.resume();
+            void initializeRef.current();
+            return;
+          } catch {
+            // No usable credential. Fall through to the pairing screen.
+          }
+        }
         resetForUnauthorized();
         return;
       }

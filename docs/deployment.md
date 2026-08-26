@@ -28,7 +28,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_HOST` | `127.0.0.1` | Gateway bind address |
 | `PRIME_WEB_PORT` | `8787` | Gateway port |
 | `PRIME_WEB_ALLOWED_ORIGINS` | local development origins | Exact comma-separated browser origins |
-| `PRIME_WEB_PAIRING_TOKEN` | random at startup outside production; required in production | Setup token (32 or more characters in production) |
+| `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override; a configured one must be 32 or more characters in production |
 | `PRIME_WEB_SECURE_COOKIE` | true in production | Add the cookie `Secure` attribute; accepts only `true`, `false`, `1`, or `0` |
 | `PRIME_WEB_BACKEND` | `demo` | `demo` or `prime`; other values fail startup |
 | `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |
@@ -37,6 +37,8 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_VAPID_PUBLIC_KEY` | unset (push off) | VAPID application server key, base64url; must decode to 65 bytes |
 | `PRIME_WEB_VAPID_PRIVATE_KEY` | unset (push off) | VAPID private key, base64url; must decode to 32 bytes |
 | `PRIME_WEB_VAPID_SUBJECT` | unset (push off) | Contact for push services: a `mailto:` or `https://` URL |
+| `PRIME_WEB_PAIRING_TOKEN_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/pairing-token` (or under `~/.config`) | Absolute path to the token the gateway mints for itself when none is configured |
+| `PRIME_WEB_DEVICE_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/devices.json` (or under `~/.config`) | Absolute path to the paired-device credential file |
 | `PRIME_WEB_PUSH_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/push-subscriptions.json` (or under `~/.config`) | Absolute path to the push subscription file |
 
 The three VAPID variables are all-or-nothing: set all three or none. A partial

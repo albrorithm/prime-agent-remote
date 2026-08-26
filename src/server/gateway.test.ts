@@ -60,6 +60,9 @@ async function startGateway(options: {
   const staticRoot = join(tmpDir, options.staticRootName ?? "static");
   const gateway = await createGateway(testConfig({
     webPushStorePath: join(tmpDir, "push-subscriptions.json"),
+    // Into the test's own directory for the same reason as the push store: a
+    // shared path would let one test's paired devices reach another's.
+    deviceStorePath: join(tmpDir, "devices.json"),
     ...options.config,
   }), {
     backend: options.backend ?? new DemoBackend(),
@@ -250,7 +253,13 @@ describe("gateway sign-out", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ signedOut: true });
-    expect(response.headers.get("set-cookie")).toBe("prime_web_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    // Both credentials are cleared with the attributes they were set with, or
+    // the browser keeps the originals. Sign-out revokes the device too, which
+    // is what stops the phone silently resuming.
+    expect(response.headers.getSetCookie()).toEqual([
+      "prime_web_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+      "prime_web_device=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    ]);
 
     expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: client.cookie } })).status).toBe(401);
     const replay = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
@@ -259,6 +268,79 @@ describe("gateway sign-out", () => {
       body: "{}",
     });
     expect(replay.status).toBe(401);
+  });
+
+  it("resumes a paired device after a restart, without the pairing token", async () => {
+    const store = join(await mkdtemp(join(tmpdir(), "device-restart-")), "devices.json");
+
+    const first = await startGateway({ config: { deviceStorePath: store } });
+    const paired = await fetch(`${first.baseUrl}/api/v1/auth/pair`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: "phone" }),
+    });
+    expect(paired.status).toBe(200);
+    const deviceCookie = paired.headers.getSetCookie()
+      .find((value) => value.startsWith("prime_web_device="))?.split(";", 1)[0];
+    expect(deviceCookie).toBeDefined();
+
+    // A second gateway over the same store is what a restart looks like: the
+    // sessions Map is gone, the device file is not.
+    const second = await startGateway({ config: { deviceStorePath: store } });
+    const resumed = await fetch(`${second.baseUrl}/api/v1/auth/resume`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: deviceCookie! },
+    });
+    expect(resumed.status).toBe(200);
+    const body = await resumed.json() as { paired: boolean; csrfToken: string };
+    expect(body.paired).toBe(true);
+
+    const sessionCookie = resumed.headers.getSetCookie()
+      .find((value) => value.startsWith("prime_web_session="))!.split(";", 1)[0];
+    const bootstrap = await fetch(`${second.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: sessionCookie } });
+    expect(bootstrap.status).toBe(200);
+  });
+
+  it("refuses to resume without a device credential", async () => {
+    const t = await startGateway();
+    const response = await fetch(`${t.baseUrl}/api/v1/auth/resume`, { method: "POST", headers: { Origin: ORIGIN } });
+    expect(response.status).toBe(401);
+  });
+
+  it("refuses to resume a revoked device and clears the dead cookie", async () => {
+    const t = await startGateway();
+    const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: PAIRING_TOKEN }),
+    });
+    const cookies = paired.headers.getSetCookie();
+    const deviceCookie = cookies.find((value) => value.startsWith("prime_web_device="))!.split(";", 1)[0];
+    const sessionCookie = cookies.find((value) => value.startsWith("prime_web_session="))!.split(";", 1)[0];
+    const csrfToken = (await paired.json() as { csrfToken: string }).csrfToken;
+
+    // Signing out revokes the device, unlike letting the session expire.
+    await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: sessionCookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: "{}",
+    });
+
+    const resumed = await fetch(`${t.baseUrl}/api/v1/auth/resume`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: deviceCookie },
+    });
+    expect(resumed.status).toBe(401);
+    expect(resumed.headers.getSetCookie()).toContain("prime_web_device=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+  });
+
+  it("refuses to resume from a disallowed origin", async () => {
+    const t = await startGateway();
+    const response = await fetch(`${t.baseUrl}/api/v1/auth/resume`, {
+      method: "POST",
+      headers: { Origin: "https://evil.example.test" },
+    });
+    expect(response.status).toBe(403);
   });
 
   it("closes every websocket bound to the session that signed out", async () => {

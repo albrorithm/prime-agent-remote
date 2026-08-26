@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut, stopAgent } from "./api";
+import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, resume, signOut, stopAgent } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -293,5 +293,30 @@ describe("deleteAgent", () => {
       expectedRevision: 8,
       confirmName: "Previous session",
     });
+  });
+});
+
+describe("resume", () => {
+  it("posts no body, because the device cookie is the credential", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ csrfToken: "fresh" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(resume()).resolves.toEqual({ csrfToken: "fresh" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/auth/resume", expect.objectContaining({
+      method: "POST",
+      credentials: "same-origin",
+    }));
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");
+  });
+
+  it("rejects when the gateway has no usable credential", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })));
+    await expect(resume()).rejects.toThrow();
   });
 });

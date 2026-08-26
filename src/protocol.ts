@@ -717,7 +717,13 @@ export const clientFrameSchema = z.discriminatedUnion("type", [
 
 export type ClientFrame = z.infer<typeof clientFrameSchema>;
 
+/**
+ * `deviceName` labels the credential this pairing issues so a person can tell
+ * one phone from another when revoking. It is cosmetic: the gateway bounds and
+ * defaults it, and never trusts it for identity.
+ */
 export const pairRequestSchema = z.object({
+  deviceName: z.string().trim().min(1).max(64).optional(),
   token: z.string().min(1).max(512),
 });
 

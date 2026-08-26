@@ -31,14 +31,52 @@ The directory listing is deliberately narrow: absolute paths only (a relative pa
 
 ## Authentication
 
-A setup token is exchanged for an in-memory gateway session. The browser receives:
+A setup token is exchanged for an in-memory gateway session, and for a device
+credential that outlives it.
+
+### Device credentials
+
+Pairing issues one credential per browser, stored as `id.secret` in a separate
+`HttpOnly` cookie with the same attributes as the session cookie and a 400-day
+maximum age, which is the ceiling browsers enforce anyway.
+
+- Its purpose is restarts. Sessions are in memory and die with the process, so
+  without it every restart returns every device to the setup token — which
+  pushes operators into keeping that token somewhere convenient, and a
+  bootstrap secret kept convenient is the problem it exists to avoid.
+- Only `sha256` of the secret is written to disk. Unlike the setup token, which
+  may sit in an environment variable, a leaked device store does not let anyone
+  become a paired device. A test asserts the secret does not appear in the file
+  it was issued from.
+- `POST /api/v1/auth/resume` exchanges the credential for a new session. It is
+  deliberately unauthenticated — the cookie is the credential — validates
+  `Origin`, and shares the setup token's rate limit, because guessing a bearer
+  credential deserves the same ceiling as guessing the token.
+- Sign-out revokes the credential and clears both cookies. Session expiry
+  deliberately does not, which is exactly what lets a phone survive a restart.
+- A credential that no longer verifies has its cookie cleared, so a browser
+  stops presenting something that can never work again.
+- Records are bounded in count and per-field size, written mode `0600` through
+  a temp file and rename, and a corrupt store falls back to empty — one
+  re-pairing, rather than a gateway that will not start.
+- Rotating the setup token does not revoke any device. Revoking a device does
+  not affect the others.
+
+### Sessions
+
+The browser receives:
 
 - an `HttpOnly` session cookie;
 - `SameSite=Strict`;
 - `Secure` when configured for HTTPS;
 - a separate CSRF token returned inside authenticated JSON.
 
-The setup token is never stored by the browser application. Production requires an explicitly configured setup token of at least 32 characters. Sessions expire in memory after the configured TTL, and an explicit sign-out invalidates the session immediately and clears the cookie with the same attributes it was set with. A WebSocket is bound to the session used during its upgrade and is closed when that session expires or is signed out, including a second tab sharing the session.
+The setup token is never stored by the browser application. Production no
+longer requires the token to be configured: an unset one is minted at 32 random
+bytes and persisted at mode `0600` in the gateway's own configuration
+directory, which is stronger than a human-chosen value and keeps a long-lived
+secret out of the process environment. A token that *is* configured must still
+be at least 32 characters, and production refuses a shorter one. Sessions expire in memory after the configured TTL, and an explicit sign-out invalidates the session immediately and clears the cookie with the same attributes it was set with. A WebSocket is bound to the session used during its upgrade and is closed when that session expires or is signed out, including a second tab sharing the session.
 
 ## Push notifications
 
@@ -78,8 +116,9 @@ Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Vali
 
 Before a broad deployment:
 
-- persist session revocation across gateway restarts if required;
 - add a session-management screen listing and revoking other sessions;
+- add a device-management screen: credentials can currently be revoked only by
+  signing out from the device itself, or by deleting the store;
 - validate all Prime extension UI request shapes before adding free-text responses;
 - perform a physical-device and reverse-proxy security test, including a real push delivered to an installed PWA with the app closed;
 - add a device-management screen listing and revoking individual push subscriptions, which currently can only be revoked from the device that created one or by signing that session out.

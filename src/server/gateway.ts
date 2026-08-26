@@ -45,6 +45,7 @@ import {
 } from "./image-attachments.js";
 import { buildAttentionPushPayload } from "./push-payload.js";
 import { PushService } from "./push-service.js";
+import { DeviceStore } from "./device-store.js";
 import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import {
@@ -75,6 +76,7 @@ export interface GatewayDeps {
   staticRoot?: string;
   mutationLimiter?: SlidingWindowLimiter;
   pushStore?: PushSubscriptionStore;
+  deviceStore?: DeviceStore;
   pushService?: PushService;
 }
 
@@ -92,7 +94,13 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   const backend = deps.backend;
   const hub = deps.hub ?? new EventHub();
   await backend.initialize(hub);
-  const auth = deps.auth ?? new AuthService(config);
+  const deviceStore = deps.deviceStore ?? new DeviceStore(config.deviceStorePath);
+  // Never throws: a corrupt store costs one re-pairing, which must not stop
+  // the gateway from serving everything else.
+  await deviceStore.load();
+  // One instance, shared. Two would keep separate in-memory lists over the
+  // same file, so a credential issued through one would not verify in the other.
+  const auth = deps.auth ?? new AuthService(config, deviceStore);
   const staticRoot = deps.staticRoot ?? path.resolve(process.cwd(), "dist");
   const mutationCache = new MutationCache<unknown>(10 * 60_000);
   const mutationLimiter = deps.mutationLimiter
@@ -218,9 +226,20 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       if (!auth.isAllowedOrigin(req)) { problem(res, 403, "Origin validation failed"); return true; }
       const parsed = pairRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) { problem(res, 400, "Invalid pairing request"); return true; }
-      const session = auth.pair(req, res, parsed.data.token);
+      const session = await auth.pair(req, res, parsed.data.token, parsed.data.deviceName);
       if (!session) { problem(res, 401, "Invalid pairing token"); return true; }
       json(res, 200, { paired: true, csrfToken: session.csrfToken });
+      return true;
+    }
+
+    // Unauthenticated by design: the device cookie is the credential. It is
+    // what lets a phone survive a gateway restart without being handed the
+    // pairing token again, and it shares the pairing rate limit.
+    if (req.method === "POST" && pathname === "/api/v1/auth/resume") {
+      if (!auth.isAllowedOrigin(req)) { problem(res, 403, "Origin validation failed"); return true; }
+      const resumed = await auth.resume(req, res);
+      if (!resumed) { problem(res, 401, "No usable device credential"); return true; }
+      json(res, 200, { paired: true, csrfToken: resumed.csrfToken });
       return true;
     }
 
@@ -325,7 +344,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         console.error("Could not persist push revocation on sign-out", error);
       });
       const sockets = [...(sessionSockets.get(session.id) ?? [])];
-      auth.signOut(res, session);
+      await auth.signOut(res, session);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Signed out");
       json(res, 200, { signedOut: true });
       return true;

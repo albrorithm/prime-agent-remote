@@ -128,6 +128,18 @@ export async function pair(token: string, options?: ApiRequestOptions): Promise<
   }, options, pairResponseSchema);
 }
 
+/**
+ * Exchanges the device credential this browser already holds for a new
+ * session. Carries no body: the cookie is the credential. A 401 means there is
+ * nothing usable, which is the ordinary state before a device has ever paired.
+ */
+export async function resume(options?: ApiRequestOptions): Promise<{ csrfToken: string }> {
+  return request("/api/v1/auth/resume", {
+    method: "POST",
+    credentials: "same-origin",
+  }, options, pairResponseSchema);
+}
+
 const signOutResponseSchema = z.object({ signedOut: z.literal(true) });
 
 export async function signOut(csrfToken: string, options?: ApiRequestOptions): Promise<void> {
