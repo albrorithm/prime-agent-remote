@@ -313,6 +313,14 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .message-author time { margin-left: auto; color: var(--muted-2); font: 500 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .message p { margin: 0; color: var(--text-body); font-size: 14px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message.failed p { color: var(--tone-danger); }
+/* The per-message action row. Quiet by default — muted glyphs on no fill — so a
+   long transcript does not turn into a wall of buttons; the negative left margin
+   optically aligns the first glyph with the text column above it. */
+.message-actions { display: flex; align-items: center; gap: 2px; margin: 7px 0 0 -8px; }
+.message-action { display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: var(--muted-2); background: transparent; }
+.message-action:hover { color: var(--text); background: var(--hover); }
+.message-action svg { width: 15px; height: 15px; }
+
 .timeline-row { display: flex; min-width: 0; max-width: 100%; align-self: stretch; align-items: center; gap: 7px; margin: -6px 0; color: var(--muted); font: 560 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
 .timeline-row > svg { width: 14px; height: 14px; flex: 0 0 14px; }
 .timeline-row strong { flex: 0 0 auto; font-weight: 680; }

@@ -10,6 +10,7 @@ import { AgentFamilyPicker, AncestorMenu } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
 import { ImageViewer } from "./ImageViewer";
+import { MessageActions } from "./MessageActions";
 import { MessageContent } from "./MessageContent";
 import { PythonCellRow } from "./PythonCellRow";
 import { RefineRow } from "./RefineRow";
@@ -340,6 +341,11 @@ export function TranscriptEntry({
           : <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />}
       </div>
       {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
+      {/* Search mode renders flattened plain text, so copying from it would hand
+          back a different string than the message actually contains. */}
+      {message.role === "assistant" && message.state === "complete" && searchTerm === undefined && (
+        <MessageActions text={message.text} label={agentName} />
+      )}
     </article>
   );
 }
