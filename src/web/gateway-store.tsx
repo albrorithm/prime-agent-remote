@@ -23,9 +23,10 @@ import type {
   SlashCommandCatalog,
   SlashCommandResult,
 } from "../protocol";
-import { PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
+import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
+import { useAppBadge } from "./hooks/useAppBadge";
 import type { PreparedImage } from "./image-attachments";
 
 export type ConnectionPhase = "checking" | "connecting" | "live" | "offline" | "replaying";
@@ -306,6 +307,8 @@ interface GatewayContextValue extends State {
   selectedAgent: AgentSummary | null;
   selectedSnapshot: AgentSnapshot | null;
   pendingMessages: PendingMessage[];
+  /** Agents that are waiting on the user, app-wide. Drives every badge. */
+  attentionCount: number;
   pair: (token: string) => Promise<void>;
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string, requestId?: string) => Promise<string>;
@@ -994,12 +997,17 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const selectedAgent = state.catalog.agents.find((item) => item.id === state.selectedAgentId) ?? null;
   const selectedSnapshot = state.selectedAgentId ? state.snapshots[state.selectedAgentId] ?? null : null;
   const pendingMessages = state.selectedAgentId ? state.pending[state.selectedAgentId] ?? [] : [];
+  // One count for the header badge, the drawer summary strip and the app icon.
+  // Signing out resets the catalog, which clears the icon badge for free.
+  const attentionCount = attentionAgentCount(state.catalog.agents);
+  useAppBadge(attentionCount);
   const value = useMemo<GatewayContextValue>(
     () => ({
       ...state,
       selectedAgent,
       selectedSnapshot,
       pendingMessages,
+      attentionCount,
       pair,
       selectAgent,
       createSession,
@@ -1011,7 +1019,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       signOut,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, signOut, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, respond, signOut, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

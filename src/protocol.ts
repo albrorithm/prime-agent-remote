@@ -101,6 +101,27 @@ export interface CatalogSnapshot {
   agents: AgentSummary[];
 }
 
+/**
+ * Lifecycles in which a request for attention is still answerable. A stopped,
+ * inactive, or failed session can keep a stale `attention` flag, and counting
+ * one badges the app icon with work nobody can clear.
+ */
+export const ANSWERABLE_ATTENTION_LIFECYCLES: readonly AgentLifecycle[] = ["starting", "live"];
+
+/**
+ * The one app-wide "needs you" count. Lives here rather than in the web app
+ * because the gateway counts it too, when it builds a push payload — the icon
+ * badge and the notification must never disagree.
+ *
+ * Deliberately not a sum of `unreadCount`: both backends derive that as
+ * `attention ? 1 : 0`, so summing it is this same number by a longer route,
+ * and it would start lying the moment the projection gains real unread counts.
+ */
+export function attentionAgentCount(agents: readonly AgentSummary[]): number {
+  return agents.filter((agent) =>
+    agent.attention !== null && ANSWERABLE_ATTENTION_LIFECYCLES.includes(agent.lifecycle)).length;
+}
+
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageState = "complete" | "streaming" | "failed";
 export type ActivityStatus = "running" | "waiting" | "complete" | "failed";

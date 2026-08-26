@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { agentSnapshotSchema, cellOutputSchema, sessionDashboardSchema } from "./protocol.js";
+import {
+  agentSnapshotSchema,
+  attentionAgentCount,
+  cellOutputSchema,
+  sessionDashboardSchema,
+  type AgentSummary,
+} from "./protocol.js";
 
 function snapshotWith(presentation: unknown): unknown {
   return {
@@ -135,5 +141,61 @@ describe("cell output schema", () => {
     }).success).toBe(true);
     expect(cellOutputSchema.safeParse({ cellId: "", truncated: false }).success).toBe(false);
     expect(cellOutputSchema.safeParse({ cellId: "cell_abc" }).success).toBe(false);
+  });
+});
+
+function summary(overrides: Partial<AgentSummary> & Pick<AgentSummary, "id">): AgentSummary {
+  return {
+    rootId: overrides.id,
+    parentId: null,
+    depth: 0,
+    name: overrides.id,
+    lifecycle: "live",
+    activity: "idle",
+    attention: null,
+    unreadCount: 0,
+    childCount: 0,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    capabilities: {
+      send: true,
+      abort: true,
+      resume: false,
+      rename: true,
+      stop: true,
+      deactivate: true,
+      delete: true,
+      respond: true,
+      images: true,
+    },
+    ...overrides,
+  };
+}
+
+describe("attentionAgentCount", () => {
+  it("counts one per agent waiting on the user, whatever the attention kind", () => {
+    expect(attentionAgentCount([
+      summary({ id: "a", attention: "dialog" }),
+      summary({ id: "b", attention: "question" }),
+      summary({ id: "c", attention: "error" }),
+      summary({ id: "d" }),
+    ])).toBe(3);
+  });
+
+  it("counts a starting agent but never a dead one", () => {
+    expect(attentionAgentCount([summary({ id: "a", attention: "dialog", lifecycle: "starting" })])).toBe(1);
+    for (const lifecycle of ["stopped", "inactive", "failed"] as const) {
+      expect(attentionAgentCount([summary({ id: "a", attention: "dialog", lifecycle })])).toBe(0);
+    }
+  });
+
+  // The backends derive unreadCount as `attention ? 1 : 0`, so the two agree
+  // today. Pinned so a projection change that breaks the tie is visible here.
+  it("ignores unreadCount entirely", () => {
+    expect(attentionAgentCount([summary({ id: "a", unreadCount: 7 })])).toBe(0);
+  });
+
+  it("is empty for an empty catalog", () => {
+    expect(attentionAgentCount([])).toBe(0);
   });
 });

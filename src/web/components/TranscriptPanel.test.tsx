@@ -14,7 +14,16 @@ type GatewayMockState = Pick<
 
 const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }));
 
-vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock.state }));
+// The panel reads the app-wide attention count from the store rather than
+// recomputing it, so the mock derives it from the same catalog with the same
+// shared selector the provider uses.
+vi.mock("../gateway-store", async () => {
+  const { attentionAgentCount } = await import("../../protocol");
+  return {
+    useGateway: () => gatewayMock.state
+      && { ...gatewayMock.state, attentionCount: attentionAgentCount(gatewayMock.state.catalog.agents) },
+  };
+});
 vi.mock("./MessageContent", () => ({
   MessageContent: ({ text }: { text: string }) => <p>{text}</p>,
   MemoizedCodeBlock: ({ code }: { code: string }) => <pre>{code}</pre>,
@@ -446,6 +455,23 @@ describe("agent switching resets scroll state", () => {
     fireEvent.load(screen.getByRole("img", { name: "Attached image 1" }));
     expect(scroller.scrollTop).toBe(scroller.scrollHeight);
     expect(screen.queryByRole("button", { name: /Latest/ })).not.toBeInTheDocument();
+  });
+
+  it("badges the sessions trigger from the shared count, ignoring dead sessions", () => {
+    const waiting = { ...agent("waiting", null, 0), attention: "dialog" as const };
+    const alsoWaiting = { ...agent("also-waiting", null, 0), attention: "question" as const };
+    const abandoned = { ...agent("abandoned", null, 0), attention: "error" as const, lifecycle: "stopped" as const };
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [waiting, alsoWaiting, abandoned] },
+      selectedAgent: waiting,
+      selectedSnapshot: { revision: 1, agentId: waiting.id, messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.getByRole("button", { name: "Open sessions, 2 need attention" })).toBeInTheDocument();
+    expect(document.querySelector(".sessions-trigger .icon-badge")).toHaveTextContent("2");
   });
 
   it("uses lifecycle-first status labels in the transcript header", () => {

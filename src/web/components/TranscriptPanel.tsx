@@ -351,7 +351,7 @@ export function TranscriptEntry({
 }
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
-  const { selectedAgent, selectedSnapshot, pendingMessages, catalog, selectAgent, backend } = useGateway();
+  const { selectedAgent, selectedSnapshot, pendingMessages, attentionCount, catalog, selectAgent, backend } = useGateway();
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const messageCount = selectedSnapshot?.messages.length ?? 0;
@@ -363,7 +363,6 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     [catalog.agents, selectedAgent?.id],
   );
   const childCount = selectedAgent ? catalog.agents.filter((agent) => agent.parentId === selectedAgent.id).length : 0;
-  const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
   const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
   const selectedStatus = selectedAgent ? agentStatus(selectedAgent) : null;
   const selectedDescendants = useMemo(

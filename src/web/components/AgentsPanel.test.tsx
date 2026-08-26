@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSummary } from "../../protocol";
+import { attentionAgentCount, type AgentSummary } from "../../protocol";
 import { SettingsProvider } from "../settings";
 import { AgentsPanel } from "./AgentsPanel";
 
@@ -30,6 +30,7 @@ const other = makeAgent({ id: "other", rootId: "other", name: "docs-cleanup" });
 
 const gatewayMock = vi.hoisted(() => ({
   abort: vi.fn(),
+  attentionCount: 0,
   catalog: { revision: 1, agents: [] as AgentSummary[] },
   selectedAgentId: null as string | null,
   selectAgent: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock }));
 beforeEach(() => {
   gatewayMock.abort = vi.fn();
   gatewayMock.catalog = { revision: 1, agents: [root, child, other] };
+  gatewayMock.attentionCount = attentionAgentCount(gatewayMock.catalog.agents);
   gatewayMock.selectedAgentId = null;
   gatewayMock.selectAgent = vi.fn().mockResolvedValue(undefined);
   gatewayMock.backend = "demo";

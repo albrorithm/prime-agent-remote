@@ -13,7 +13,7 @@ interface AgentsPanelProps {
 }
 
 export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) {
-  const { abort, catalog, selectedAgentId, selectAgent } = useGateway();
+  const { abort, attentionCount, catalog, selectedAgentId, selectAgent } = useGateway();
   const persistentDesktop = usePersistentDesktop();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
@@ -43,7 +43,6 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
     }
     return catalog.agents.filter((agent) => matches.has(agent.id));
   }, [catalog.agents, query]);
-  const attentionCount = catalog.agents.filter((agent) => agent.attention).length;
   const workingCount = catalog.agents.filter((agent) => agent.activity === "working").length;
 
   const navigate = (id: string) => {
