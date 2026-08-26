@@ -15,6 +15,13 @@ import { experimentalCommandNotice, useSlashCommandMenu } from "../hooks/useSlas
 import { useSettings } from "../settings";
 import { SwitchHapticButton } from "./SwitchHapticButton";
 
+/** Fallbacks for when no stylesheet has resolved --composer-min-h/--composer-max-h
+ *  (jsdom returns "" for a custom property that is not set inline). These must stay
+ *  in step with the tokens in styles.css. */
+const COMPOSER_MIN_HEIGHT = 44;
+const COMPOSER_MAX_HEIGHT = 152;
+
+
 export function Composer() {
   const { selectedAgent, selectedSnapshot, send, loadSlashCommands, runSlashCommand, abort } = useGateway();
   const { settings } = useSettings();
@@ -69,8 +76,15 @@ export function Composer() {
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+    // The growth range lives in --composer-min-h/--composer-max-h so the clamp
+    // here and the CSS box are the same numbers. They are rem, so they move with
+    // the reader's text scale; hardcoding them again would freeze this at 100%.
+    // A test renderer with no stylesheet reports "", hence the literal fallbacks.
+    const styles = getComputedStyle(textarea);
+    const min = Number.parseFloat(styles.minHeight) || COMPOSER_MIN_HEIGHT;
+    const max = Number.parseFloat(styles.maxHeight) || COMPOSER_MAX_HEIGHT;
     textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(152, Math.max(44, textarea.scrollHeight))}px`;
+    textarea.style.height = `${Math.min(max, Math.max(min, textarea.scrollHeight))}px`;
   }, [draft]);
 
   async function submit() {

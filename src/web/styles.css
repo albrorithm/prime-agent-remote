@@ -89,6 +89,12 @@
      3.375rem is exactly 54px at scale 1. */
   --header-height: 3.375rem;
   --composer-safe-bottom: max(9px, env(safe-area-inset-bottom, 0px));
+  /* The composer's growth range, in rem so the box tracks the text inside it.
+     Composer.tsx clamps the same two numbers when it resizes the textarea and
+     reads them from here, so the JS and the CSS cannot drift apart.
+     2.75rem/9.5rem are exactly 44px/152px at scale 1. */
+  --composer-min-h: 2.75rem;
+  --composer-max-h: 9.5rem;
 }
 
 /* Light theme. Bare :root above stays dark, which is both the product's default
@@ -402,7 +408,7 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
    the textarea's 2.75rem floor plus its 9px/9px padding, the 1px rule and a
    15px gap — instead of the single baked 78px that silently went wrong the
    moment the textarea could grow. */
-.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(2.75rem + 34px + env(safe-area-inset-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
+.jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(var(--composer-min-h) + 34px + env(safe-area-inset-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
 .jump-latest svg { width: 13px; }
 
 .sessions-trigger { position: relative; }
@@ -533,7 +539,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .composer-attachments img { width: 100%; height: 84px; min-height: 84px; max-height: 84px; object-fit: cover; }
 .composer-attachments button { position: absolute; top: 5px; right: 5px; min-height: 44px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.35); border-radius: 99px; color: #fff; background: rgba(0,0,0,.78); font-size: .5625rem; font-weight: 700; }
 .composer-attachment-status { color: var(--text-soft); font-size: .625rem; line-height: 1.35; }
-.composer textarea { width: 100%; min-height: 44px; max-height: 152px; resize: none; padding: 11px 13px; border: 1px solid var(--border-mid); border-radius: 14px; outline: 0; background: var(--panel-raised); line-height: 1.4; }
+.composer textarea { width: 100%; min-height: var(--composer-min-h); max-height: var(--composer-max-h); resize: none; padding: 11px 13px; border: 1px solid var(--border-mid); border-radius: 14px; outline: 0; background: var(--panel-raised); line-height: 1.4; }
 .composer textarea:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .composer textarea::placeholder { color: var(--muted); }
 .composer-action { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid var(--accent); border-radius: 50%; color: var(--on-accent); background: var(--accent); }

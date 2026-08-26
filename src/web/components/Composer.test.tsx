@@ -142,6 +142,30 @@ describe("Composer", () => {
     await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("hello", undefined, expect.any(String)));
   });
 
+  it("takes the textarea's growth range from CSS so it tracks the text scale", async () => {
+    render(<Composer />);
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+
+    // The real range lives in --composer-min-h/--composer-max-h. Standing it up
+    // inline is how a test can observe that the clamp is read rather than baked:
+    // at 130% these tokens resolve larger, and the resize has to follow them.
+    textarea.style.minHeight = "60px";
+    textarea.style.maxHeight = "200px";
+    await userEvent.type(textarea, "a");
+    await waitFor(() => expect(textarea.style.height).toBe("60px"));
+
+    textarea.style.minHeight = "88px";
+    await userEvent.type(textarea, "b");
+    await waitFor(() => expect(textarea.style.height).toBe("88px"));
+  });
+
+  it("falls back to the shipped 44px floor when no stylesheet has resolved the tokens", async () => {
+    render(<Composer />);
+    const textarea = screen.getByPlaceholderText(/Send a message/i) as HTMLTextAreaElement;
+    await userEvent.type(textarea, "a");
+    await waitFor(() => expect(textarea.style.height).toBe("44px"));
+  });
+
   it("dismisses composer options when a pointer starts outside the menu", async () => {
     const user = userEvent.setup();
     render(<Composer />);
