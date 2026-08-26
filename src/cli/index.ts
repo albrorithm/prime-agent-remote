@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
-import { access, constants, copyFile, mkdir } from "node:fs/promises";
+import { access, constants, copyFile, mkdir, rename, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir, hostname } from "node:os";
 import path from "node:path";
@@ -51,6 +51,7 @@ Usage:
   prime-agent-mobile status            Say whether it is running, and where
   prime-agent-mobile stop              Stop it
   prime-agent-mobile token [--rotate]  Print the setup token
+  prime-agent-mobile rebuild           Rebuild the UI and make it live
   prime-agent-mobile install-command   Add /webui to Prime Agent
   prime-agent-mobile help
 
@@ -121,16 +122,51 @@ async function exists(target: string): Promise<boolean> {
   }
 }
 
-async function ensureBuilt(): Promise<void> {
-  const built = await exists(path.join(projectRoot, "dist", "index.html"))
-    && await exists(path.join(projectRoot, "dist-server", "server", "index.js"));
-  if (built) return;
-  process.stdout.write("Building the app (first run only)...\n");
+async function runBuild(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn("npm", ["run", "build"], { cwd: projectRoot, stdio: "inherit" });
     child.on("error", reject);
     child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`npm run build exited ${code}`))));
   });
+}
+
+/**
+ * Rebuilds without risking the working app.
+ *
+ * The gateway serves `dist/` from disk, and a build that fails partway can
+ * leave it incomplete — so a broken edit would take down a working install
+ * rather than merely failing to change it. The previous build is moved aside
+ * first and put back if the new one does not finish. That is what makes an
+ * edit cheap to undo, which matters more than making it careful.
+ */
+async function safeRebuild(): Promise<boolean> {
+  const dist = path.join(projectRoot, "dist");
+  const previous = path.join(projectRoot, ".dist-previous");
+  const hadBuild = await exists(dist);
+  await rm(previous, { recursive: true, force: true });
+  if (hadBuild) await rename(dist, previous);
+  try {
+    await runBuild();
+    await rm(previous, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    line();
+    line(`Build failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (hadBuild) {
+      await rm(dist, { recursive: true, force: true });
+      await rename(previous, dist);
+      line("The previous build was put back, so the app still works.");
+    }
+    return false;
+  }
+}
+
+async function ensureBuilt(): Promise<void> {
+  const built = await exists(path.join(projectRoot, "dist", "index.html"))
+    && await exists(path.join(projectRoot, "dist-server", "server", "index.js"));
+  if (built) return;
+  process.stdout.write("Building the app (first run only)...\n");
+  await runBuild();
 }
 
 function line(text = ""): void {
@@ -330,8 +366,47 @@ async function installCommand(): Promise<number> {
   await copyFile(source, destination);
   line(`Installed /webui to ${destination}`);
   line();
+  line("`/webui` reports where the UI is served, which is the address to verify");
+  line("changes against. See docs/modifying-the-ui.md.");
+  line();
   line("Start a new Prime Agent session and run `/webui`.");
   line("It reports where the web UI is, and starts it if it is not running.");
+  return 0;
+}
+
+/**
+ * Rebuilds and makes the result live at the address people are already using.
+ *
+ * Restarting a running gateway is the point, not a convenience. A rebuild
+ * alone updates `dist/`, which a reload picks up, but leaves a changed server
+ * running its old code — so "the change is live" would be true of one half of
+ * the app and false of the other, which is worse than either.
+ */
+async function rebuild(): Promise<number> {
+  const config = loadConfig(process.env);
+  const before = await resolveStatus(config.gatewayStatePath);
+  if (!await safeRebuild()) return 1;
+
+  if (!before.running || !before.state) {
+    line();
+    line("Rebuilt. The gateway is not running; `prime-agent-mobile start` will serve it.");
+    return 0;
+  }
+
+  line();
+  line("Rebuilt. Restarting the gateway so the change is actually live...");
+  await stop();
+  const restarted = await start({
+    command: "start",
+    mode: before.state.mode as ExposureMode,
+    port: before.state.port,
+    demo: before.state.backend === "demo",
+    foreground: false,
+    rotate: false,
+  });
+  if (restarted !== 0) return restarted;
+  line();
+  line(`Verify the change at ${before.state.url} — that address, not another one.`);
   return 0;
 }
 
@@ -349,6 +424,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "stop": return stop();
     case "token": return token(options);
     case "install-command": return installCommand();
+    case "rebuild": return rebuild();
     case "help":
     case "--help":
     case "-h":

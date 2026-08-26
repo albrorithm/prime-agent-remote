@@ -1,139 +1,106 @@
 # Prime Agent Mobile Web
 
-A mobile-first, first-party web interface for Prime Agent. It keeps the daemon on the host and exposes a small authenticated gateway over HTTPS/WSS.
+A mobile-first web interface for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
+It keeps the daemon on your machine and puts a small authenticated gateway in
+front of it, so a phone can drive an agent without exposing a terminal.
 
-## What works
+## Install and start
+
+Prime Agent itself must be installed (`npm install -g prime-agent`). Then:
+
+```bash
+npm install
+npm run build
+./dist-server/cli/index.js start
+```
+
+That is the whole setup. The launcher finds your Prime Agent build, notices
+whether Tailscale is running, mints a setup token the first time and reuses it
+afterwards, and prints the address to open along with the token.
+
+```
+prime-agent-mobile start      Start it in the background
+prime-agent-mobile status     Where is it, and is it up
+prime-agent-mobile stop       Stop it
+prime-agent-mobile token      Print the setup token (--rotate to replace it)
+prime-agent-mobile rebuild    Rebuild the UI and make it live
+prime-agent-mobile install-command   Add /webui to Prime Agent
+```
+
+### How it is reachable
+
+One choice, made once, with different consequences:
+
+- `--tailscale` — the default when Tailscale is running. The gateway stays on
+  loopback and Tailscale terminates HTTPS. Reachable from your phone anywhere,
+  and a secure context, without installing a certificate. Publish it once with
+  `tailscale serve --bg http://127.0.0.1:8787`.
+- `--loopback` — this machine only. A phone cannot reach it.
+- `--lan` — **experimental**. Binds every interface, so every device on your
+  network can reach it and the setup token is what stops them. Without a
+  certificate the device already trusts, plain HTTP outside `localhost` is not
+  a secure context: no installable app, no service worker, no notifications and
+  no app badge.
+
+## Pairing
+
+Open the address on your phone and enter the setup token once. The browser is
+issued a device credential of its own, so it stays paired across gateway
+restarts and never needs the token again. Signing out revokes that device;
+letting a session lapse deliberately does not.
+
+Only a hash of the credential is stored, so the file on disk does not let
+anyone become a paired device.
+
+## From inside Prime Agent
+
+```bash
+prime-agent-mobile install-command
+```
+
+`/webui` then reports where the interface is served and starts it if it is not
+running. It is a thin wrapper over the same CLI, and it never parents the
+gateway to a session.
+
+## What it does
 
 - Recursive root-agent and subagent tree.
-- Chat-centered mobile shell with a swipe-open session drawer and compact ancestry navigation.
-- On-demand activity drawer and a wide three-panel layout.
-- Transcript streaming, live goal progress, and mature stop/send composer controls.
-- Markdown-lite transcript rendering with copyable code blocks, including while streaming.
-- In-transcript search with match highlighting.
-- Optimistic send bubbles that reconcile against the server echo.
-- JPEG, PNG, and WebP attachments for image-capable models, with client-side resizing and authenticated transcript thumbnails.
-- Quick replies and per-agent drafts that survive reloads.
-- Catalog-driven slash commands with nine explicit adapters and clearly marked experimental execution for detected Prime commands.
+- Chat-centred mobile shell with a swipe-open session drawer and compact
+  ancestry navigation.
+- Transcript streaming, live goal progress, and stop/send composer controls.
+- Markdown-lite rendering with copyable code blocks, including while streaming.
+- In-transcript search, quick replies, and per-agent drafts that survive reloads.
+- Image attachments for image-capable models, resized client-side.
+- Catalog-driven slash commands, with clearly marked experimental execution.
 - Approval and question cards.
-- Authenticated HTTP mutations and WebSocket events.
-- Starting new sessions: pick a working directory with the in-app browser and name the session.
-- Waking an inactive saved session by sending its next message.
-- Per-stream sequence cursors, replay, and snapshot fallback.
-- Safe demo backend for UI review.
-- Live Prime Agent adapter through `DaemonClient` and `DaemonAgentConnection`.
-- Installable manifest and shell-only service worker.
+- Starting, renaming, stopping and deleting sessions from the phone.
+- Optional web push, off until you configure it.
+- Installable as a home-screen app.
 
-The browser never connects to the daemon socket directly. Terminal access and arbitrary host file contents are intentionally not exposed. The browser sends only images that the user explicitly selects, captures, pastes, or drops into the composer. The remaining filesystem surface is a read-only directory-name browser used to choose a working directory for new sessions; it lists directory names, never file contents.
+The browser never reaches the daemon socket directly. There is no terminal, no
+arbitrary shell, and no arbitrary file reading. The only filesystem surface is a
+read-only directory-name browser for choosing a working directory.
+[`docs/security.md`](docs/security.md) states the boundary in full.
+
+## Demo mode
+
+`prime-agent-mobile start --demo` runs against a safe fake backend that never
+touches a real agent. Useful for looking at the interface.
+
+## Documentation
+
+- [Security model](docs/security.md) — the trust boundary, stated deliberately.
+- [Deployment](docs/deployment.md) — environment variables and production notes.
+- [Changing the web UI](docs/modifying-the-ui.md) — for agents and quick edits.
+- [Protocol](docs/protocol.md) — the wire contract.
+- [Contributing](CONTRIBUTING.md)
 
 ## Requirements
 
 - Node.js 22 or newer.
-- A current Prime Agent build for live mode.
-- Tailscale is recommended for remote access.
+- Prime Agent installed and its daemon reachable.
+- Tailscale recommended for access from outside your machine.
 
-## Start in demo mode
+## License
 
-```bash
-npm install
-npm run dev
-```
-
-The gateway prints a generated pairing token. Open `http://127.0.0.1:5173` and enter it on the pairing screen.
-
-For a stable token:
-
-```bash
-PRIME_WEB_PAIRING_TOKEN='replace-with-a-long-random-token' npm run dev
-```
-
-## Production build
-
-```bash
-npm run build
-PRIME_WEB_PAIRING_TOKEN='replace-with-a-long-random-token' \
-PRIME_WEB_ALLOWED_ORIGINS='http://127.0.0.1:8787' \
-PRIME_WEB_SECURE_COOKIE=false \
-npm start
-```
-
-The gateway binds to `127.0.0.1:8787` by default.
-
-## Live Prime Agent mode
-
-The gateway finds Prime Agent by itself. Prime Agent is normally a global
-install (`npm install -g prime-agent`), which a bare import from this package
-cannot see, so the gateway looks in order at `PRIME_AGENT_MODULE`, its own
-dependencies, and the global `npm root -g` directory, and uses the first build
-that exports the daemon API. It logs which one it chose.
-
-```bash
-PRIME_WEB_BACKEND=prime \
-PRIME_WEB_PAIRING_TOKEN='replace-with-a-long-random-token' \
-PRIME_WEB_ALLOWED_ORIGINS='http://127.0.0.1:8787' \
-npm start
-```
-
-Set `PRIME_AGENT_MODULE` only to override that search, for example when
-running against a build from source:
-
-```bash
-PRIME_AGENT_MODULE='/path/to/prime-agent/dist/index.js' npm start
-```
-
-Optional:
-
-```bash
-PRIME_AGENT_DAEMON_SOCKET='/custom/daemon.sock'
-```
-
-The compatible module must export:
-
-- `DaemonClient`
-- `DaemonAgentConnection`
-- `defaultDaemonSocketPath`
-
-These exports are checked at startup rather than assumed. The name is worth
-care: the `@earendil-works/pi-coding-agent` package on npm is an older publish
-line whose current versions contain none of them, so a build that imports
-cleanly can still be the wrong one. The package that ships the daemon client is
-`prime-agent`.
-
-## Tailscale Serve
-
-Keep the application bound to loopback and let Tailscale terminate HTTPS:
-
-```bash
-PRIME_WEB_SECURE_COOKIE=true \
-PRIME_WEB_ALLOWED_ORIGINS='https://your-tailnet-host.example.ts.net' \
-PRIME_WEB_PAIRING_TOKEN='replace-with-a-long-random-token' \
-npm start
-
-tailscale serve --bg http://127.0.0.1:8787
-tailscale serve status
-```
-
-Use the exact HTTPS origin reported by Tailscale in `PRIME_WEB_ALLOWED_ORIGINS`. Do not bind the gateway to all interfaces unless there is a separate, reviewed firewall and reverse proxy.
-
-## Commands
-
-```bash
-npm run typecheck  # browser and server TypeScript
-npm test           # protocol reducer, replay, and agent-tree tests
-npm run build      # production web and server output
-npm run smoke      # build plus authenticated HTTP/WebSocket smoke test
-```
-
-## Layout
-
-```text
-src/protocol.ts               Public browser DTOs and runtime request validation
-src/server/backend.ts         Backend boundary
-src/server/demo-backend.ts    Deterministic interactive demo
-src/server/prime-backend.ts   Prime daemon adapter
-src/server/event-hub.ts       Snapshot/replay streams
-src/server/auth.ts            Pairing, sessions, and CSRF
-src/server/index.ts           HTTP, WebSocket, and static gateway
-src/web/                      React mobile PWA
-```
-
-See `docs/protocol.md`, `docs/security.md`, and `docs/deployment.md` for the public contract and deployment boundaries.
+MIT. See [LICENSE](LICENSE).
