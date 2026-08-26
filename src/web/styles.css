@@ -35,6 +35,15 @@
   --accent-soft: rgba(255, 255, 255, .08);
   /* Ink on an --accent fill, so it has to invert with --accent, not with --bg. */
   --on-accent: #000;
+  /* Inline code is the one fill that must be SURFACE-RELATIVE, not an absolute
+     rung. MessageContent renders on --bg, inside a user bubble
+     (--panel-raised-3) and in table headers (--panel-raised-2); a fixed
+     #191919 plate collapses to 1.00:1 on the bubble and 1.05:1 in the header,
+     leaving the chip padding visible as broken word spacing. A tint derived
+     from --text lifts by the same step on every surface and inverts with the
+     theme for free. The edge, not the fill, is what makes the pill read. */
+  --chip-fill: color-mix(in srgb, var(--text) 10%, transparent);
+  --chip-edge: color-mix(in srgb, var(--text) 20%, transparent);
   --hover: rgba(255, 255, 255, .035);
   --focus-ring: rgba(255, 255, 255, .08);
   /* Three depths, not one: the header bar sits lightest over content, the
@@ -114,6 +123,11 @@
   --accent: #1a1815;
   --accent-soft: rgba(26, 24, 21, .07);
   --on-accent: #fdfcfa;
+  /* Black-on-light lifts less per unit alpha than white-on-dark, so the chip
+     steps up to hold the same perceived plate. color-mix already flips the
+     direction, because --text is near-black here. */
+  --chip-fill: color-mix(in srgb, var(--text) 12%, transparent);
+  --chip-edge: color-mix(in srgb, var(--text) 22%, transparent);
   /* These four flip direction, not just value: white-alpha lifts a dark
      surface, black-alpha is what shades a light one. */
   --hover: rgba(26, 24, 21, .045);
@@ -408,7 +422,10 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 /* clone keeps the chip background + padding on BOTH halves when a long token
    (a model id, a path) wraps, so it reads as one value, not two. Safari on iOS
    only honors the -webkit- form, and this ships as an iOS PWA. */
-.inline-code { padding: 1px 5px; border-radius: 5px; background: var(--panel-raised-3); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+/* inset box-shadow, not border: a real border would add 2px to the line box and
+   push the chip out of the text rhythm. box-decoration-break clones the shadow
+   with the fill, so a wrapped token keeps a closed pill on both halves. */
+.inline-code { padding: 1px 5px; border-radius: 5px; background: var(--chip-fill); box-shadow: inset 0 0 0 1px var(--chip-edge); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 .markdown-math-block { max-width: 100%; margin: 0; overflow-x: auto; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); }
 .markdown-math-block code { color: var(--syntax-plain); font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 .markdown-list .markdown-math-block { margin: 4px 0; }
