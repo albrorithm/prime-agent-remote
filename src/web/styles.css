@@ -507,7 +507,12 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .composer textarea:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .composer textarea::placeholder { color: var(--muted); }
 .composer-action { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid var(--accent); border-radius: 50%; color: var(--on-accent); background: var(--accent); }
-.composer-action.stop { color: var(--on-accent); border-color: var(--accent); background: var(--accent); }
+/* Send is the filled primary. Stop occupies the SAME 44px slot and swaps in
+   whenever the draft empties mid-stream, so it must not be the same object —
+   an identical white disc means the control changes meaning silently under the
+   thumb. Unfilled with a danger edge and glyph, matching .attention-action.danger,
+   which is how this palette already marks a destructive action. */
+.composer-action.stop { border-color: var(--tone-danger-soft); color: var(--tone-danger); background: var(--panel-raised); }
 .composer-action svg { width: 17px; height: 17px; }
 
 .agents-panel { width: 100%; min-width: 0; overflow: hidden; }
