@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { access, constants, copyFile, mkdir, rename, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir, hostname } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { loadConfig } from "../server/config.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
@@ -436,8 +437,43 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 }
 
+/**
+ * Whether this module is the program being run, rather than a library import.
+ *
+ * Two things make the obvious comparison wrong, and both are the normal case
+ * rather than an edge case.
+ *
+ * `process.argv[1]` is the path as it was typed. `import.meta.url` is the
+ * RESOLVED module URL, with symlinks followed. Every npm `bin` is a symlink
+ * from the global bin directory to the package's entry file, so installing
+ * this CLI under its own name — the only way anyone actually runs it, and what
+ * the /webui extension shells out to — made the two disagree and the guard
+ * false. The command printed nothing and exited 0, for every subcommand,
+ * including `--help`. Only `node dist-server/cli/index.js` ever ran.
+ *
+ * And building the URL by pasting the path after `file://` leaves whatever
+ * needs escaping unescaped, so a checkout in a directory with a space in its
+ * name failed the comparison too. `pathToFileURL` is what encodes that the
+ * same way `import.meta.url` already is.
+ *
+ * Exported so this is covered by a test rather than only by running it.
+ */
+export function isProgramEntry(
+  entry: string | undefined,
+  moduleUrl: string,
+  resolve: (target: string) => string = realpathSync,
+): boolean {
+  if (!entry) return false;
+  try {
+    return pathToFileURL(resolve(entry)).href === moduleUrl;
+  } catch {
+    // An argv[1] that cannot be resolved is not this file.
+    return false;
+  }
+}
+
 // Only when run as a program, so the tests can import the pure parts.
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (isProgramEntry(process.argv[1], import.meta.url)) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {

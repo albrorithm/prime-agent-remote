@@ -1,5 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { localHostname, parseArguments } from "./index.js";
+import { isProgramEntry, localHostname, parseArguments } from "./index.js";
+
+/* Every npm `bin` is a symlink, so this is the ordinary case, not an edge one:
+   installed under its own name the CLI used to print nothing and exit 0 for
+   every subcommand, `--help` included, because argv[1] kept the symlink path
+   while import.meta.url had already resolved it. /webui shells out to that
+   name, so it was dead too. */
+describe("isProgramEntry", () => {
+  const moduleUrl = "file:///opt/pkg/dist-server/cli/index.js";
+  const realpath = (target: string) =>
+    target === "/opt/homebrew/bin/prime-agent-mobile" ? "/opt/pkg/dist-server/cli/index.js" : target;
+
+  it("recognises the file run directly", () => {
+    expect(isProgramEntry("/opt/pkg/dist-server/cli/index.js", moduleUrl, realpath)).toBe(true);
+  });
+
+  it("recognises the file run through an installed bin symlink", () => {
+    expect(isProgramEntry("/opt/homebrew/bin/prime-agent-mobile", moduleUrl, realpath)).toBe(true);
+  });
+
+  it("rejects a different program", () => {
+    expect(isProgramEntry("/opt/pkg/dist-server/server/index.js", moduleUrl, realpath)).toBe(false);
+  });
+
+  it("is false when imported as a library, with no entry at all", () => {
+    expect(isProgramEntry(undefined, moduleUrl, realpath)).toBe(false);
+  });
+
+  it("is false rather than throwing when the entry cannot be resolved", () => {
+    expect(isProgramEntry("/gone", moduleUrl, () => { throw new Error("ENOENT"); })).toBe(false);
+  });
+
+  // Pasting the path after `file://` leaves what needs escaping unescaped, so a
+  // checkout in a directory with a space failed the comparison.
+  it("matches a path that has to be percent-encoded", () => {
+    const spaced = "file:///opt/my%20apps/dist-server/cli/index.js";
+    expect(isProgramEntry("/opt/my apps/dist-server/cli/index.js", spaced, (t) => t)).toBe(true);
+  });
+});
 
 describe("parseArguments", () => {
   it("defaults to help when given nothing", () => {
