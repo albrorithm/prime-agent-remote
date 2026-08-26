@@ -48,6 +48,12 @@ export interface AbortInput {
   expectedRevision: number;
 }
 
+export interface StopInput {
+  agentId: string;
+  requestId: string;
+  expectedRevision: number;
+}
+
 export interface RenameInput {
   agentId: string;
   requestId: string;
@@ -279,6 +285,12 @@ export interface AgentBackend {
    * lifecycle, so the browser never gets to say which one runs.
    */
   rename(input: RenameInput): Promise<MutationAccepted>;
+  /**
+   * End one agent's live session, leaving it saved and resumable. Not daemon
+   * shutdown, and never expressible as one: the operation names a single agent
+   * id and the backend chooses the verb.
+   */
+  stop(input: StopInput): Promise<MutationAccepted>;
   resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted>;
   listDirectories(path?: string): Promise<DirectoryListing>;
   createSession(input: CreateSessionInput): Promise<SessionCreated>;

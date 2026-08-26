@@ -5,9 +5,10 @@ import type { AgentSummary } from "../../protocol";
 import { hasSessionActions, SessionActions } from "./SessionActions";
 
 const rename = vi.fn();
+const stop = vi.fn();
 
 vi.mock("../gateway-store", () => ({
-  useGateway: () => ({ rename }),
+  useGateway: () => ({ rename, stop }),
 }));
 
 function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
@@ -42,7 +43,11 @@ function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
 
 describe("hasSessionActions", () => {
   it("is false for a session with nothing to manage", () => {
-    expect(hasSessionActions(makeAgent({ capabilities: { rename: false } as AgentSummary["capabilities"] }))).toBe(false);
+    expect(hasSessionActions(makeAgent({ capabilities: { rename: false, stop: false } as AgentSummary["capabilities"] }))).toBe(false);
+  });
+
+  it("is true for a session that can only be stopped", () => {
+    expect(hasSessionActions(makeAgent({ capabilities: { rename: false, stop: true } as AgentSummary["capabilities"] }))).toBe(true);
   });
 
   it("is true once the backend says the session can be renamed", () => {
@@ -54,11 +59,47 @@ describe("SessionActions", () => {
   it("offers nothing to rename when the backend refuses the capability", () => {
     render(
       <SessionActions
-        agent={makeAgent({ capabilities: { rename: false } as AgentSummary["capabilities"] })}
+        agent={makeAgent({ capabilities: { rename: false, stop: false } as AgentSummary["capabilities"] })}
         onClose={vi.fn()}
       />,
     );
     expect(screen.queryByRole("button", { name: "Rename session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "End session" })).toBeNull();
+  });
+
+  it("offers to end a session only when the backend says it has one to end", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    stop.mockReset().mockResolvedValue(undefined);
+    render(
+      <SessionActions
+        agent={makeAgent({ capabilities: { rename: true, stop: true } as AgentSummary["capabilities"] })}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "End session" }));
+
+    await waitFor(() => expect(stop).toHaveBeenCalledWith("agent-1"));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("stays open when ending the session fails", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    stop.mockReset().mockRejectedValue(new Error("Action is not allowed"));
+    render(
+      <SessionActions
+        agent={makeAgent({ capabilities: { rename: true, stop: true } as AgentSummary["capabilities"] })}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "End session" }));
+
+    await waitFor(() => expect(stop).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "End session" })).toBeEnabled();
   });
 
   it("starts from the current name and stays disabled until it actually changes", async () => {

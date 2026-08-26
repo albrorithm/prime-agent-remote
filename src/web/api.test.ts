@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut } from "./api";
+import { bootstrap, createSession, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, signOut, stopAgent } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -253,5 +253,23 @@ describe("renameAgent", () => {
     }), { status: 403, headers: { "Content-Type": "application/problem+json" } })));
 
     await expect(renameAgent("agent-1", "csrf", 4, "New name", requestId)).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe("stopAgent", () => {
+  it("posts to the agent's own stop route and carries nothing else", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 2,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await stopAgent("agent-1", "csrf", 1, requestId);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent-1/stop");
+    const init = fetchMock.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
+    expect(init.headers["X-CSRF-Token"]).toBe("csrf");
+    expect(JSON.parse(init.body as string)).toEqual({ requestId, expectedRevision: 1 });
   });
 });

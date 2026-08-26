@@ -290,6 +290,53 @@ describe("DemoBackend", () => {
     }
   });
 
+  it("stops a live session into a resumable one, and refuses a session with nothing live", async () => {
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const before = backend.catalog().agents.find((agent) => agent.id === "root-mobile");
+      expect(before).toMatchObject({ lifecycle: "live", capabilities: { stop: true } });
+
+      const snapshot = await backend.agentSnapshot("root-mobile");
+      const result = await backend.stop({
+        agentId: "root-mobile",
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+      });
+      expect(result.revision).toBe(snapshot!.revision + 1);
+
+      // Stopping ends the session; it does not discard it. The agent is still
+      // in the catalog, resumable, and still renameable.
+      const after = backend.catalog().agents.find((agent) => agent.id === "root-mobile");
+      expect(after).toMatchObject({
+        lifecycle: "inactive",
+        activity: "idle",
+        attention: null,
+        capabilities: { send: false, abort: false, resume: true, respond: false, stop: false, rename: true },
+      });
+      expect((await backend.agentSnapshot("root-mobile"))?.dashboard?.status).toBe("inactive");
+
+      // Now there is nothing live left to stop.
+      await expect(backend.stop({
+        agentId: "root-mobile",
+        requestId: crypto.randomUUID(),
+        expectedRevision: result.revision,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+
+      // And a session that was never live refuses from the start.
+      const inactiveSnapshot = await backend.agentSnapshot("root-inactive");
+      await expect(backend.stop({
+        agentId: "root-inactive",
+        requestId: crypto.randomUUID(),
+        expectedRevision: inactiveSnapshot!.revision,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
   it("never advertises a capability it has no method for", async () => {
     // The UI decides what to put on screen from these bits, so an advertised
     // capability with nothing behind it is a control that fails when pressed.

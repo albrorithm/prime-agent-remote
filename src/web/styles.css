@@ -293,6 +293,12 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .session-action-group input { width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg); }
 .session-action-group input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .session-action-group .primary-button:disabled { opacity: .45; }
+/* Ending a session is reversible — it stays saved and resumable — so it reads
+   as a considered choice rather than a danger. Delete is the one that shouts. */
+.secondary-button { display: flex; min-height: 48px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border-strong); border-radius: 11px; color: var(--text); background: var(--panel-raised-2); font-weight: 680; }
+.secondary-button:hover:not(:disabled) { border-color: var(--border-emphasis); background: var(--panel-raised-3); }
+.secondary-button:disabled { opacity: .45; }
+.secondary-button svg { width: 17px; height: 17px; }
 
 .transcript-panel { position: relative; background: var(--bg); }
 /* `flex: 0 0 auto` with a min-height, never `flex: 0 0 <height>`: the basis

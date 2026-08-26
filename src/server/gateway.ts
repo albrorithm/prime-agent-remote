@@ -17,6 +17,7 @@ import {
   pushSubscribeRequestSchema,
   pushUnsubscribeRequestSchema,
   renameAgentRequestSchema,
+  stopAgentRequestSchema,
   sendMessageRequestSchema,
   type ProblemDetails,
   type PushAccepted,
@@ -407,6 +408,21 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         parsed.data.requestId,
         mutationBinding(`rename:${agentId}`, parsed.data),
         () => backend.rename({ agentId, ...parsed.data }),
+      );
+      json(res, 202, result);
+      return true;
+    }
+
+    const stopMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/stop$/);
+    if (req.method === "POST" && stopMatch) {
+      const agentId = decodeSegment(stopMatch[1]);
+      const parsed = stopAgentRequestSchema.safeParse(await readJson(req));
+      if (!agentId || !parsed.success) { problem(res, 400, "Invalid stop request"); return true; }
+      const result = await deduplicated(
+        session,
+        parsed.data.requestId,
+        mutationBinding(`stop:${agentId}`, parsed.data),
+        () => backend.stop({ agentId, ...parsed.data }),
       );
       json(res, 202, result);
       return true;

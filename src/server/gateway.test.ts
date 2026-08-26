@@ -559,6 +559,40 @@ describe("gateway API routes", () => {
     }
   });
 
+  it("stops a live agent and refuses to stop one with no live session", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const liveId = agents.find((agent) => agent.capabilities.stop)?.id;
+    const savedId = agents.find((agent) => !agent.capabilities.stop && agent.capabilities.resume)?.id;
+    if (!liveId || !savedId) throw new Error("Demo catalog has no live and saved pair");
+
+    const stopped = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(liveId)}/stop`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: await agentRevision(t, client, liveId) }),
+    });
+    expect(stopped.status).toBe(202);
+    const after = (await bootstrap(t, client)).catalog.agents.find((agent) => agent.id === liveId);
+    expect(after).toMatchObject({ lifecycle: "inactive", capabilities: { resume: true, stop: false } });
+
+    // The capability bit says no, and so must the route.
+    const forbidden = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(savedId)}/stop`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: await agentRevision(t, client, savedId) }),
+    });
+    expect(forbidden.status).toBe(403);
+
+    // The schema is strict: stop carries no payload beyond the two fields.
+    const extra = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(savedId)}/stop`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, force: true }),
+    });
+    expect(extra.status).toBe(400);
+  });
+
   it("answers a backend that refuses to rename with 403 rather than 500", async () => {
     // The UI decides what to offer from the capability bits, but the gateway
     // must still turn a backend's refusal into a refusal — not an error.

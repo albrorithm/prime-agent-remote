@@ -311,6 +311,42 @@ try {
     }
   }
 
+  // Stop: ends one live session and leaves it resumable, and is refused for a
+  // session that has none. Both directions of the capability bit.
+  const stopTarget = renamedBootstrap.catalog.agents.find((agent) => agent.capabilities.stop)?.id;
+  if (!stopTarget) throw new Error("No stoppable demo agent found");
+  const stopSnapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(stopTarget)}/snapshot`, {
+    headers: { Origin: origin, Cookie: cookie },
+  }));
+  const stopped = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(stopTarget)}/stop`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: stopSnapshot.revision }),
+  });
+  if (stopped.status !== 202) throw new Error(`Stop failed: ${stopped.status} ${await stopped.text()}`);
+  const stoppedBootstrap = await json(await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin, Cookie: cookie } }));
+  const stoppedAgent = stoppedBootstrap.catalog.agents.find((agent) => agent.id === stopTarget);
+  if (stoppedAgent?.lifecycle !== "inactive" || !stoppedAgent.capabilities.resume || stoppedAgent.capabilities.stop) {
+    throw new Error("Stopped demo agent did not become inactive and resumable");
+  }
+  // The same agent is now the refusal case: it has no live session left, and
+  // the route must say so rather than accept a second stop.
+  const stoppedSnapshot = await json(await fetch(`${origin}/api/v1/agents/${encodeURIComponent(stopTarget)}/snapshot`, {
+    headers: { Origin: origin, Cookie: cookie },
+  }));
+  const stopRefused = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(stopTarget)}/stop`, {
+    method: "POST",
+    headers: commandHeaders,
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: stoppedSnapshot.revision }),
+  });
+  if (stopRefused.status !== 403) throw new Error(`Expected stop capability refusal, got ${stopRefused.status}`);
+  const stopWithoutCsrf = await fetch(`${origin}/api/v1/agents/${encodeURIComponent(stopTarget)}/stop`, {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: crypto.randomUUID(), expectedRevision: 1 }),
+  });
+  if (stopWithoutCsrf.status !== 403) throw new Error(`Expected stop CSRF rejection, got ${stopWithoutCsrf.status}`);
+
   const pushSubscription = {
     endpoint: "https://push.example.invalid/smoke-endpoint",
     keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },

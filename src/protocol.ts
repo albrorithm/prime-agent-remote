@@ -910,6 +910,17 @@ export const renameAgentRequestSchema = z.object({
   name: sessionNameSchema,
 }).strict();
 
+/**
+ * Ending one agent's session. Deliberately its own schema rather than a reuse
+ * of `abortRequestSchema`: abort interrupts what an agent is doing and leaves
+ * it live, stop ends the session itself, and the two should not become
+ * interchangeable just because they carry the same two fields today.
+ */
+export const stopAgentRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative(),
+}).strict();
+
 export const problemDetailsSchema = z.object({
   type: z.string(),
   title: z.string(),

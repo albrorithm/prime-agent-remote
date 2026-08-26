@@ -1,4 +1,4 @@
-import { LoaderCircle, SlidersHorizontal, X } from "lucide-react";
+import { LoaderCircle, Power, SlidersHorizontal, X } from "lucide-react";
 import { useState } from "react";
 import type { AgentSummary } from "../../protocol";
 import { MAX_SESSION_NAME_CHARS } from "../../protocol";
@@ -15,7 +15,7 @@ interface SessionActionsProps {
  * lead somewhere with nothing on it.
  */
 export function hasSessionActions(agent: AgentSummary): boolean {
-  return agent.capabilities.rename;
+  return agent.capabilities.rename || agent.capabilities.stop;
 }
 
 /**
@@ -25,9 +25,10 @@ export function hasSessionActions(agent: AgentSummary): boolean {
  * for that.
  */
 export function SessionActions({ agent, onClose }: SessionActionsProps) {
-  const { rename } = useGateway();
+  const { rename, stop } = useGateway();
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const trimmed = name.trim();
   const renameReady = agent.capabilities.rename && Boolean(trimmed) && trimmed !== agent.name && !renaming;
@@ -42,6 +43,19 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
       // The gateway store surfaces the error; the view stays open so the
       // typed name is not lost along with the failure.
       setRenaming(false);
+    }
+  }
+
+  async function submitStop() {
+    if (!agent.capabilities.stop || stopping) return;
+    setStopping(true);
+    try {
+      await stop(agent.id);
+      onClose();
+    } catch {
+      // The gateway store surfaces the error. Staying open lets the user see
+      // the session's new state rather than guessing whether it ended.
+      setStopping(false);
     }
   }
 
@@ -78,6 +92,18 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
             <button className="primary-button" disabled={!renameReady} onClick={() => void submitRename()}>
               {renaming && <LoaderCircle className="spin" aria-hidden="true" />}
               Rename session
+            </button>
+          </section>
+        )}
+        {agent.capabilities.stop && (
+          <section className="session-action-group" aria-labelledby="session-stop-heading">
+            <h3 id="session-stop-heading">End the session</h3>
+            <p className="session-action-note">
+              Stops the running session and leaves it saved. You can resume it later by sending a message — nothing is deleted.
+            </p>
+            <button className="secondary-button" disabled={stopping} onClick={() => void submitStop()}>
+              {stopping ? <LoaderCircle className="spin" aria-hidden="true" /> : <Power aria-hidden="true" />}
+              {stopping ? "Ending session…" : "End session"}
             </button>
           </section>
         )}

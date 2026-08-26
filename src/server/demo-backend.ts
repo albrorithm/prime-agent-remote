@@ -31,6 +31,7 @@ import {
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
   type RenameInput,
+  type StopInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -61,7 +62,7 @@ const fullCapabilities: AgentCapabilities = {
   abort: true,
   resume: false,
   rename: true,
-  stop: false,
+  stop: true,
   deactivate: false,
   delete: false,
   respond: true,
@@ -136,7 +137,7 @@ const initialAgents: AgentSummary[] = [
     description: "Available to resume",
     lifecycle: "inactive",
     activity: "idle",
-    capabilities: { ...fullCapabilities, send: false, abort: false, resume: true, respond: false },
+    capabilities: { ...fullCapabilities, send: false, abort: false, resume: true, respond: false, stop: false },
   }),
 ];
 
@@ -996,6 +997,37 @@ export class DemoBackend implements AgentBackend {
     // share a label.
     summary.name = input.name;
     summary.updatedAt = new Date().toISOString();
+    snapshot.revision += 1;
+    this.catalogState.revision += 1;
+    this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
+    this.hub.publish(`agent:${input.agentId}`, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    return { accepted: true, requestId: input.requestId, revision: snapshot.revision };
+  }
+
+  async stop(input: StopInput): Promise<MutationAccepted> {
+    const snapshot = this.requiredSnapshot(input.agentId);
+    const summary = this.requiredSummary(input.agentId);
+    if (!summary.capabilities.stop) throw new BackendCapabilityError("This agent has no live session to stop");
+    if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+
+    // Stopping ends the session; it does not discard it. The agent lands
+    // exactly where a session that was never woken sits — inactive, resumable,
+    // and still renameable — which is what the live daemon leaves behind too.
+    this.clearTimers(input.agentId);
+    const streaming = [...snapshot.messages].reverse().find((item: TranscriptMessage) => item.state === "streaming");
+    if (streaming) {
+      streaming.state = "failed";
+      streaming.text = streaming.text || "Stopped.";
+      this.hub.publish(`agent:${input.agentId}`, { kind: "agent.message_updated", payload: streaming }, snapshot);
+    }
+    summary.lifecycle = "inactive";
+    summary.activity = "idle";
+    summary.attention = null;
+    summary.unreadCount = 0;
+    summary.capabilities = { ...fullCapabilities, send: false, abort: false, resume: true, respond: false, stop: false };
+    summary.updatedAt = new Date().toISOString();
+    snapshot.attention = [];
+    snapshot.dashboard = demoDashboard(summary);
     snapshot.revision += 1;
     this.catalogState.revision += 1;
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);

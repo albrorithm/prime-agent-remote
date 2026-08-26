@@ -52,6 +52,7 @@ import {
   type CreateSessionInput,
   type ExecuteSlashCommandInput,
   type RenameInput,
+  type StopInput,
   type ResolveAttentionInput,
   type SendMessageInput,
 } from "./backend.js";
@@ -1891,6 +1892,37 @@ export class PrimeBackend implements AgentBackend {
     });
   }
 
+  async stop(input: StopInput): Promise<MutationAccepted> {
+    const summary = this.rawSummaries.get(input.agentId);
+    if (!summary) throw new BackendNotFoundError("Agent not found");
+    return this.withCommandLock(input.agentId, async () => {
+      const snapshot = this.requiredSnapshot(input.agentId);
+      if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+      const activeSessionId = summary.activeSessionId;
+      if (!activeSessionId) throw new BackendCapabilityError("This agent has no live session to stop");
+
+      // `kill` ends one session, named by its own active id. It is not, and
+      // cannot be made into, daemon shutdown.
+      let response: PrimeResponse;
+      try {
+        response = await this.client.request({ type: "kill", activeSessionId });
+      } catch {
+        throw new Error("Prime session stop failed");
+      }
+      if (!response.success) throw new Error("Prime session stop failed");
+
+      // The refreshed listing drops the activeSessionId, which is what
+      // `reconcileConnections` keys the now-stale connection's disposal off —
+      // so the cleanup is this refresh's, not a second step here.
+      await this.refreshCatalog(true);
+      return {
+        accepted: true,
+        requestId: input.requestId,
+        revision: this.advanceSnapshotRevision(input.agentId),
+      };
+    });
+  }
+
   async resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted> {
     const pending = this.pendingExtensions.get(input.attentionId);
     if (!pending) throw new BackendNotFoundError("Attention request not found");
@@ -2159,6 +2191,9 @@ export class PrimeBackend implements AgentBackend {
         // build's adapter actually exposes the setter is re-checked at execute
         // time, where a missing one is a refusal rather than a broken button.
         rename: Boolean(summary.activeSessionId) || Boolean(summary.sessionFile),
+        // Only a live session has something to end. `kill` takes an
+        // activeSessionId, so a saved one has nothing to name.
+        stop: Boolean(summary.activeSessionId),
         respond: Boolean(summary.activeSessionId),
         images: summary.model?.input?.includes("image") === true,
       },

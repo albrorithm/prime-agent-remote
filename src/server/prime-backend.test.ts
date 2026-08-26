@@ -32,6 +32,8 @@ interface FixtureState {
   creates: Array<Record<string, unknown>>;
   savedRenames: Array<Record<string, unknown>>;
   savedRenameError?: string;
+  kills: Array<Record<string, unknown>>;
+  killError?: string;
   listener: ((event: unknown) => void) | null;
   createError?: string;
   listError: boolean;
@@ -138,6 +140,7 @@ const fixture: FixtureState = {
   responses: [],
   creates: [],
   savedRenames: [],
+  kills: [],
   listener: null,
   listError: false,
   connectError: false,
@@ -184,6 +187,17 @@ export class DaemonClient {
         firstMessage: "(no messages)",
       });
       return { success: true, data: { activeSessionId, sessionId } };
+    }
+    if (command.type === "kill") {
+      state.kills.push(command);
+      if (state.killError) return { success: false, error: state.killError };
+      const session = state.sessions.find((item) => item.activeSessionId === command.activeSessionId);
+      if (!session) return { success: false, error: "live session missing" };
+      // The daemon ends the session and keeps the transcript: the next \`list\`
+      // reports the row with no activeSessionId and a file to resume from.
+      delete session.activeSessionId;
+      session.sessionFile = session.sessionFile ?? "/fixture/killed-session.jsonl";
+      return { success: true, data: {} };
     }
     if (command.type === "rename_saved_session") {
       state.savedRenames.push(command);
@@ -1086,6 +1100,80 @@ describe("PrimeBackend", () => {
     } finally {
       delete fixture.savedRenameError;
       fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("stops a live session with kill and leaves it inactive but resumable", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.kills = [];
+    fixture.disposed = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      const saved = backend.catalog().agents.find((agent) => agent.lifecycle === "inactive");
+      expect(live?.capabilities.stop).toBe(true);
+      // A saved session has no active id, so there is nothing for kill to name.
+      expect(saved?.capabilities.stop).toBe(false);
+
+      await backend.agentSnapshot(live!.id);
+      const snapshot = await backend.agentSnapshot(live!.id);
+      const result = await backend.stop({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+      });
+
+      // One session, named by its own active id — never a daemon-wide verb.
+      expect(fixture.kills).toEqual([{ type: "kill", activeSessionId: "private-active" }]);
+      expect(result.revision).toBeGreaterThan(snapshot!.revision);
+      expect(backend.catalog().agents.find((agent) => agent.id === live!.id)).toMatchObject({
+        lifecycle: "inactive",
+        capabilities: { send: false, stop: false, resume: true, rename: true },
+      });
+      // The refreshed listing dropped the activeSessionId, so the now-stale
+      // connection is reconciled away rather than left attached.
+      expect(fixture.disposed).toBeGreaterThan(0);
+
+      await expect(backend.stop({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: result.revision,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+
+      await expect(backend.stop({
+        agentId: saved!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot(saved!.id))!.revision,
+      })).rejects.toBeInstanceOf(BackendCapabilityError);
+    } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("reports a refused kill as a failure rather than a stopped session", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.kills = [];
+    fixture.killError = "private kill failure";
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      await backend.agentSnapshot(live!.id);
+      const snapshot = await backend.agentSnapshot(live!.id);
+      await expect(backend.stop({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+      })).rejects.toThrow("Prime session stop failed");
+      expect(backend.catalog().agents.find((agent) => agent.id === live!.id)?.lifecycle).toBe("live");
+    } finally {
+      delete fixture.killError;
       hub.close();
       await backend.close();
     }

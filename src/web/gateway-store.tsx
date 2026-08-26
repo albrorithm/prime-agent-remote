@@ -348,6 +348,7 @@ interface GatewayContextValue extends State {
   runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
   abort: (agentId?: string) => Promise<void>;
   rename: (agentId: string, name: string) => Promise<void>;
+  stop: (agentId: string) => Promise<void>;
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   signOut: () => Promise<void>;
   reconnect: () => void;
@@ -996,6 +997,27 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     }
   }, [loadedRevision, runMutation, showError]);
 
+  const stop = useCallback(async (agentId: string) => {
+    const current = stateRef.current;
+    const generation = sessionGeneration.current;
+    try {
+      const revision = await loadedRevision(agentId, generation);
+      const result = await runMutation(
+        agentId,
+        (next) => api.stopAgent(agentId, current.csrfToken, next),
+        revision,
+      );
+      if (generation !== sessionGeneration.current) return;
+      dispatch({ type: "agent_revision", agentId, revision: result.revision });
+      showError(null);
+    } catch (error) {
+      if (generation === sessionGeneration.current) {
+        showError(humanizeError(error, "Could not end the session"));
+      }
+      throw error;
+    }
+  }, [loadedRevision, runMutation, showError]);
+
   const rename = useCallback(async (agentId: string, name: string) => {
     const current = stateRef.current;
     const generation = sessionGeneration.current;
@@ -1092,11 +1114,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       runSlashCommand,
       abort,
       rename,
+      stop,
       respond,
       signOut,
       reconnect,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, respond, signOut, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, respond, signOut, reconnect],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

@@ -15,6 +15,7 @@ The gateway currently permits these live operations:
 - retrieve a projected image through an authenticated content-addressed attachment route;
 - request abort;
 - rename one agent, by its id: a live session through the same `AgentConnection` adapter the `/name` command already uses, and a saved one through the daemon's own recorded session path — never a path the browser supplies. The name is schema-validated as a single line of at most 200 characters before it leaves the gateway;
+- end one agent's live session, by its id, through the daemon's `kill` for that session's own active id. The session is left saved and resumable; this is not daemon shutdown, and the browser cannot express one;
 - answer supported extension confirmation and selection requests;
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker;

@@ -20,6 +20,7 @@ const apiMock = vi.hoisted(() => {
     executeSlashCommand: vi.fn(),
     abortAgent: vi.fn(),
     renameAgent: vi.fn(),
+    stopAgent: vi.fn(),
     respondToAttention: vi.fn(),
     signOut: vi.fn(),
     unauthorized: null as null | (() => void),
@@ -41,6 +42,7 @@ vi.mock("./api", () => ({
   executeSlashCommand: apiMock.executeSlashCommand,
   abortAgent: apiMock.abortAgent,
   renameAgent: apiMock.renameAgent,
+  stopAgent: apiMock.stopAgent,
   respondToAttention: apiMock.respondToAttention,
   signOut: apiMock.signOut,
   humanizeError: (error: unknown, fallback: string) =>
@@ -171,6 +173,7 @@ beforeEach(() => {
   apiMock.executeSlashCommand.mockReset();
   apiMock.abortAgent.mockReset();
   apiMock.renameAgent.mockReset();
+  apiMock.stopAgent.mockReset();
   apiMock.respondToAttention.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
   pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
@@ -673,6 +676,20 @@ describe("GatewayProvider recovery and state ownership", () => {
 
     expect(result.current.error).toBe("Action is not allowed");
     expect(result.current.snapshots["agent-a"].revision).toBe(3);
+  });
+
+  it("stops a session the user has not opened without moving their selection", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id, id === "agent-b" ? 4 : 1)));
+    apiMock.stopAgent.mockResolvedValue({ accepted: true, requestId: "request", revision: 5 });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(() => result.current.stop("agent-b"));
+
+    expect(apiMock.stopAgent).toHaveBeenCalledWith("agent-b", "csrf", 4);
+    expect(result.current.snapshots["agent-b"].revision).toBe(5);
+    expect(result.current.selectedAgentId).toBe("agent-a");
   });
 
   it("applies an attention response to its owning agent after selection changes", async () => {
