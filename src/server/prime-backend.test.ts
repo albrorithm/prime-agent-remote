@@ -993,7 +993,7 @@ describe("PrimeBackend", () => {
       expect(inactive?.capabilities).toMatchObject({ send: false, resume: true });
       const snapshot = await backend.agentSnapshot(inactive!.id);
       const frames: unknown[] = [];
-      const subscription = hub.attach(`agent:${inactive!.id}`, null, (frame) => frames.push(frame));
+      const subscription = hub.attach(`agent:${inactive!.id}`, null, (frame) => { frames.push(frame); });
       expect(subscription).not.toBeNull();
 
       const result = await backend.sendMessage({
@@ -1466,7 +1466,7 @@ describe("PrimeBackend", () => {
       fixture.maxConcurrentListRequests = 0;
       fixture.listDelayMs = 25;
       const frames: ServerFrame[] = [];
-      const attached = hub.attach("catalog", null, (frame) => frames.push(frame));
+      const attached = hub.attach("catalog", null, (frame) => { frames.push(frame); });
       const refresh = () => Reflect.get(backend, "refreshCatalog").call(backend, true) as Promise<void>;
       const first = refresh();
       const second = refresh();
@@ -1892,7 +1892,7 @@ describe("PrimeBackend", () => {
       await backend.agentSnapshot(agentId);
       expect(fixture.attachCount).toBe(1);
       const frames: ServerFrame[] = [];
-      const attached = hub.attach(`agent:${agentId}`, null, (frame) => frames.push(frame));
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => { frames.push(frame); });
 
       // Restart: sockets held so far are permanently dead, and while the
       // daemon is down no new client can connect either.
@@ -1955,7 +1955,7 @@ describe("PrimeBackend", () => {
       const agentId = backend.catalog().agents[0].id;
       await backend.agentSnapshot(agentId);
       const frames: ServerFrame[] = [];
-      const attached = hub.attach(`agent:${agentId}`, null, (frame) => frames.push(frame));
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => { frames.push(frame); });
       const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
 
       fixture.snapshotCalls = 0;
@@ -2034,7 +2034,7 @@ describe("PrimeBackend", () => {
       expect(row).toBeDefined();
       expect(row?.turnId).toBe(snapshot!.messages[0].id);
       expect(row?.state).toBe("failed");
-      const presentation = row!.presentation as Extract<NonNullable<typeof row.presentation>, { kind: "python" }>;
+      const presentation = row!.presentation as Extract<NonNullable<NonNullable<typeof row>["presentation"]>, { kind: "python" }>;
       expect(presentation).toMatchObject({
         lang: "python",
         status: "failed",

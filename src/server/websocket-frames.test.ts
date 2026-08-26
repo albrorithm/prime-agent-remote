@@ -45,7 +45,7 @@ describe("WebSocket frame limits", () => {
       version: 1,
       streamId: "agent:bounded",
       cursor: { epoch: "bounded", seq: 1 },
-      snapshot: { revision: 1, agentId: "bounded", messages, activity: [], attention: [] },
+      snapshot: { revision: 1, agentId: "bounded", messages, attention: [] },
     };
     const serializedBytes = Buffer.byteLength(JSON.stringify(frame), "utf8");
     const reject = vi.fn();

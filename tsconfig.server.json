@@ -13,5 +13,9 @@
     "types": ["node"]
   },
   "include": ["src/protocol.ts", "src/server/**/*.ts"],
+  // Tests are excluded because this config *emits* dist-server, not because
+  // they should go unchecked. tsconfig.server.test.json type-checks them with
+  // noEmit, and `npm run typecheck` runs it. Do not "fix" this by deleting the
+  // exclude — that ships test files into the build.
   "exclude": ["src/server/**/*.test.ts"]
 }

@@ -15,6 +15,7 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     backend: "demo",
     primeModule: "compatible-module",
     sessionTtlMs: 60_000,
+    webPushStorePath: "/dev/null/push-subscriptions.json",
     ...overrides,
   };
 }

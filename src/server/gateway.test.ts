@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
-import type { AttentionRequest, CellOutput } from "../protocol.js";
+import type { AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
 import { BackendCapabilityError, type AttentionListener } from "./backend.js";
 import type { GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
@@ -123,13 +123,10 @@ interface BootstrapBody {
   csrfToken: string;
   backend: string;
   push: { enabled: boolean; publicKey: string | null };
-  catalog: {
-    agents: Array<{
-      id: string;
-      attention: string | null;
-      capabilities: { send: boolean; abort: boolean; resume: boolean };
-    }>;
-  };
+  // The real summary type, not a hand-written subset: this drifted behind the
+  // wire contract once already, and every field the tests read has to be added
+  // by hand when it does.
+  catalog: { agents: AgentSummary[] };
 }
 
 async function bootstrap(t: TestGateway, client: PairedClient): Promise<BootstrapBody> {

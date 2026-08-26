@@ -8,7 +8,7 @@ function catalog(revision: number): CatalogSnapshot {
 }
 
 function agentSnapshot(revision: number, messages: TranscriptMessage[] = []): AgentSnapshot {
-  return { revision, agentId: "agent-one", messages, activity: [], attention: [] };
+  return { revision, agentId: "agent-one", messages, attention: [] };
 }
 
 describe("EventHub", () => {
@@ -16,7 +16,7 @@ describe("EventHub", () => {
     const hub = new EventHub();
     hub.register("catalog", catalog(1));
     const received: ServerFrame[] = [];
-    const attached = hub.attach("catalog", null, (frame) => received.push(frame));
+    const attached = hub.attach("catalog", null, (frame) => { received.push(frame); });
     expect(attached?.initial.type).toBe("snapshot");
     received.push(attached!.initial);
     hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(2) }, catalog(2));
@@ -58,7 +58,7 @@ describe("EventHub", () => {
     const hub = new EventHub();
     hub.register("catalog", catalog(1));
     const received: ServerFrame[] = [];
-    hub.attach("catalog", null, (frame) => received.push(frame));
+    hub.attach("catalog", null, (frame) => { received.push(frame); });
 
     expect(hub.unregister("catalog")).toBe(true);
     expect(received).toContainEqual(expect.objectContaining({ type: "detached", reason: "stream_gone" }));

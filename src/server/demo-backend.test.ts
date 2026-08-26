@@ -199,7 +199,7 @@ describe("DemoBackend", () => {
       });
       hub.register(`agent:${agentId}`, internal);
       const frames: ServerFrame[] = [];
-      const attached = hub.attach(`agent:${agentId}`, null, (frame) => frames.push(frame));
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => { frames.push(frame); });
 
       await vi.advanceTimersByTimeAsync(500);
 
@@ -252,7 +252,7 @@ describe("DemoBackend", () => {
     await backend.initialize(hub);
     try {
       const catalogFrames: unknown[] = [];
-      hub.attach("catalog", null, (frame) => catalogFrames.push(frame));
+      hub.attach("catalog", null, (frame) => { catalogFrames.push(frame); });
 
       for (const agentId of ["root-mobile", "root-inactive"]) {
         const snapshot = await backend.agentSnapshot(agentId);
@@ -356,7 +356,7 @@ describe("DemoBackend", () => {
       expect(target.capabilities.delete).toBe(true);
       const snapshot = await backend.agentSnapshot("root-inactive");
       const frames: unknown[] = [];
-      const attached = hub.attach("agent:root-inactive", null, (frame) => frames.push(frame));
+      const attached = hub.attach("agent:root-inactive", null, (frame) => { frames.push(frame); });
       expect(attached).not.toBeNull();
 
       // A name that is not this session's name deletes nothing.
@@ -401,13 +401,16 @@ describe("DemoBackend", () => {
     // capability with nothing behind it is a control that fails when pressed.
     // Keyed off the backend method rather than a literal expectation, so this
     // stays honest as each operation lands instead of needing an edit per bit.
-    const backedBy: Record<string, keyof DemoBackend> = {
+    const implemented = {
       abort: "abort",
       rename: "rename",
       stop: "stop",
-      deactivate: "deactivate",
       delete: "delete",
-    };
+    } satisfies Record<string, keyof DemoBackend>;
+    // `deactivate` names no method on purpose — there is no daemon verb behind
+    // it — so it cannot be typed against `keyof DemoBackend`. That is the case
+    // this test exists to catch, not a reason to drop it.
+    const backedBy: Record<string, string> = { ...implemented, deactivate: "deactivate" };
     const backend = new DemoBackend();
     const hub = new EventHub();
     await backend.initialize(hub);

@@ -13,7 +13,7 @@
     "build": "npm run clean:server && npm run typecheck && vite build && node scripts/hash-sw.mjs dist && tsc -p tsconfig.server.json",
     "clean:server": "node -e \"require('node:fs').rmSync('dist-server', { recursive: true, force: true })\"",
     "start": "NODE_ENV=production node dist-server/server/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.server.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "npm run build && node scripts/smoke.mjs"
