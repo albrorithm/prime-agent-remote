@@ -7,11 +7,15 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { WebSocket } from "ws";
 
+// The built artifact, so the isolation list below cannot drift from the real one.
+import { CONFIG_FILE_VARIABLES } from "../dist-server/server/config.js";
+
 const port = 18787;
 const origin = `http://127.0.0.1:${port}`;
 const pairingToken = "smoke-test-token";
 // A real generated pair, used only for its shape: nothing here reaches a push
-// service, and the default deployment below runs with no keys at all.
+// service. The default deployment mints its own; these are the explicit
+// PRIME_WEB_VAPID_* keys an operator can still supply to override that.
 const VAPID_ENV = {
   PRIME_WEB_VAPID_PUBLIC_KEY: "BF1JW243veaons7uO0bcdtRHXVUTVJ74A_OzX7wiGhY114OpWvn0BOBrfXu2AhV3cmc0Nrb_LIRZHbFY4L8Xmgw",
   PRIME_WEB_VAPID_PRIVATE_KEY: "IPDx2j8nr-ShPjNWSqXsCAK3fA0W2cM78tjLvtG0jLA",
@@ -20,23 +24,23 @@ const VAPID_ENV = {
 
 /* One throw-away directory for every file the gateway persists.
 
-   The push store was already redirected here, with a comment saying the
-   operator's real store must never be touched — but it was the only one, and
-   the device store was not. So each smoke run paired its test devices into
-   ~/.config/prime-agent-web/devices.json for real. That store keeps only the
-   most recent MAX_DEVICES (32) entries and evicts the oldest, so a handful of
-   smoke runs in one afternoon silently pushed the operator's actual phone out
-   of it and the phone had to be paired again from the token.
+   Derived from CONFIG_FILE_VARIABLES, not listed here. This was a hand-kept
+   list with a comment asking the next person to extend it, and the next person
+   did not, twice. First the device store was missing, so every smoke run
+   paired its test devices into the operator's real devices.json — which keeps
+   32 entries and evicts the oldest, so an afternoon of smoke runs pushed the
+   operator's actual phone out of it. Then `fa3d77d` taught the gateway to mint
+   its own VAPID keypair, and PRIME_WEB_VAPID_KEY_FILE was missing too: a smoke
+   run on a machine with no keys yet writes them into the real config, and one
+   that replaced an existing pair would silently kill every push subscription
+   bound to it.
 
-   Anything derived from configFilePath() in src/server/config.ts belongs here.
-   Add to this list when a new one appears. */
+   Whatever configFilePath() learns about next is isolated the moment it is
+   added there, without anyone remembering to come back here. */
 const smokeConfigDir = mkdtempSync(join(tmpdir(), "prime-smoke-config-"));
-const ISOLATED_STORES = {
-  PRIME_WEB_PUSH_STORE: join(smokeConfigDir, "push-subscriptions.json"),
-  PRIME_WEB_DEVICE_STORE: join(smokeConfigDir, "devices.json"),
-  PRIME_WEB_PAIRING_TOKEN_FILE: join(smokeConfigDir, "pairing-token"),
-  PRIME_WEB_STATE_FILE: join(smokeConfigDir, "gateway.json"),
-};
+const ISOLATED_STORES = Object.fromEntries(
+  Object.values(CONFIG_FILE_VARIABLES).map((variable) => [variable, join(smokeConfigDir, variable)]),
+);
 
 const gateways = [];
 
@@ -113,7 +117,8 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-// The default deployment: no VAPID keys. Everything below has to work in it.
+// The default deployment: no VAPID keys supplied, so the gateway mints its
+// own. Everything below has to work in it.
 const defaultGateway = startGateway(port);
 
 async function json(response) {
@@ -471,19 +476,37 @@ try {
     endpoint: "https://push.example.invalid/smoke-endpoint",
     keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },
   };
+  /* Push configures itself. Supplying no VAPID keys used to mean push was off,
+     and this file asserted that; `fa3d77d` made the gateway mint its own pair
+     on first start instead, so "off" is no longer a state a shipped gateway
+     can be in and the assertion had been failing ever since. The 503 branch is
+     still live code — a gateway can be constructed without keys — and
+     gateway.test.ts covers it in process. What cannot be reached through
+     dist-server should not be asserted through dist-server. */
   const bootstrapPush = resumedBootstrap.push;
-  if (bootstrapPush?.enabled !== false || bootstrapPush.publicKey !== null) {
-    throw new Error("Bootstrap must report push off when no VAPID keys are configured");
+  if (bootstrapPush?.enabled !== true || typeof bootstrapPush.publicKey !== "string" || !bootstrapPush.publicKey) {
+    throw new Error("Bootstrap must report push on, with the key the gateway minted for itself");
   }
-  // Without keys the gateway cannot send, so it must refuse the subscription
-  // rather than bank a permission it can never act on.
-  const subscribeWithoutKeys = await fetch(`${origin}/api/v1/push/subscribe`, {
+  if (bootstrapPush.publicKey === VAPID_ENV.PRIME_WEB_VAPID_PUBLIC_KEY) {
+    throw new Error("The default gateway published the supplied test key, so it minted nothing of its own");
+  }
+  /* The pair has to reach disk. A gateway that minted a fresh one on every
+     start would hand out a new application server key each time, and every
+     subscription taken against the last one stops being decryptable — push
+     that works until the first restart. */
+  const mintedKeys = JSON.parse(await readFile(ISOLATED_STORES.PRIME_WEB_VAPID_KEY_FILE, "utf8"));
+  if (mintedKeys.publicKey !== bootstrapPush.publicKey) {
+    throw new Error("The minted VAPID public key was not the one persisted to the key file");
+  }
+  // Subscribing against self-minted keys is the default path now — what every
+  // install does — not the configured-only one it used to be.
+  const subscribeDefault = await fetch(`${origin}/api/v1/push/subscribe`, {
     method: "POST",
     headers: commandHeaders,
     body: JSON.stringify({ requestId: crypto.randomUUID(), subscription: pushSubscription }),
   });
-  if (subscribeWithoutKeys.status !== 503) {
-    throw new Error(`Expected unconfigured push 503, got ${subscribeWithoutKeys.status}`);
+  if (subscribeDefault.status !== 202) {
+    throw new Error(`Expected self-configured push subscribe 202, got ${subscribeDefault.status} ${await subscribeDefault.text()}`);
   }
   const subscribeWithoutCsrf = await fetch(`${origin}/api/v1/push/subscribe`, {
     method: "POST",
@@ -501,8 +524,9 @@ try {
   if (malformedSubscribe.status !== 400) {
     throw new Error(`Expected malformed subscription 400, got ${malformedSubscribe.status}`);
   }
-  // Unsubscribe stays open with push off: a device must always be able to
-  // stop, even from a gateway whose keys were removed under it.
+  // Unsubscribe stays open even when push is not configured: a device must
+  // always be able to stop, including from a gateway whose keys were removed
+  // under it.
   const unsubscribe = await fetch(`${origin}/api/v1/push/unsubscribe`, {
     method: "POST",
     headers: commandHeaders,
@@ -512,10 +536,10 @@ try {
     throw new Error(`Expected unsubscribe 202, got ${unsubscribe.status} ${await unsubscribe.text()}`);
   }
 
-  // The configured path, end to end through the built server. Every other push
-  // assertion above runs with keys absent, so this is the only place a
-  // successful subscription is admitted by dist-server rather than by a unit
-  // test's in-process gateway.
+  // Explicitly supplied keys still win over the pair the gateway would mint,
+  // which is what an operator reusing one identity across two installs depends
+  // on. Everything above ran on self-minted keys, so this is the only place
+  // dist-server is shown honouring PRIME_WEB_VAPID_*.
   const configured = startGateway(port + 1, VAPID_ENV);
   await configured.ready;
   const configuredPairResponse = await fetch(`${configured.origin}/api/v1/auth/pair`, {
