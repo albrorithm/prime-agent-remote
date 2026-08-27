@@ -80,18 +80,33 @@ describe("tool transcript previews", () => {
       .toBe("it doesn't fit, the user's request wasn't clear");
   });
 
-  // ...and narrowing what counts as a literal must not narrow what is redacted.
-  it("still redacts single-quoted literals wherever one can actually open", () => {
+  // A quoted argument is the content of a tool row, not a leak. These previews
+  // are the only rendering of the command the browser gets, so redacting the
+  // argument empties the row rather than trimming it.
+  it("keeps ordinary quoted arguments, which are the whole point of the row", () => {
+    expect(sanitizeTranscriptPreview("grep -rn 'visualViewport' src")).toBe("grep -rn 'visualViewport' src");
+    expect(sanitizeTranscriptPreview("sed -n '1,40p' 'src/web/styles.css'"))
+      .toBe("sed -n '1,40p' 'src/web/styles.css'");
+    expect(sanitizeTranscriptPreview("echo 'private sentence here'")).toBe("echo 'private sentence here'");
+    expect(sanitizeTranscriptPreview("call('a sentence')")).toBe("call('a sentence')");
+  });
+
+  // What a quoted argument does not get to keep is a credential, wherever the
+  // quotes fall around it.
+  it("still redacts credentials inside quotes", () => {
     expect(sanitizeTranscriptPreview("run --password='hunter2'")).toBe("run --password=<redacted>");
     expect(sanitizeTranscriptPreview("export SECRET='abc def'")).toBe("export SECRET=<redacted>");
-    expect(sanitizeTranscriptPreview("echo 'private sentence here'")).toBe("echo '<redacted>'");
-    expect(sanitizeTranscriptPreview("call('private sentence here')")).toBe("call('<redacted>')");
-    // The allow-list is unchanged: a path literal still survives, quotes and
-    // all, and a bare identifier is still redacted — this module is
-    // deny-by-default and narrowing what counts as a quote does not change that.
-    expect(sanitizeTranscriptPreview("sed -n '1,40p' 'src/web/styles.css'"))
-      .toBe("sed -n '<redacted>' 'src/web/styles.css'");
-    expect(sanitizeTranscriptPreview("grep -rn 'visualViewport' src")).toBe("grep -rn '<redacted>' src");
+    expect(sanitizeTranscriptPreview('curl -H "Authorization: Bearer abc123" <url>'))
+      .toBe("curl -H <redacted> <url>");
+    // The scheme is kept and the credential is not, which is the useful split.
+    expect(sanitizeTranscriptPreview('{"Authorization": "Bearer abc123"}')).toBe('{"Authorization": "Bearer <redacted>"}');
+    // The trailing ")" is eaten by the unquoted credential rule re-matching the
+    // marker the quoted one just wrote. Long-standing and cosmetic — pinned here
+    // as observed rather than as preferred, so a future tidy-up sees it.
+    expect(sanitizeTranscriptPreview("client = Client(api_key='sk-abcdef')")).toBe("client = Client(api_key=<redacted>");
+    expect(sanitizeTranscriptPreview(`token = "${"a".repeat(90)}"`)).toBe("token=<redacted>");
+    // A long opaque run still goes even with nothing in the name to flag it.
+    expect(sanitizeTranscriptPreview(`payload = "${"a".repeat(90)}"`)).toBe('payload = "<blob>"');
   });
 });
 

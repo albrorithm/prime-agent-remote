@@ -39,41 +39,31 @@ function truncate(value: string, maxChars: number): string {
   return trimmed ? `${trimmed}…` : "…";
 }
 
-function isSafeQuotedPreview(value: string): boolean {
-  return /^(?:~\/|\.\.?\/|\/(?:tmp|workspace)\/)[A-Za-z0-9_./@+-]+$/.test(value)
-    || /^(?:src|test|tests|packages|scripts|docs|dist)\/[A-Za-z0-9_./@+-]+$/.test(value)
-    || /^node:[A-Za-z0-9_./-]+$/.test(value)
-    || /^[A-Za-z0-9_.-]+\.(?:c|css|go|h|html|js|json|jsx|md|mjs|py|rs|sh|toml|ts|tsx|txt|yaml|yml)$/.test(value);
-}
+/* Quoted literals are not redacted, and that is a deliberate reversal.
 
-/* An apostrophe is not a quote.
+   This module used to replace the contents of every quoted string that did not
+   match an allowlist of obvious file paths, so `grep -rn 'visualViewport' src`
+   reached the phone as `grep -rn '<redacted>' src`. A tool row is a one-line
+   preview and it is the *only* rendering of that command the browser gets —
+   there is no expandable full text behind it — so redacting the argument does
+   not hide the interesting part of the row, it removes the row's entire content
+   and leaves the word "redacted" in its place. That is what the operator kept
+   seeing.
 
-   This used to treat ' exactly like " and `, so in ordinary prose it paired
-   the apostrophe in one contraction with the apostrophe in the next and
-   redacted everything between them: "There'll skip the .research directory,
-   so I'll" came out as "There'<redacted>'ll". Thinking-row previews are prose
-   and contractions are common, so this ate a large share of them on screen.
+   It also bought nothing. Every caller of this module renders into the
+   authenticated transcript of the person whose own machine ran the command;
+   there is no reader here who is not already entitled to the terminal. Push
+   payloads, the one thing that does leave that surface, carry no transcript
+   text at all by construction — see `push-payload.ts`.
 
-   A single quote therefore only opens a literal where a shell or code quote
-   can actually start — at the beginning, or after whitespace or an opening
-   delimiter — and only closes where one can end. An apostrophe sitting
-   between two word characters is left alone. Credentials do not appear as
-   word'word, so nothing that was redacted before stops being redacted:
-   `--password='hunter2'`, `token='...'` and `grep 'literal'` all still pair. */
-const DOUBLE_OR_BACKTICK = /"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/g;
-const SINGLE_QUOTED = /(^|[\s=:,([{])'((?:\\.|[^'\\])*)'(?=$|[\s=:,.;!?)\]}])/g;
+   What survives below is the part that is worth having on any surface:
+   credentials, keys, tokens and long opaque blobs, which are never useful to
+   read and always bad to keep. The narrow thing given up is a secret passed in
+   a form none of those patterns match, `mysql -p'literal'` being the honest
+   example. Weigh that against every quoted argument in the transcript before
+   putting a blanket rule back. */
 
-function redactLiteral(quote: string, content: string): string {
-  return isSafeQuotedPreview(content) ? `${quote}${content}${quote}` : `${quote}<redacted>${quote}`;
-}
-
-function redactQuotedPreviews(value: string): string {
-  return value
-    .replace(DOUBLE_OR_BACKTICK, (literal) => redactLiteral(literal[0] ?? '"', literal.slice(1, -1)))
-    .replace(SINGLE_QUOTED, (_match, lead: string, content: string) => `${lead}${redactLiteral("'", content)}`);
-}
-
-/** Keep compact previews useful without forwarding private literals, credentials, or machine paths. */
+/** Keep compact previews free of credentials, machine paths, and opaque blobs. */
 export function sanitizeTranscriptPreview(value: string, maxChars = 120): string {
   let safe = value
     .replace(/\/(?:Users|home)\/[^/\s'"`]+/g, "~")
@@ -89,9 +79,13 @@ export function sanitizeTranscriptPreview(value: string, maxChars = 120): string
     .replace(/\b((?=\w*(?:token|key|secret|password))\w+)\s*=\s*(["'])[^"']*\2/gi, "$1=<redacted>")
     .replace(/\b((?=\w*(?:token|key|secret|password))\w+)\s*=\s*(?!["'])[^\s,;]+/gi, "$1=<redacted>")
     .replace(/(["'])sk-[^"']+\1/g, "$1<redacted>$1")
-    .replace(/(authorization\s*:\s*(?:bearer\s+)?)[^\s,"']+/gi, "$1<redacted>")
+    // The optional quotes matter: this header is usually met inside JSON, as
+    // `{"Authorization": "Bearer …"}`, where an unquoted pattern stops at the
+    // opening quote and redacts nothing. The blanket quoted-literal rule used to
+    // cover for that.
+    .replace(/(authorization"?\s*:\s*"?(?:bearer\s+)?)[^\s,"']+/gi, "$1<redacted>")
     .replace(/([?&](?:token|key|secret|password)=)[^&\s]+/gi, "$1<redacted>");
-  safe = redactQuotedPreviews(safe).replace(/\s+/g, " ").trim();
+  safe = safe.replace(/\s+/g, " ").trim();
   return truncate(safe, Math.max(20, maxChars));
 }
 
