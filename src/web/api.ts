@@ -131,12 +131,19 @@ async function request<T>(
 // decode()'s unchecked-cast fallback.
 const pairResponseSchema = z.object({ csrfToken: z.string() });
 
-export async function pair(token: string, options?: ApiRequestOptions): Promise<{ csrfToken: string }> {
+export async function pair(
+  token: string,
+  deviceName?: string,
+  options?: ApiRequestOptions,
+): Promise<{ csrfToken: string }> {
   return request("/api/v1/auth/pair", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
+    // Named at pairing or not at all: this is the only moment the gateway ever
+    // takes a device name, and an unnamed record is stuck reading "device"
+    // wherever it is listed.
+    body: JSON.stringify({ token, ...(deviceName ? { deviceName } : {}) }),
   }, options, pairResponseSchema);
 }
 

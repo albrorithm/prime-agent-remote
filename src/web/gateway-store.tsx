@@ -27,6 +27,7 @@ import type {
 import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
+import { deviceLabel } from "./device-label";
 import { useAppBadge } from "./hooks/useAppBadge";
 import { reclaimPushSubscription, revokePushLocally } from "./push";
 import type { PreparedImage } from "./image-attachments";
@@ -910,7 +911,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
 
   const pair = useCallback(
     async (token: string) => {
-      await api.pair(token);
+      await api.pair(token, deviceLabel());
       await initialize();
     },
     [initialize],

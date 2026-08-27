@@ -127,6 +127,29 @@ describe("readPushState", () => {
 });
 
 describe("enablePush", () => {
+  /* The regression this guards is a hang, not an error.
+     `serviceWorker.ready` never rejects — with nothing registered it simply
+     never settles. Asking for permission first therefore spent the one prompt a
+     page ever gets and then left the control busy forever with nothing on
+     screen. The service worker registers in production builds only, so the dev
+     server hit this every time. */
+  it("refuses before spending the permission prompt when no worker is registered", async () => {
+    const requestPermission = vi.fn(async () => "granted" as NotificationPermission);
+    installBrowser({ requestPermission });
+    (navigator as unknown as { serviceWorker: { getRegistration: () => Promise<unknown>; ready: Promise<unknown> } })
+      .serviceWorker = {
+        getRegistration: vi.fn(async () => null),
+        // The shape that hangs, so this test fails by timing out if the guard
+        // is removed rather than passing on a mock that resolves anyway.
+        ready: new Promise(() => {}),
+      };
+
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).rejects.toThrow(/service worker/i);
+    // A prompt cannot be shown twice, so not asking is the whole point.
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+  });
+
   it("subscribes with the gateway's key and registers the endpoint", async () => {
     installBrowser({ requestPermission: vi.fn(async () => "granted" as NotificationPermission) });
 

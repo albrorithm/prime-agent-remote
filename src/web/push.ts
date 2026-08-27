@@ -82,6 +82,14 @@ function requestBody(subscription: PushSubscription): api.PushSubscriptionBody |
  */
 export async function enablePush(applicationServerKey: string, csrfToken: string): Promise<PushState> {
   if (!pushSupported()) return "unsupported";
+  /* Checked before the prompt, not after. `serviceWorker.ready` never rejects —
+     with nothing registered it simply never settles, so asking first spent the
+     permission prompt (which cannot be shown twice) and then hung the control
+     forever with no error to explain it. The service worker registers in
+     production builds only, so the Vite dev server hits this every time. */
+  if (!await registration()) {
+    throw new Error("This page has no service worker, so it cannot receive notifications. Notifications need a production build.");
+  }
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return permission === "denied" ? "denied" : "off";
 
