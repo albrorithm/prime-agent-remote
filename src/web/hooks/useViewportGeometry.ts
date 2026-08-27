@@ -65,6 +65,11 @@ const SETTLE_DELAYS_MS = [0, 60, 180, 400, 700];
    visualViewport events for it landing a frame or more behind the compositor
    that already moved. */
 const OFFSET_SETTLE_MS = 350;
+/* How long the visual viewport must be back at its full height before the
+   keyboard is called gone. A keyboard measures a partial height throughout its
+   animation, so any full-height reading inside that window is a frame between
+   two others and not an ending. */
+const KEYBOARD_GONE_MS = 250;
 
 type ScheduledHandle = unknown;
 type FramedHandle = unknown;
@@ -131,6 +136,12 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
   /* When the current non-zero offset was first seen, or null while the page is
      at rest. Age, not value, is what decides whether it gets applied. */
   let offsetPendingSince: number | null = null;
+  /* When the visual viewport last came back to its full height, or null while
+     something is covering it. Age again: see KEYBOARD_GONE_MS. */
+  let fullHeightSince: number | null = null;
+  /* The editable that is focused, so a change of focus can re-open the question
+     of whether a keyboard is coming. */
+  let focusedElement: Element | null = null;
 
   const focusedEditable = () => documentTarget.activeElement?.matches?.(EDITABLE_SELECTOR) === true;
 
@@ -140,6 +151,8 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
     publishedKeyboard = null;
     trackingKeyboard = false;
     offsetPendingSince = null;
+    fullHeightSince = null;
+    focusedElement = null;
     documentElement.style.removeProperty(VIEWPORT_TOP_PROPERTY);
     documentElement.style.removeProperty(VIEWPORT_HEIGHT_PROPERTY);
     documentElement.style.removeProperty(KEYBOARD_HEIGHT_PROPERTY);
@@ -184,8 +197,22 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
      it is merely short: 80px of viewport is a hardware keyboard's accessory bar
      covering the home-indicator strip just as a keyboard does, and releasing
      there would put the inset back underneath it. */
-  const publishKeyboardHeight = (keyboard: number) => {
-    trackingKeyboard = focusedEditable() || (trackingKeyboard && keyboard > 0);
+  const publishKeyboardHeight = (keyboard: number, keyboardGone: boolean) => {
+    /* `keyboardGone` first, and it overrides focus.
+
+       This used to be `focusedEditable() || (trackingKeyboard && keyboard > 0)`,
+       which has no way out while a field keeps focus — and iOS does not always
+       blur on dismissal. Tapping Done, or the keyboard being swiped away, can
+       leave the textarea focused with no keyboard on screen at all. The hook
+       then stayed in its hands-off state for the rest of the session: it never
+       re-published a height, never let the shell back to full size, and never
+       restored the page iOS had scrolled. That is the header being gone after
+       the keyboard closes, and it does not recover on its own.
+
+       A viewport at its full height means there is no keyboard, whatever has
+       focus. Waiting KEYBOARD_GONE_MS is what stops that reading being believed
+       mid-animation. */
+    trackingKeyboard = keyboardGone ? false : (focusedEditable() || (trackingKeyboard && keyboard > 0));
     const height = trackingKeyboard ? keyboard : 0;
     if (publishedKeyboard === height) return;
     publishedKeyboard = height;
@@ -199,7 +226,23 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
       clearPublished();
       return;
     }
-    publishKeyboardHeight(geometry.keyboard);
+    /* A change of focus re-opens the question of whether a keyboard is coming,
+       so the full-height clock restarts with it. Without that, focusing the
+       composer after a long rest would count as "gone" on the very first
+       measurement and hand the animation straight back to the code below. */
+    const active = focusedEditable() ? documentTarget.activeElement : null;
+    if (active !== focusedElement) {
+      focusedElement = active;
+      fullHeightSince = null;
+    }
+    if (geometry.keyboard === 0) {
+      if (fullHeightSince === null) fullHeightSince = now();
+    } else {
+      fullHeightSince = null;
+    }
+    const keyboardGone = fullHeightSince !== null && now() - fullHeightSince >= KEYBOARD_GONE_MS;
+
+    publishKeyboardHeight(geometry.keyboard, keyboardGone);
 
     /* WITH A KEYBOARD UP, DO NOTHING. Not the height, not the offset, not the
        scroll correction below. This is the whole strategy and it is the
@@ -248,14 +291,25 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
       else if (publishedTop === null) publishTop(0);
     }
 
-    /* A launch or a resume that comes back displaced. Unreachable with a
-       keyboard up, by the early return above — that scroll is iOS's to make.
+    /* Put the page back where it belongs, once nothing is holding it.
 
-       This deliberately does NOT fire on a non-zero visual-viewport offset:
-       that offset is the visual viewport moving inside the layout viewport,
-       which scrollTo cannot undo, so calling it there only fights WebKit
-       mid-animation. */
-    if (windowTarget.scrollY > 0) scroll(0, 0);
+       This is not the clamp that used to live here, and the difference is the
+       whole point. That one ran inside the scroll event, during the animation,
+       against a scroll iOS was still making — two motions where the platform
+       made one, which is the jump this file exists to have stopped making. This
+       runs only when the keyboard has been gone for KEYBOARD_GONE_MS, at which
+       point nothing is competing for the scroll position and there is no
+       animation left to interrupt.
+
+       It has to run, because the shell is `overflow: hidden` at the document
+       level: the page is not meant to scroll at all, so a scroll iOS left
+       behind is not something the reader can undo by scrolling back. It is just
+       a header that has gone away and stayed away.
+
+       Still not fired on a non-zero visual-viewport offset: that is the visual
+       viewport moving inside the layout viewport, which scrollTo cannot undo.
+       The offset block above is what answers that. */
+    if (keyboardGone && windowTarget.scrollY > 0) scroll(0, 0);
   };
 
   const cancelSettle = () => {

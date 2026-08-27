@@ -3,7 +3,11 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { GatewayProvider } from "./gateway-store";
 import { SettingsProvider } from "./settings";
+import { installViewportTrace } from "./viewport-trace";
 import "./styles.css";
+
+// A diagnostic, and inert unless the URL asks for it: see viewport-trace.ts.
+installViewportTrace();
 
 // Settings wrap the gateway: they are pure client state, and the Login screen
 // renders before the gateway connects but still needs the theme and text scale.

@@ -201,6 +201,53 @@ describe("viewport geometry", () => {
     expect(scroll).not.toHaveBeenCalled();
   });
 
+  /* iOS does not reliably blur a field when its keyboard goes away — tapping
+     Done, or swiping the keyboard down, can leave the textarea focused with
+     nothing on screen. The release used to be `focusedEditable() || ...`, which
+     in that state re-asserted itself on every measurement and never let go: the
+     shell never went back to full height and the page iOS had scrolled was
+     never put back, so the header stayed gone for the rest of the session. */
+  it("lets go of a keyboard that closed while the field kept focus", () => {
+    const env = geometryEnvironment();
+    const { scroll } = install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.windowTarget.scrollY = 336;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--keyboard-height")).toBe("300px");
+    expect(scroll).not.toHaveBeenCalled();
+
+    // The keyboard goes; the composer keeps focus, as iOS often leaves it.
+    env.viewport.height = 800;
+    env.viewport.emit("resize");
+    env.work.drain();
+
+    expect(env.properties.has("--keyboard-height")).toBe(false);
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+    expect(scroll).toHaveBeenCalledWith(0, 0);
+  });
+
+  /* The other half: a full-height reading DURING the animation is one frame
+     between two others, not an ending. Believing it would put the clamp back —
+     a scroll correction fired against a scroll iOS is still making, which is
+     the jump this whole file exists to have stopped making. */
+  it("does not mistake a frame of the animation for the keyboard leaving", () => {
+    const env = geometryEnvironment();
+    const { scroll } = install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.windowTarget.scrollY = 336;
+
+    // Full height, then shrinking, then full again — all inside KEYBOARD_GONE_MS.
+    for (const height of [800, 640, 800, 520]) {
+      env.viewport.height = height;
+      env.viewport.emit("resize");
+      env.work.drainFrames();
+    }
+    expect(scroll).not.toHaveBeenCalled();
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+  });
+
   // A page a launch or a resume left displaced is still compensated — but only
   // once the offset has held still. The height does not wait for it. Nothing is
   // focused here: that is what makes this a displaced page rather than a lift.
