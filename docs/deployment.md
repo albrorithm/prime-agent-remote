@@ -93,6 +93,12 @@ Notes an operator needs:
   work over plain HTTP outside `localhost`.
 - The service worker registers in production builds only, so notifications
   cannot be exercised under `npm run dev`. Use `npm run build && npm start`.
+  Turning them on there now fails with a message rather than hanging, which is
+  what it used to do.
+- Nor can they be exercised against `PRIME_WEB_BACKEND=demo`. `onAttentionAdded`
+  is optional on the backend interface and only the Prime backend implements it,
+  so a demo gateway accepts and stores a subscription and can never send to it —
+  silently, with no error anywhere. Push needs `backend=prime`.
 - Rotating the keypair invalidates every existing subscription. Devices must
   turn notifications on again.
 - Notifications name the session and the kind of attention it needs. They never
