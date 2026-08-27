@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { AuthService, MAX_TRACKED_PAIR_CLIENTS } from "./auth.js";
-import type { GatewayConfig } from "./config.js";
+import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
@@ -15,6 +15,9 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     backend: "demo",
     primeModule: "compatible-module",
     sessionTtlMs: 60_000,
+    generatedWebPush: false,
+    webPushSubject: DEFAULT_VAPID_SUBJECT,
+    vapidKeysPath: "/dev/null/vapid-keys.json",
     webPushStorePath: "/dev/null/push-subscriptions.json",
     pairingTokenPath: "/dev/null/pairing-token",
     gatewayStatePath: "/dev/null/gateway.json",

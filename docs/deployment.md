@@ -37,41 +37,52 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |
 | `PRIME_AGENT_DAEMON_SOCKET` | Prime default | Optional daemon socket override |
 | `PRIME_WEB_SESSION_TTL_MS` | `43200000` (12 hours) | In-memory HTTP and WebSocket session lifetime |
-| `PRIME_WEB_VAPID_PUBLIC_KEY` | unset (push off) | VAPID application server key, base64url; must decode to 65 bytes |
-| `PRIME_WEB_VAPID_PRIVATE_KEY` | unset (push off) | VAPID private key, base64url; must decode to 32 bytes |
-| `PRIME_WEB_VAPID_SUBJECT` | unset (push off) | Contact for push services: a `mailto:` or `https://` URL |
+| `PRIME_WEB_VAPID_PUBLIC_KEY` | unset (minted on first start) | VAPID application server key, base64url; must decode to 65 bytes |
+| `PRIME_WEB_VAPID_PRIVATE_KEY` | unset (minted on first start) | VAPID private key, base64url; must decode to 32 bytes |
+| `PRIME_WEB_VAPID_SUBJECT` | the project URL | Contact for push services: a `mailto:` or `https://` URL |
+| `PRIME_WEB_VAPID_KEY_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/vapid-keys.json` (or under `~/.config`) | Absolute path to the VAPID keypair the gateway mints for itself when none is configured |
 | `PRIME_WEB_PAIRING_TOKEN_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/pairing-token` (or under `~/.config`) | Absolute path to the token the gateway mints for itself when none is configured |
 | `PRIME_WEB_DEVICE_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/devices.json` (or under `~/.config`) | Absolute path to the paired-device credential file |
 | `PRIME_WEB_PUSH_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/push-subscriptions.json` (or under `~/.config`) | Absolute path to the push subscription file |
 | `PRIME_WEB_STATE_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/gateway.json` (or under `~/.config`) | Absolute path to where the CLI launcher records a running gateway (pid, url, mode, backend) so `status`, `stop`, and `rebuild` can find it |
 
-The three VAPID variables are all-or-nothing: set all three or none. A partial
+The two VAPID key variables are all-or-nothing: set both or neither. A partial
 configuration fails startup rather than leaving the app offering a notification
-switch that cannot work.
+switch that cannot work. `PRIME_WEB_VAPID_SUBJECT` is independent — it is the
+one part worth setting by hand when the keys are generated for you.
 
 Do not put real credentials in committed dotenv files.
 
 ## Notifications
 
-Push and the app-icon badge are one feature and are off by default. Without
-VAPID keys the gateway starts and runs exactly as it does otherwise, the
-subscribe route refuses registrations, and the Settings panel says the gateway
-has no keys instead of showing a control.
+Push and the app-icon badge are one feature, and the gateway configures itself
+for it. On first start it mints a VAPID keypair, writes it to
+`$XDG_CONFIG_HOME/prime-agent-web/vapid-keys.json` at mode `0600`, and reuses it
+on every start after that — the same arrangement as the pairing token, and for
+the same reason: a file the gateway owns beats a long-lived secret in the
+process environment, where any `ps` can read it.
 
-To turn it on:
+This used to require running a generator by hand and pinning three environment
+variables, which meant push shipped switched off for anyone who did not already
+know what VAPID is.
 
-1. Generate a keypair:
+So there is one step:
 
-   ```
-   node scripts/generate-vapid.mjs mailto:you@example.com
-   ```
-
-2. Paste the three printed lines into the gateway's environment and restart it.
-   Keep the private key out of the repository.
-3. Open the app, go to Settings → Notifications, and press *Turn on
+1. Open the app, go to Settings → Notifications, and press *Turn on
    notifications*. Permission is requested from that button only; the browser
    ignores or auto-denies a prompt raised any other way, and a denial cannot be
    re-prompted from the page.
+
+To use a keypair of your own instead — one shared between two installs, or kept
+somewhere else — generate it with `node scripts/generate-vapid.mjs
+mailto:you@example.com` and set `PRIME_WEB_VAPID_PUBLIC_KEY` and
+`PRIME_WEB_VAPID_PRIVATE_KEY`. Explicit keys win and nothing is minted. Keep the
+private key out of the repository.
+
+Deleting `vapid-keys.json` is not data loss but an identity change: existing
+subscriptions are bound to the key that created them, so each device turns
+notifications on again. The app already unsubscribes and re-subscribes for this
+case, so a stale subscription does not sit there failing quietly.
 
 Notes an operator needs:
 

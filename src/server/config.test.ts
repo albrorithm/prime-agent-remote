@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "./config.js";
+import { DEFAULT_VAPID_SUBJECT, loadConfig } from "./config.js";
 
 const strongToken = "a-random-production-pairing-token-0001";
 // A real generated pair; only the decoded lengths (65 and 32 bytes) matter here.
@@ -130,10 +130,33 @@ describe("loadConfig", () => {
   });
 
   it("refuses a half-configured keypair rather than offering a dead switch", () => {
-    for (const missing of Object.keys(vapid)) {
+    for (const missing of ["PRIME_WEB_VAPID_PUBLIC_KEY", "PRIME_WEB_VAPID_PRIVATE_KEY"]) {
       const partial = { ...vapid, [missing]: undefined };
       expect(() => loadConfig({ NODE_ENV: "test", ...partial })).toThrow("must be set together");
     }
+  });
+
+  // The subject is the one part of this worth setting by hand when the keys are
+  // generated, so requiring the keys alongside it made the useful case illegal.
+  it("takes a subject on its own, and defaults it when absent", () => {
+    const named = loadConfig({ NODE_ENV: "test", PRIME_WEB_VAPID_SUBJECT: "mailto:operator@example.test" });
+    expect(named.webPush).toBeUndefined();
+    expect(named.generatedWebPush).toBe(true);
+    expect(named.webPushSubject).toBe("mailto:operator@example.test");
+
+    const bare = loadConfig({ NODE_ENV: "test" });
+    expect(bare.generatedWebPush).toBe(true);
+    expect(bare.webPushSubject).toBe(DEFAULT_VAPID_SUBJECT);
+
+    // Explicit keys still win, and are not reported as generated.
+    const explicit = loadConfig({ NODE_ENV: "test", ...vapid });
+    expect(explicit.generatedWebPush).toBe(false);
+    expect(explicit.webPush?.publicKey).toBe(vapidPublicKey);
+  });
+
+  it("keeps the minted keypair beside the other gateway state", () => {
+    expect(loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: "/srv/config" }).vapidKeysPath)
+      .toBe("/srv/config/prime-agent-web/vapid-keys.json");
   });
 
   it("rejects a truncated or non-base64url VAPID key and a bare subject", () => {

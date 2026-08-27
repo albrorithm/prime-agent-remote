@@ -5,13 +5,23 @@ import { DemoBackend } from "./demo-backend.js";
 import { createGateway } from "./gateway.js";
 import { loadOrCreatePairingToken } from "./pairing-token.js";
 import { PrimeBackend } from "./prime-backend.js";
+import { loadOrCreateVapidKeys } from "./vapid-keys.js";
 
 const loaded = loadConfig();
 // Resolved here rather than in loadConfig, which stays free of file I/O so the
 // suite cannot write to an operator's real configuration directory.
-const config = loaded.generatedPairingToken
-  ? { ...loaded, pairingToken: await loadOrCreatePairingToken(loaded.pairingTokenPath) }
-  : loaded;
+const config = {
+  ...loaded,
+  ...(loaded.generatedPairingToken
+    ? { pairingToken: await loadOrCreatePairingToken(loaded.pairingTokenPath) }
+    : {}),
+  // Push is on by default now. It used to require three environment variables
+  // that nothing in the project could produce, so it was off for every install
+  // that did not already know what VAPID is.
+  ...(loaded.generatedWebPush
+    ? { webPush: await loadOrCreateVapidKeys(loaded.vapidKeysPath, loaded.webPushSubject) }
+    : {}),
+};
 const backend: AgentBackend = config.backend === "prime"
   ? new PrimeBackend(config.primeModule, config.daemonSocket)
   : new DemoBackend();

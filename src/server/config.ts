@@ -30,6 +30,16 @@ export interface GatewayConfig {
   daemonSocket?: string;
   sessionTtlMs: number;
   webPush?: WebPushConfig;
+  /**
+   * True when no keys were supplied and `index.ts` should mint them from
+   * `vapidKeysPath`. Mirrors `generatedPairingToken`: `loadConfig` stays free of
+   * file I/O so the suite cannot write to an operator's configuration.
+   */
+  generatedWebPush: boolean;
+  /** The subject to stamp on keys the gateway mints for itself. */
+  webPushSubject: string;
+  /** Where an unconfigured gateway keeps the VAPID keypair it minted. */
+  vapidKeysPath: string;
   webPushStorePath: string;
   /** Where an unconfigured gateway keeps the token it minted for itself. */
   pairingTokenPath: string;
@@ -37,6 +47,15 @@ export interface GatewayConfig {
   /** Where the launcher records a running gateway so other tools can find it. */
   gatewayStatePath: string;
 }
+
+/**
+ * A push service uses the VAPID subject only to reach whoever is sending, if
+ * something is wrong with the sending. This gateway is somebody's laptop, so
+ * there is no address worth putting here and certainly not the operator's: the
+ * project URL identifies the software, which is the useful half.
+ * `PRIME_WEB_VAPID_SUBJECT` overrides it.
+ */
+export const DEFAULT_VAPID_SUBJECT = "https://github.com/albrorithm/prime-agent-mobile";
 
 const MIN_PRODUCTION_PAIRING_TOKEN_CHARS = 32;
 const MAX_PAIRING_TOKEN_CHARS = 512;
@@ -71,24 +90,38 @@ function parseVapidKey(name: string, value: string, expectedBytes: number): stri
   return value;
 }
 
+function parseVapidSubject(env: NodeJS.ProcessEnv): string | undefined {
+  const subject = env.PRIME_WEB_VAPID_SUBJECT?.trim();
+  if (!subject) return undefined;
+  if (!subject.startsWith("mailto:") && !subject.startsWith("https://")) {
+    throw new Error("PRIME_WEB_VAPID_SUBJECT must be a mailto: or https:// URL");
+  }
+  return subject;
+}
+
+/**
+ * Explicit keys, or undefined to mean "the gateway mints its own" — which is
+ * now the normal case, resolved in `index.ts` where the file I/O lives.
+ *
+ * A subject on its own is deliberately not an error. It is the one part of this
+ * worth setting by hand when the keys are generated, and rejecting it would
+ * make the useful case the illegal one.
+ */
 function parseWebPush(env: NodeJS.ProcessEnv): WebPushConfig | undefined {
   const publicKey = env.PRIME_WEB_VAPID_PUBLIC_KEY?.trim();
   const privateKey = env.PRIME_WEB_VAPID_PRIVATE_KEY?.trim();
-  const subject = env.PRIME_WEB_VAPID_SUBJECT?.trim();
-  if (!publicKey && !privateKey && !subject) return undefined;
-  // All three or none. A half-configured keypair would leave the Settings
+  const subject = parseVapidSubject(env);
+  if (!publicKey && !privateKey) return undefined;
+  // Both keys or neither. A half-configured keypair would leave the Settings
   // panel offering a control that cannot work, which is the one outcome the
   // "push is off" path exists to avoid.
-  if (!publicKey || !privateKey || !subject) {
-    throw new Error("PRIME_WEB_VAPID_PUBLIC_KEY, PRIME_WEB_VAPID_PRIVATE_KEY, and PRIME_WEB_VAPID_SUBJECT must be set together");
-  }
-  if (!subject.startsWith("mailto:") && !subject.startsWith("https://")) {
-    throw new Error("PRIME_WEB_VAPID_SUBJECT must be a mailto: or https:// URL");
+  if (!publicKey || !privateKey) {
+    throw new Error("PRIME_WEB_VAPID_PUBLIC_KEY and PRIME_WEB_VAPID_PRIVATE_KEY must be set together");
   }
   return {
     publicKey: parseVapidKey("PRIME_WEB_VAPID_PUBLIC_KEY", publicKey, 65),
     privateKey: parseVapidKey("PRIME_WEB_VAPID_PRIVATE_KEY", privateKey, 32),
-    subject,
+    subject: subject ?? DEFAULT_VAPID_SUBJECT,
   };
 }
 
@@ -183,6 +216,8 @@ export function loadConfig(env = process.env): GatewayConfig {
   );
   if (allowedOrigins.size === 0) throw new Error("PRIME_WEB_ALLOWED_ORIGINS must contain at least one origin");
 
+  const configuredWebPush = parseWebPush(env);
+
   return {
     host,
     port,
@@ -194,7 +229,10 @@ export function loadConfig(env = process.env): GatewayConfig {
     primeModule: env.PRIME_AGENT_MODULE?.trim() || undefined,
     daemonSocket: env.PRIME_AGENT_DAEMON_SOCKET?.trim() || undefined,
     sessionTtlMs: parseInteger("PRIME_WEB_SESSION_TTL_MS", env.PRIME_WEB_SESSION_TTL_MS, 12 * 60 * 60 * 1000, 100, 7 * 24 * 60 * 60 * 1000),
-    webPush: parseWebPush(env),
+    webPush: configuredWebPush,
+    generatedWebPush: !configuredWebPush,
+    webPushSubject: parseVapidSubject(env) ?? DEFAULT_VAPID_SUBJECT,
+    vapidKeysPath: configFilePath(env, "PRIME_WEB_VAPID_KEY_FILE", "vapid-keys.json"),
     webPushStorePath: configFilePath(env, "PRIME_WEB_PUSH_STORE", "push-subscriptions.json"),
     pairingTokenPath: configFilePath(env, "PRIME_WEB_PAIRING_TOKEN_FILE", "pairing-token"),
     gatewayStatePath: configFilePath(env, "PRIME_WEB_STATE_FILE", "gateway.json"),

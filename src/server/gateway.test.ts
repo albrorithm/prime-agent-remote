@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
 import { BackendCapabilityError, type AttentionListener } from "./backend.js";
-import type { GatewayConfig } from "./config.js";
+import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
@@ -33,6 +33,11 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     sessionTtlMs: 60_000,
     // startGateway always overrides this with a path inside the test's own
     // temp directory; the default only exists to satisfy the type.
+    // The gateway itself never mints keys — `index.ts` resolves them before
+    // this point — so these only exist to satisfy the type.
+    generatedWebPush: false,
+    webPushSubject: DEFAULT_VAPID_SUBJECT,
+    vapidKeysPath: join(tmpdir(), "prime-gateway-test-unused-vapid-keys.json"),
     webPushStorePath: join(tmpdir(), "prime-gateway-test-unused-push-store.json"),
     pairingTokenPath: join(tmpdir(), "prime-gateway-test-unused-pairing-token"),
     gatewayStatePath: join(tmpdir(), "prime-gateway-test-unused-state.json"),

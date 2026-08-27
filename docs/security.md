@@ -100,7 +100,7 @@ out, including a second tab sharing the session.
 
 ## Push notifications
 
-Push is off unless the operator configures VAPID keys. With none set the routes refuse a subscription and the gateway behaves exactly as it did before push existed.
+The gateway mints its own VAPID keypair on first start and keeps it in its configuration directory at mode `0600`, the same arrangement as the pairing token and for the same reason — a long-lived secret in the process environment is readable by any `ps`. Explicit `PRIME_WEB_VAPID_PUBLIC_KEY`/`PRIME_WEB_VAPID_PRIVATE_KEY` still take precedence, and half a pair fails startup. If a keypair cannot be resolved at all the routes refuse a subscription and the gateway behaves exactly as it did before push existed.
 
 A push subscription is a long-lived capability to wake a device, and it deliberately outlives the session cookie that authorized it. That is the point: a subscription that died with the 12-hour session TTL would stop working overnight, which is the window it exists for. The consequences are stated plainly rather than mitigated away:
 

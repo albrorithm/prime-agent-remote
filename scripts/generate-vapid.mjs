@@ -2,9 +2,18 @@ import webPush from "web-push";
 
 /**
  * Prints one fresh VAPID keypair for an operator to paste into their
- * environment. Deliberately not wired into the build or startup: a generated
- * key that lands in the repo, or rotates on restart, revokes every push
- * subscription the browsers on the other side already hold.
+ * environment.
+ *
+ * No longer the only way to get keys: the gateway mints its own on first start
+ * and keeps them in its config directory, so notifications work without this.
+ * The objection that kept generation out of startup — "a generated key that
+ * lands in the repo, or rotates on restart, revokes every push subscription the
+ * browsers on the other side already hold" — was about a key that does not
+ * persist. `src/server/vapid-keys.ts` persists at mode 0600 and reuses, the same
+ * bargain `pairing-token.ts` makes.
+ *
+ * This is still the right tool for a keypair you want to *choose*: one shared
+ * between two installs, or held somewhere the config directory is not.
  *
  * Usage: node scripts/generate-vapid.mjs [subject]
  */

@@ -90,8 +90,12 @@ const PUSH_COPY: Record<PushState, { hint: string; action?: string }> = {
   unsupported: {
     hint: "This browser can't receive notifications. On iPhone, add Prime Agent to the Home Screen and open it from there.",
   },
+  // A gateway now mints its own keys on first start, so reaching this means
+  // something went wrong writing them rather than an operator not having set
+  // them up — telling people to go and set VAPID keys would send them after the
+  // wrong thing.
   unconfigured: {
-    hint: "This gateway has no notification keys configured. Ask whoever runs it to set the VAPID keys.",
+    hint: "This gateway isn't offering notifications. Restarting it usually fixes that; its log will say why.",
   },
   denied: {
     hint: "Notifications are blocked for this app. Turn them back on in your device settings — this page can't ask again.",

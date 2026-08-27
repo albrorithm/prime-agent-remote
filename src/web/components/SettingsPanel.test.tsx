@@ -204,12 +204,16 @@ describe("SettingsPanel notifications", () => {
     expect(screen.queryByRole("button", { name: /notifications/i })).not.toBeInTheDocument();
   });
 
-  it("says the gateway has no keys rather than offering a control that does nothing", async () => {
+  // A gateway mints its own keys now, so this state means something went wrong
+  // writing them — not that nobody set them up. Sending the user off to
+  // configure VAPID keys would point them at the wrong thing entirely.
+  it("blames the gateway, not the operator, when it offers no keys", async () => {
     pushMock.readPushState.mockResolvedValue("unconfigured");
     gatewayMock.push = { enabled: false, publicKey: null };
     renderPanel();
 
-    expect(await screen.findByText(/no notification keys configured/)).toBeInTheDocument();
+    expect(await screen.findByText(/isn't offering notifications/)).toBeInTheDocument();
+    expect(screen.queryByText(/VAPID/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /notifications/i })).not.toBeInTheDocument();
   });
 
