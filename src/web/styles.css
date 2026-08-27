@@ -218,6 +218,11 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .42; }
 button, input, textarea { -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The drawers take focus themselves when they open, which is how a dialog is
+   supposed to behave. A ring around the whole panel says nothing a person
+   needs, and it is the panel, not a control, so nothing is being hidden from
+   a keyboard user: every button inside still rings normally. */
+.session-drawer:focus-visible, .activity-drawer:focus-visible { outline: none; }
 ::selection { color: var(--on-accent); background: var(--accent); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .spin { animation: spin 1s linear infinite; }

@@ -109,8 +109,16 @@ export function App() {
     if (!restoreFocusRef.current && document.activeElement instanceof HTMLElement) {
       restoreFocusRef.current = document.activeElement;
     }
+    /* The panel itself, not its first button. Moving focus into an
+       `aria-modal` dialog is not optional — screen readers need it and the Tab
+       trap below assumes focus is inside — but landing it on a control made
+       WebKit paint that control's focus ring, so opening the drawer on a fresh
+       launch put a bright circle around the settings gear that no one had
+       touched. It showed up on the first open only: after any pointer
+       interaction WebKit stops treating a programmatic focus as keyboard-like.
+       Focusing the container is the ordinary dialog pattern and rings nothing. */
     const panel = activeOverlay.current;
-    if (panel) availableFocusTargets(panel)[0]?.focus({ preventScroll: true });
+    panel?.focus({ preventScroll: true });
   }, [activeOverlay]);
 
   useEffect(() => {
@@ -132,7 +140,7 @@ export function App() {
       if (!panel.contains(document.activeElement)) {
         event.preventDefault();
         (event.shiftKey ? last : first).focus();
-      } else if (event.shiftKey && document.activeElement === first) {
+      } else if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -195,6 +203,7 @@ export function App() {
       <aside
         className="session-drawer"
         ref={sessionsRef}
+        tabIndex={-1}
         aria-label="Sessions"
         role={sessionsModal ? "dialog" : undefined}
         aria-modal={sessionsModal ? "true" : undefined}
@@ -228,6 +237,7 @@ export function App() {
       />
       <aside
         className="activity-drawer"
+        tabIndex={-1}
         ref={activityRef}
         aria-label="Session dashboard"
         role={activityModal ? "dialog" : undefined}

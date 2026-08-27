@@ -168,6 +168,19 @@ describe("mobile shell navigation", () => {
     // floating overlay), so it inerts along with the rest of the stage.
     expect(document.querySelector(".conversation-header")).toContainElement(screen.getByText("Demo"));
 
+    /* The drawer takes focus itself rather than handing it to the settings
+       button. Focusing a control there made WebKit ring it on a cold launch —
+       a circle around a gear nobody had touched. */
+    expect(screen.getByRole("dialog", { name: "Sessions" })).toHaveFocus();
+    // Shift+Tab from the panel wraps to the last control rather than walking
+    // backwards out of the modal, which is what focus starting on a non-control
+    // would otherwise do.
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    const controls = [...document.querySelectorAll<HTMLElement>(
+      ".session-drawer button, .session-drawer input, .session-drawer a[href]",
+    )].filter((element) => !element.hasAttribute("disabled"));
+    expect(controls.at(-1)).toHaveFocus();
+
     // Even programmatic focus outside the modal is recovered on the next Tab.
     const hiddenDismiss = document.querySelector<HTMLButtonElement>(".gesture-hint button")!;
     hiddenDismiss.focus();
