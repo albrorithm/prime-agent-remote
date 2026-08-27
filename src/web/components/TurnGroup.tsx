@@ -55,11 +55,34 @@ function isOutcomeRow(row: TranscriptMessage, isLastRowOfTurn: boolean): boolean
   return false;
 }
 
+/**
+ * Kinds that ride along with the outcome instead of ending the run of it.
+ *
+ * The tail is a contiguous suffix, so any row that is not an outcome hides
+ * everything before it. A subagent that reports late lands between the
+ * assistant's answer and whatever it says next, and treating that report as
+ * work collapsed the answer — the entire point of the turn — behind "N steps".
+ * These rows are not outcomes themselves; they simply must not bury one.
+ */
+function ridesWithOutcome(row: TranscriptMessage): boolean {
+  return row.presentation?.kind === "agent-message";
+}
+
 export function splitTurn(rows: readonly TranscriptMessage[]): TurnSections {
   let promptEnd = 0;
   while (promptEnd < rows.length && rows[promptEnd].role === "user" && !rows[promptEnd].presentation) promptEnd++;
   let tailStart = rows.length;
-  while (tailStart > promptEnd && isOutcomeRow(rows[tailStart - 1], tailStart === rows.length)) tailStart--;
+  while (tailStart > promptEnd
+    && (isOutcomeRow(rows[tailStart - 1], tailStart === rows.length) || ridesWithOutcome(rows[tailStart - 1]))) {
+    tailStart--;
+  }
+  // Ride-along rows cannot form a tail by themselves: a turn whose last row is
+  // an incoming subagent report has not produced an outcome, and promoting one
+  // would make turnSettled() call the turn finished while the assistant is
+  // still working on its reply.
+  const hasOutcome = rows.slice(tailStart).some((row, index) =>
+    isOutcomeRow(row, tailStart + index === rows.length - 1));
+  if (!hasOutcome) tailStart = rows.length;
   return { prompt: rows.slice(0, promptEnd), work: rows.slice(promptEnd, tailStart), tail: rows.slice(tailStart) };
 }
 

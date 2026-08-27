@@ -366,3 +366,66 @@ describe("TurnGroup", () => {
     expect(details().map((element) => element.open)).toEqual([true, false]);
   });
 });
+
+/* The late-subagent bug: a real answer swallowed into the collapsed work block.
+
+   `splitTurn` takes the tail as the maximal SUFFIX of outcome rows, so any
+   single non-outcome row near the end hides everything before it. When a
+   subagent reports late, its `agent-message` row lands between the assistant's
+   real answer and whatever short thing the assistant says next — and the answer,
+   which is the whole point of the turn, is collapsed behind "N steps". */
+describe("a late agent-message must not bury the answer", () => {
+  const rows = [
+    prompt("p", "t1"),
+    pythonRow("work-1", "t1", "complete"),
+    row("answer", { turnId: "t1", text: "I tested it, as you suggested…" }),
+    row("late-report", {
+      turnId: "t1",
+      text: "child reporting in",
+      presentation: { kind: "agent-message", sender: "child", relationship: "child" } as TranscriptPresentation,
+    }),
+    row("followup", { turnId: "t1", text: "Last cleanup confirmation." }),
+  ];
+
+  it("keeps the substantive answer visible rather than collapsing it", () => {
+    const { work, tail } = splitTurn(rows);
+    expect(work.map((r) => r.id)).not.toContain("answer");
+    expect(tail.map((r) => r.id)).toContain("answer");
+  });
+
+  it("still keeps the trailing follow-up visible", () => {
+    expect(splitTurn(rows).tail.map((r) => r.id)).toContain("followup");
+  });
+
+  it("does not let an incoming report alone stand in for an outcome", () => {
+    // A turn still working: the child has reported, the assistant has not
+    // answered yet. Promoting that report to the tail would make the turn look
+    // finished and stop showing "Working…".
+    const working = [
+      prompt("p", "t2"),
+      pythonRow("w", "t2", "complete"),
+      row("incoming", {
+        turnId: "t2",
+        presentation: { kind: "agent-message", sender: "child", relationship: "child" } as TranscriptPresentation,
+      }),
+    ];
+    expect(splitTurn(working).tail).toHaveLength(0);
+    expect(turnSettled(working)).toBe(false);
+  });
+
+  it("collapses a report that sits in the middle of the work", () => {
+    const midTurn = [
+      prompt("p", "t3"),
+      row("mid-report", {
+        turnId: "t3",
+        presentation: { kind: "agent-message", sender: "child", relationship: "child" } as TranscriptPresentation,
+      }),
+      pythonRow("after", "t3", "complete"),
+      row("answer", { turnId: "t3" }),
+    ];
+    const { work, tail } = splitTurn(midTurn);
+    expect(work.map((r) => r.id)).toEqual(["mid-report", "after"]);
+    expect(tail.map((r) => r.id)).toEqual(["answer"]);
+  });
+
+});
