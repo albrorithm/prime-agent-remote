@@ -29,15 +29,18 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [confirmName, setConfirmName] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const trimmed = name.trim();
   const renameReady = agent.capabilities.rename && Boolean(trimmed) && trimmed !== agent.name && !renaming;
-  // Typed, not tapped. Delete is the one operation here that destroys
-  // something, and it sits in a view whose other controls are single taps —
-  // so confirming it has to be an act you could not perform by accident.
-  const deleteReady = agent.capabilities.delete && confirmName.trim() === agent.name && !deleting;
+  // Delete is the one operation here that destroys something, in a view whose
+  // other controls are single taps, so it takes a second deliberate one. It used
+  // to take the session's name, typed — which is a lot of phone keyboard to ask
+  // for, and no safer than naming the session on the button and offering a way
+  // out. This is the same reveal-then-confirm shape the settings panel uses for
+  // clearing local data.
+  const deleteReady = agent.capabilities.delete && !deleting;
 
   async function submitRename() {
     if (!renameReady) return;
@@ -72,9 +75,12 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
       await deleteSession(agent.id, agent.name);
       onClose();
     } catch {
-      // The gateway store surfaces the error. Nothing was deleted, so the
-      // typed confirmation is cleared rather than left primed.
-      setConfirmName("");
+      // The gateway store surfaces the error. Nothing was deleted, so this
+      // disarms rather than staying primed for a stray tap. One error is now
+      // reachable without any staleness: the gateway checks the name it was
+      // given against the session's current one, and a name derived from the
+      // first message can change under a session that has never been named.
+      setConfirmingDelete(false);
       setDeleting(false);
     }
   }
@@ -134,20 +140,26 @@ export function SessionActions({ agent, onClose }: SessionActionsProps) {
               Deletes the session and its whole transcript from this machine. This cannot be undone
               and there is no copy to restore from.
             </p>
-            <p className="session-action-note">
-              Type <strong>{agent.name}</strong> to confirm.
-            </p>
-            <input
-              value={confirmName}
-              onChange={(event) => setConfirmName(event.target.value)}
-              aria-label="Type the session name to confirm deletion"
-              autoComplete="off"
-              maxLength={MAX_SESSION_NAME_CHARS}
-            />
-            <button className="danger-button" disabled={!deleteReady} onClick={() => void submitDelete()}>
-              {deleting ? <LoaderCircle className="spin" aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
-              {deleting ? "Deleting…" : "Delete permanently"}
-            </button>
+            {confirmingDelete ? (
+              <>
+                {/* Naming the session on the confirmation step is what the typed
+                    name was really for: knowing which one is about to go. */}
+                <p className="session-action-note">
+                  Deleting <strong>{agent.name}</strong>.
+                </p>
+                <button className="danger-button" disabled={!deleteReady} onClick={() => void submitDelete()}>
+                  {deleting ? <LoaderCircle className="spin" aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
+                  {deleting ? "Deleting…" : "Delete permanently"}
+                </button>
+                <button className="secondary-button" disabled={deleting} onClick={() => setConfirmingDelete(false)}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button className="secondary-button" onClick={() => setConfirmingDelete(true)}>
+                <Trash2 aria-hidden="true" /> Delete permanently…
+              </button>
+            )}
           </section>
         )}
       </div>

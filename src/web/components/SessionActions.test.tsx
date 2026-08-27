@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
@@ -154,7 +154,7 @@ describe("SessionActions", () => {
     expect(screen.getByLabelText("Session name")).toHaveValue("Attempted name");
   });
 
-  it("will not delete until the session name is typed back exactly", async () => {
+  it("takes two deliberate taps to delete, and offers a way back from the first", async () => {
     const user = userEvent.setup();
     deleteSession.mockReset().mockResolvedValue(undefined);
     render(
@@ -164,23 +164,23 @@ describe("SessionActions", () => {
       />,
     );
 
-    const confirm = screen.getByLabelText("Type the session name to confirm deletion");
-    const submit = screen.getByRole("button", { name: "Delete permanently" });
-    // Nothing typed, a near miss, and the wrong case all leave it inert.
-    expect(submit).toBeDisabled();
-    await user.type(confirm, "Original nam");
-    expect(submit).toBeDisabled();
-    await user.clear(confirm);
-    await user.type(confirm, "original name");
-    expect(submit).toBeDisabled();
+    // The first tap only reveals the confirmation — a single tap anywhere in
+    // this view must not destroy anything.
+    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Delete permanently…" }));
     expect(deleteSession).not.toHaveBeenCalled();
+    // The session about to go is named in the confirmation itself, which is
+    // what typing it was for. Scoped to the section: the drawer header carries
+    // the same name, and finding that one would prove nothing.
+    const deleteSection = screen.getByRole("region", { name: "Delete this session" });
+    expect(within(deleteSection).getByText("Original name")).toBeInTheDocument();
 
-    await user.clear(confirm);
-    await user.type(confirm, "Original name");
-    expect(submit).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
+    expect(deleteSession).not.toHaveBeenCalled();
   });
 
-  it("deletes with the session's own name, not the typed string", async () => {
+  it("deletes with the name the catalog holds", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     deleteSession.mockReset().mockResolvedValue(undefined);
@@ -191,16 +191,16 @@ describe("SessionActions", () => {
       />,
     );
 
-    // Surrounding whitespace still confirms, but what is sent is the name the
-    // catalog holds — the gateway checks it against the same thing.
-    await user.type(screen.getByLabelText("Type the session name to confirm deletion"), "  Original name  ");
+    // The gateway checks the name it is sent against the session's current one,
+    // so the browser must send what its catalog says, never a typed string.
+    await user.click(screen.getByRole("button", { name: "Delete permanently…" }));
     await user.click(screen.getByRole("button", { name: "Delete permanently" }));
 
     await waitFor(() => expect(deleteSession).toHaveBeenCalledWith("agent-1", "Original name"));
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("clears the confirmation when the delete is refused", async () => {
+  it("disarms when the delete is refused", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     deleteSession.mockReset().mockRejectedValue(new Error("That is not this session's name"));
@@ -211,14 +211,14 @@ describe("SessionActions", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText("Type the session name to confirm deletion"), "Original name");
+    await user.click(screen.getByRole("button", { name: "Delete permanently…" }));
     await user.click(screen.getByRole("button", { name: "Delete permanently" }));
 
     await waitFor(() => expect(deleteSession).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
-    // Nothing was deleted, so the confirmation is not left primed for a
-    // second tap.
-    expect(screen.getByLabelText("Type the session name to confirm deletion")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Delete permanently" })).toBeDisabled();
+    // Nothing was deleted, so it goes back to needing both taps rather than
+    // sitting primed under the user's thumb.
+    expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Delete permanently…" })).toBeEnabled();
   });
 });
