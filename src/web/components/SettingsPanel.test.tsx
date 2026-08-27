@@ -22,6 +22,28 @@ const pushMock = vi.hoisted(() => ({
 }));
 vi.mock("../push", () => pushMock);
 
+const apiMock = vi.hoisted(() => ({
+  listDevices: vi.fn(),
+  revokeDevice: vi.fn(),
+}));
+// `humanizeError` is real: the panel renders whatever it returns, and a stub
+// would let a test pass on a message no user would ever see.
+vi.mock("../api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../api")>(),
+  ...apiMock,
+}));
+
+function device(overrides: Partial<import("../../protocol").DeviceSummary> = {}) {
+  return {
+    id: "device-1",
+    name: "iPhone",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    lastSeenAt: new Date().toISOString(),
+    current: false,
+    ...overrides,
+  };
+}
+
 function renderPanel(onClose = vi.fn()) {
   return {
     onClose,
@@ -41,6 +63,8 @@ beforeEach(() => {
   pushMock.readPushState.mockReset().mockResolvedValue("off");
   pushMock.enablePush.mockReset().mockResolvedValue("on");
   pushMock.disablePush.mockReset().mockResolvedValue(undefined);
+  apiMock.listDevices.mockReset().mockResolvedValue({ devices: [] });
+  apiMock.revokeDevice.mockReset().mockResolvedValue({ revoked: true, self: false });
 });
 
 // The panel stamps --text-scale on the document, which outlives the render.
@@ -232,5 +256,72 @@ describe("SettingsPanel notifications", () => {
 
     await user.click(await screen.findByRole("button", { name: /Turn on notifications/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Push notifications are not configured");
+  });
+});
+
+describe("SettingsPanel paired devices", () => {
+  it("lists devices and marks the one being used", async () => {
+    apiMock.listDevices.mockResolvedValue({
+      devices: [device({ id: "a", name: "iPhone", current: true }), device({ id: "b", name: "iPad" })],
+    });
+    renderPanel();
+
+    expect(await screen.findByText("iPhone")).toBeInTheDocument();
+    expect(screen.getByText("iPad")).toBeInTheDocument();
+    expect(screen.getByText("This device")).toBeInTheDocument();
+  });
+
+  // Revoking is irreversible from the phone's side — it has to pair again with
+  // the setup token — so it takes the same two taps a session delete does.
+  it("takes two taps to revoke, and offers a way back from the first", async () => {
+    const user = userEvent.setup();
+    apiMock.listDevices.mockResolvedValue({ devices: [device({ name: "Old iPad" })] });
+    renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Revoke Old iPad" }));
+    expect(apiMock.revokeDevice).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(apiMock.revokeDevice).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Revoke Old iPad" })).toBeInTheDocument();
+  });
+
+  it("revokes another device and re-reads the list rather than guessing at it", async () => {
+    const user = userEvent.setup();
+    apiMock.listDevices
+      .mockResolvedValueOnce({ devices: [device({ id: "b", name: "Old iPad" }), device({ id: "a", current: true })] })
+      .mockResolvedValue({ devices: [device({ id: "a", current: true })] });
+    renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Revoke Old iPad" }));
+    await user.click(screen.getByRole("button", { name: "Revoke" }));
+
+    expect(apiMock.revokeDevice).toHaveBeenCalledWith("csrf", "b");
+    expect(await screen.findByText("iPhone")).toBeInTheDocument();
+    expect(screen.queryByText("Old iPad")).not.toBeInTheDocument();
+    expect(gatewayMock.signOut).not.toHaveBeenCalled();
+  });
+
+  // Revoking your own device already ended the session server-side. Going
+  // through signOut is what drops the push subscription and lands on Login,
+  // rather than leaving a dead session rendering.
+  it("signs out when the device revoked is this one", async () => {
+    const user = userEvent.setup();
+    apiMock.listDevices.mockResolvedValue({ devices: [device({ name: "iPhone", current: true })] });
+    apiMock.revokeDevice.mockResolvedValue({ revoked: true, self: true });
+    renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: "Revoke iPhone" }));
+    await user.click(screen.getByRole("button", { name: "Revoke and sign out" }));
+
+    expect(gatewayMock.signOut).toHaveBeenCalled();
+  });
+
+  it("says nothing at all when the list cannot be read", async () => {
+    apiMock.listDevices.mockRejectedValue(new Error("nope"));
+    renderPanel();
+
+    expect(await screen.findByText(/Appearance/i)).toBeInTheDocument();
+    expect(screen.queryByText("Paired devices")).not.toBeInTheDocument();
   });
 });

@@ -1284,6 +1284,129 @@ function pushRequest(t: TestGateway, client: PairedClient, action: "subscribe" |
   });
 }
 
+interface DeviceRow {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastSeenAt: string;
+  current: boolean;
+}
+
+async function listDevices(t: TestGateway, client: PairedClient): Promise<DeviceRow[]> {
+  const response = await fetch(`${t.baseUrl}/api/v1/devices`, {
+    headers: { Origin: ORIGIN, Cookie: client.cookie },
+  });
+  expect(response.status).toBe(200);
+  return (await response.json() as { devices: DeviceRow[] }).devices;
+}
+
+function revokeDevice(t: TestGateway, client: PairedClient, deviceId: string) {
+  return fetch(`${t.baseUrl}/api/v1/devices/revoke`, {
+    method: "POST",
+    headers: mutationHeaders(client),
+    body: JSON.stringify({ deviceId }),
+  });
+}
+
+describe("device management routes", () => {
+  it("lists paired devices without handing out any part of a credential", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const devices = await listDevices(t, client);
+
+    expect(devices).toHaveLength(1);
+    expect(devices[0]?.current).toBe(true);
+    // The point of the store is that it holds "which devices may return", not
+    // credentials. A hash is still a piece of one and does not leave.
+    expect(JSON.stringify(devices)).not.toContain("secretHash");
+    expect(Object.keys(devices[0] ?? {}).sort())
+      .toEqual(["createdAt", "current", "id", "lastSeenAt", "name"]);
+  });
+
+  it("marks only the requesting device as current", async () => {
+    const t = await startGateway();
+    const first = await pairClient(t);
+    const second = await pairClient(t);
+
+    expect((await listDevices(t, first)).filter((device) => device.current)).toHaveLength(1);
+    const asSeenBySecond = await listDevices(t, second);
+    expect(asSeenBySecond).toHaveLength(2);
+    expect(asSeenBySecond.filter((device) => device.current)).toHaveLength(1);
+    expect(asSeenBySecond.find((device) => device.current)?.id)
+      .not.toBe((await listDevices(t, first)).find((device) => device.current)?.id);
+  });
+
+  it("revokes another device and locks it out immediately", async () => {
+    const t = await startGateway();
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)?.id;
+    expect(doomedId).toBeDefined();
+
+    const response = await revokeDevice(t, keeper, doomedId!);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ revoked: true, self: false });
+
+    // Not "gone at the end of its twelve-hour session": the whole reason to
+    // revoke is that you no longer have that phone.
+    const afterwards = await fetch(`${t.baseUrl}/api/v1/bootstrap`, {
+      headers: { Origin: ORIGIN, Cookie: doomed.cookie },
+    });
+    expect(afterwards.status).toBe(401);
+    expect(await listDevices(t, keeper)).toHaveLength(1);
+  });
+
+  it("drops the revoked device's push subscriptions with it", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+    expect(t.gateway.pushStore.list()).toHaveLength(1);
+
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)?.id;
+    expect((await revokeDevice(t, keeper, doomedId!)).status).toBe(200);
+    // A wake capability that outlived the credential would keep buzzing a phone
+    // that can no longer open what it is being woken for.
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  it("says so when a device revokes itself, and clears its own cookies", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const ownId = (await listDevices(t, client)).find((device) => device.current)?.id;
+
+    const response = await revokeDevice(t, client, ownId!);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ revoked: true, self: true });
+    expect(response.headers.get("set-cookie")).toBeTruthy();
+    expect(await fetch(`${t.baseUrl}/api/v1/bootstrap`, {
+      headers: { Origin: ORIGIN, Cookie: client.cookie },
+    }).then((res) => res.status)).toBe(401);
+  });
+
+  it("refuses an unknown device rather than reporting a revoke that did nothing", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    expect((await revokeDevice(t, client, "not-a-device")).status).toBe(404);
+    expect(await listDevices(t, client)).toHaveLength(1);
+  });
+
+  it("keeps both routes behind authentication, and the revoke behind CSRF", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const deviceId = (await listDevices(t, client)).find((device) => device.current)?.id;
+
+    expect((await fetch(`${t.baseUrl}/api/v1/devices`, { headers: { Origin: ORIGIN } })).status).toBe(401);
+    const noCsrf = await fetch(`${t.baseUrl}/api/v1/devices/revoke`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: client.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceId }),
+    });
+    expect(noCsrf.status).toBe(403);
+    expect(await listDevices(t, client)).toHaveLength(1);
+  });
+});
+
 describe("push subscription routes", () => {
   it("advertises push as off when the gateway has no VAPID keys", async () => {
     const t = await startGateway();
@@ -1297,8 +1420,10 @@ describe("push subscription routes", () => {
     expect((await bootstrap(t, client)).push).toEqual({ enabled: true, publicKey: VAPID.publicKey });
   });
 
-  // The default deployment has no keys. Refusing here is what keeps the
-  // browser from handing over a permission this gateway can never act on.
+  // A deployment normally has keys now — `index.ts` mints them before the
+  // gateway is built — so this is the disk-failure path rather than the common
+  // one. Refusing here is still what keeps the browser from handing over a
+  // permission this gateway could never act on.
   it("refuses a subscription when push is not configured", async () => {
     const t = await startGateway();
     const client = await pairClient(t);

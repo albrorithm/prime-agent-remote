@@ -17,6 +17,8 @@ import {
   PROTOCOL_VERSION,
   pushSubscribeRequestSchema,
   pushUnsubscribeRequestSchema,
+  revokeDeviceRequestSchema,
+  type DeviceListSnapshot,
   renameAgentRequestSchema,
   stopAgentRequestSchema,
   sendMessageRequestSchema,
@@ -332,6 +334,33 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       return true;
     }
 
+    /**
+     * Which phones may come back. Paired with `/devices/revoke` below, which is
+     * a mutation and sits behind that gate; this is a read and sits with the
+     * other reads, because a GET carries no CSRF header to validate.
+     *
+     * Neither route hands out any part of a credential — not the secret, not its
+     * hash. A paired browser can already drive every agent on this machine, so
+     * seeing which other devices share that power, and being able to cut one
+     * off, does not widen what the browser can reach: it makes a capability the
+     * operator only had by editing a JSON file reachable from the phone that
+     * needs it, usually because the other phone is gone. `docs/security.md`
+     * carries this.
+     */
+    if (req.method === "GET" && pathname === "/api/v1/devices") {
+      const current = auth.deviceIdFor(session);
+      json(res, 200, {
+        devices: deviceStore.list().map((device) => ({
+          id: device.id,
+          name: device.name,
+          createdAt: device.createdAt,
+          lastSeenAt: device.lastSeenAt,
+          current: device.id === current,
+        })),
+      } satisfies DeviceListSnapshot);
+      return true;
+    }
+
     if (req.method === "GET" && pathname === "/api/v1/directories") {
       const url = new URL(req.url ?? "/", "http://gateway.invalid");
       const requested = url.searchParams.get("path") ?? undefined;
@@ -495,6 +524,26 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         () => backend.delete({ agentId, ...parsed.data }),
       );
       json(res, 202, result);
+      return true;
+    }
+
+    if (req.method === "POST" && pathname === "/api/v1/devices/revoke") {
+      const parsed = revokeDeviceRequestSchema.safeParse(await readJson(req));
+      if (!parsed.success) { problem(res, 400, "Invalid device revocation request"); return true; }
+      const { deviceId } = parsed.data;
+      const revokingSelf = auth.deviceIdFor(session) === deviceId;
+      const reaped = await auth.revokeDevice(deviceId);
+      if (!reaped) { problem(res, 404, "No such device"); return true; }
+      // Everything sign-out does, because this is sign-out aimed elsewhere: the
+      // wake capability and the live socket both outlive the credential unless
+      // they are taken too.
+      await Promise.all(reaped.map((id) => pushStore.removeSession(id).catch((error: unknown) => {
+        console.error("Could not persist push revocation on device revoke", error);
+      })));
+      const sockets = reaped.flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
+      if (revokingSelf) auth.clearCredentials(res);
+      for (const ws of sockets) closeWebSocket(ws, 1008, "Device revoked");
+      json(res, 200, { revoked: true, self: revokingSelf });
       return true;
     }
 

@@ -969,6 +969,48 @@ export const deleteAgentRequestSchema = z.object({
   confirmName: z.string().min(1).max(4_096),
 }).strict();
 
+/**
+ * A paired device, as the browser is allowed to see it.
+ *
+ * Deliberately not `StoredDevice`: that record carries `secretHash`, and the
+ * gateway does not hand out even a hash of a credential. What is here is what a
+ * person needs to recognise one of their own phones and decide whether it should
+ * still be able to come back.
+ */
+export interface DeviceSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastSeenAt: string;
+  /** True for the device making the request, which revokes itself differently. */
+  current: boolean;
+}
+
+export interface DeviceListSnapshot {
+  devices: DeviceSummary[];
+}
+
+export const revokeDeviceRequestSchema = z.object({
+  deviceId: z.string().min(1).max(128),
+}).strict();
+
+export const deviceSummarySchema = z.object({
+  id: z.string().min(1).max(128),
+  name: z.string().min(1).max(64),
+  createdAt: z.string().min(1).max(64),
+  lastSeenAt: z.string().min(1).max(64),
+  current: z.boolean(),
+});
+
+export const deviceListSnapshotSchema = z.object({
+  devices: z.array(deviceSummarySchema).max(256),
+});
+
+export const deviceRevokedSchema = z.object({
+  revoked: z.boolean(),
+  self: z.boolean(),
+});
+
 export const problemDetailsSchema = z.object({
   type: z.string(),
   title: z.string(),

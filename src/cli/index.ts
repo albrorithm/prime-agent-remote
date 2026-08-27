@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { loadConfig } from "../server/config.js";
+import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
 import { resolvePrimeModule } from "../server/prime-module.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
@@ -63,6 +64,7 @@ Usage:
   prime-agent-mobile status [--demo]     Say whether it is running, and where
   prime-agent-mobile stop [--demo]       Stop it
   prime-agent-mobile token [--rotate] [--demo]   Print the setup token
+  prime-agent-mobile devices [--revoke <id|all>] [--demo]  List or revoke paired devices
   prime-agent-mobile rebuild [--demo]    Rebuild the UI and make it live
   prime-agent-mobile install-command     Add /webui to Prime Agent
   prime-agent-mobile help
@@ -87,6 +89,8 @@ interface Options {
   demo: boolean;
   foreground: boolean;
   rotate: boolean;
+  /** A device id, or "all". Absent means list rather than revoke. */
+  revoke?: string;
 }
 
 export function parseArguments(argv: readonly string[]): Options {
@@ -98,6 +102,14 @@ export function parseArguments(argv: readonly string[]): Options {
     } else if (argument === "--demo") options.demo = true;
     else if (argument === "--foreground") options.foreground = true;
     else if (argument === "--rotate") options.rotate = true;
+    else if (argument === "--revoke") {
+      const value = argv[index + 1];
+      // A bare --revoke would otherwise read as "revoke nothing" and exit 0,
+      // which looks exactly like success.
+      if (!value || value.startsWith("--")) throw new Error("--revoke needs a device id, or all");
+      options.revoke = value;
+      index += 1;
+    }
     else if (argument === "--port") {
       const value = Number(argv[index + 1]);
       if (!Number.isInteger(value)) throw new Error(`--port needs a number, not ${argv[index + 1] ?? "nothing"}`);
@@ -446,6 +458,51 @@ async function token(options: Options): Promise<number> {
 }
 
 /**
+ * Paired devices, from the machine rather than the phone.
+ *
+ * Settings → Paired devices does this too, and does it better. This exists for
+ * the case that one cannot serve: no device you still hold can sign in. Reading
+ * and revoking here go straight to the store, so a gateway need not be running.
+ *
+ * A revoke against a running gateway takes effect on its next restart — the
+ * gateway holds the device list in memory and the sessions it already issued
+ * are its own. That is a real caveat and the output says so rather than
+ * implying an immediacy the web UI has and this does not.
+ */
+async function devices(options: Options): Promise<number> {
+  const config = loadConfig(baseEnv(options));
+  const store = new DeviceStore(config.deviceStorePath);
+  await store.load();
+
+  if (options.revoke) {
+    if (options.revoke === "all") {
+      const count = await store.revokeAll();
+      line(`Revoked ${count} device${count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
+    } else if (await store.revoke(options.revoke)) {
+      line(`Revoked ${options.revoke}.`);
+    } else {
+      line(`No device with id ${options.revoke}.`);
+      return 1;
+    }
+    line("Restart the gateway to cut off any session it has already issued.");
+    return 0;
+  }
+
+  const paired = store.list();
+  if (!paired.length) {
+    line("No paired devices. Open the address on a phone and enter the setup token.");
+    return 0;
+  }
+  for (const device of paired) {
+    line(`${device.id}  ${device.name}`);
+    line(`  paired ${device.createdAt}, last used ${device.lastSeenAt}`);
+  }
+  line();
+  line("Revoke one with --revoke <id>, or all of them with --revoke all.");
+  return 0;
+}
+
+/**
  * Installs the /webui slash command globally, so it exists in every Prime
  * Agent session rather than only inside this checkout.
  */
@@ -518,6 +575,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     case "status": return status(options);
     case "stop": return stop(options);
     case "token": return token(options);
+    case "devices": return devices(options);
     case "install-command": return installCommand();
     case "rebuild": return rebuild(options);
     case "help":

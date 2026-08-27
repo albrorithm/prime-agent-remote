@@ -1,6 +1,7 @@
 import { Bell, BellOff, LogOut, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { PROTOCOL_VERSION } from "../../protocol";
+import { PROTOCOL_VERSION, type DeviceSummary } from "../../protocol";
+import * as api from "../api";
 import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 import { DRAFTS_KEY } from "../hooks/useComposerDrafts";
@@ -109,6 +110,118 @@ const PUSH_COPY: Record<PushState, { hint: string; action?: string }> = {
     action: "Turn off notifications",
   },
 };
+
+/**
+ * "Two hours ago" beats a timestamp for the only question this list answers:
+ * is this still a phone I have? Anything older than a week is a date, because
+ * "43 days ago" is arithmetic nobody wants to do.
+ */
+function whenLastSeen(iso: string, now: number): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "Unknown";
+  const minutes = Math.floor((now - at) / 60_000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+  return new Date(at).toLocaleDateString();
+}
+
+/**
+ * Which phones can get back in, and the way to stop one.
+ *
+ * Before this there was no way to see a paired device or take one away short of
+ * editing the gateway's `devices.json` by hand — which is not something to
+ * discover while standing where you just realised the phone is gone. Revoking
+ * takes that device's live sessions and push subscriptions with it, so it stops
+ * receiving immediately rather than at the end of a twelve-hour session.
+ */
+function DevicesGroup() {
+  const { csrfToken, signOut } = useGateway();
+  const [devices, setDevices] = useState<DeviceSummary[] | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setDevices((await api.listDevices()).devices);
+      setError(null);
+    } catch (caught) {
+      setError(humanizeError(caught, "Could not read the device list"));
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  async function revoke(device: DeviceSummary) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.revokeDevice(csrfToken, device.id);
+      // Revoking this browser's own device is a sign-out that already happened
+      // server-side. Going through signOut() drops the push subscription and
+      // lands on the login screen, rather than leaving a dead session on screen.
+      if (result.self) await signOut();
+      else {
+        setConfirming(null);
+        await refresh();
+      }
+    } catch (caught) {
+      setError(humanizeError(caught, `Could not revoke ${device.name}`));
+      setConfirming(null);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Nothing to manage until the list arrives; an empty one cannot happen while
+  // you are reading it, since reading it requires being one of them.
+  if (!devices?.length) return null;
+  const now = Date.now();
+  return (
+    <section className="settings-group" aria-labelledby="settings-devices">
+      <h3 id="settings-devices">Paired devices</h3>
+      <p className="settings-hint">
+        Every device that can sign back in without the setup token. Revoking one ends its
+        sessions and its notifications straight away.
+      </p>
+      <ul className="settings-devices">
+        {devices.map((device) => (
+          <li key={device.id}>
+            <div className="settings-row-copy">
+              <p className="settings-status">
+                {device.name}{device.current && <span className="settings-badge">This device</span>}
+              </p>
+              <p className="settings-hint">Last used {whenLastSeen(device.lastSeenAt, now)}</p>
+            </div>
+            {confirming === device.id ? (
+              <div className="settings-actions">
+                <button className="settings-danger" disabled={busy} onClick={() => void revoke(device)}>
+                  {device.current ? "Revoke and sign out" : "Revoke"}
+                </button>
+                <button className="settings-quiet" disabled={busy} onClick={() => setConfirming(null)}>Cancel</button>
+              </div>
+            ) : (
+              <button
+                className="settings-quiet"
+                onClick={() => setConfirming(device.id)}
+                aria-label={`Revoke ${device.name}`}
+              >
+                Revoke…
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && <p className="settings-hint settings-error" role="alert">{error}</p>}
+    </section>
+  );
+}
 
 function NotificationsGroup() {
   const { csrfToken, push } = useGateway();
@@ -243,6 +356,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </section>
 
         <NotificationsGroup />
+        <DevicesGroup />
 
         <section className="settings-group" aria-labelledby="settings-reading">
           <h3 id="settings-reading">Reading</h3>

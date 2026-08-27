@@ -3,6 +3,8 @@ import {
   agentSnapshotSchema,
   bootstrapResponseSchema,
   cellOutputSchema,
+  deviceListSnapshotSchema,
+  deviceRevokedSchema,
   directoryListingSchema,
   mutationAcceptedSchema,
   problemDetailsSchema,
@@ -13,6 +15,7 @@ import {
   type AgentSnapshot,
   type BootstrapResponse,
   type CellOutput,
+  type DeviceListSnapshot,
   type DirectoryListing,
   type ImageAttachmentInput,
   type MutationAccepted,
@@ -333,6 +336,27 @@ export function createSession(
     cwd,
     ...(name ? { name } : {}),
   }, options, sessionCreatedSchema);
+}
+
+export async function listDevices(options?: ApiRequestOptions): Promise<DeviceListSnapshot> {
+  return request("/api/v1/devices", {
+    credentials: "same-origin",
+    // A revoked device must disappear on the next look, not when a cache feels
+    // like it.
+    cache: "no-store",
+  }, options, deviceListSnapshotSchema);
+}
+
+/**
+ * Revoking the device you are holding signs you out, so the caller has to know
+ * which happened — the response says.
+ */
+export function revokeDevice(
+  csrfToken: string,
+  deviceId: string,
+  options?: ApiRequestOptions,
+): Promise<{ revoked: boolean; self: boolean }> {
+  return mutate("/api/v1/devices/revoke", csrfToken, { deviceId }, options, deviceRevokedSchema);
 }
 
 export interface PushSubscriptionBody {

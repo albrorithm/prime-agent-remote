@@ -70,6 +70,16 @@ describe("parseArguments", () => {
     expect(parseArguments(["token", "--rotate"]).rotate).toBe(true);
   });
 
+  it("reads a device to revoke, and refuses a bare --revoke", () => {
+    expect(parseArguments(["devices"]).revoke).toBeUndefined();
+    expect(parseArguments(["devices", "--revoke", "device-7"]).revoke).toBe("device-7");
+    expect(parseArguments(["devices", "--revoke", "all"]).revoke).toBe("all");
+    // A bare --revoke that parsed would revoke nothing and exit 0, which reads
+    // exactly like having revoked something.
+    expect(() => parseArguments(["devices", "--revoke"])).toThrow(/--revoke/u);
+    expect(() => parseArguments(["devices", "--revoke", "--demo"])).toThrow(/--revoke/u);
+  });
+
   it("rejects an unknown option rather than ignoring it", () => {
     expect(() => parseArguments(["start", "--publish-to-the-internet"])).toThrow(/Unknown option/u);
   });

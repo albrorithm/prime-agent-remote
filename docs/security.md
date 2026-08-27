@@ -21,6 +21,8 @@ The gateway currently permits these live operations:
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker;
 - register and revoke a browser push subscription for this device;
+- list the paired devices — id, name, pairing time, last use, and which one is asking. No part of a credential is returned, not the secret and not its hash;
+- revoke one paired device by its id, including its own. This does everything sign-out does, aimed at another device: the credential is dropped, every session descended from it is deleted, their push subscriptions are removed, and their live sockets are closed, so a revoked device stops receiving immediately rather than at the end of its session TTL. Revoking the requesting device also clears that browser's own cookies;
 - explicitly sign out, invalidating the session, clearing its cookie, and revoking that session's push subscriptions.
 
 Experimental detected extension commands can run with the local capabilities already granted to Prime Agent, while detected prompt and skill commands can create model turns. This expands the paired browser’s trust boundary and retains a catalog-reload race that may turn command text into a model prompt.
@@ -65,6 +67,13 @@ maximum age, which is the ceiling browsers enforce anyway.
   re-pairing, rather than a gateway that will not start.
 - Rotating the setup token does not revoke any device. Revoking a device does
   not affect the others.
+- Devices are listed and revoked from Settings → Paired devices in the app, or
+  from `prime-agent-mobile devices [--revoke <id|all>]` at the machine. The CLI
+  writes straight to the store and needs no running gateway, which is what makes
+  it the answer when no device you still hold can sign in; the trade is that a
+  running gateway holds its device list in memory and keeps sessions it has
+  already issued, so a CLI revoke takes full effect on its next restart. The
+  in-app route has no such gap.
 
 ### Sessions
 
@@ -141,11 +150,15 @@ Validated image bytes use a 64 MiB in-memory LRU cache in the live backend. Vali
 
 Before a broad deployment:
 
-- add a session-management screen listing and revoking other sessions;
-- add a device-management screen: credentials can currently be revoked only by
-  signing out from the device itself, or by deleting the store;
+- add a session-management screen listing and revoking other sessions. Revoking
+  a *device* now takes all of its sessions, which covers the case that matters —
+  a phone you no longer have — but two tabs of one device are still not
+  separable;
 - validate all Prime extension UI request shapes before adding free-text responses;
 - perform a physical-device and reverse-proxy security test, including a real push delivered to an installed PWA with the app closed;
-- add a device-management screen listing and revoking individual push subscriptions, which currently can only be revoked from the device that created one or by signing that session out.
+- list and revoke individual push subscriptions. Revoking a device drops every
+  subscription belonging to its sessions, so a lost phone stops being woken; a
+  single subscription still cannot be revoked without revoking the device or
+  signing out the session that made it.
 
 Privacy-minimal push is now implemented against authoritative attention transitions, and its payload boundary is stated above. What remains is operational rather than a design question: subscriptions survive gateway restarts by design, so the store file is a credential-bearing artifact that belongs in the same backup and disposal policy as any other.

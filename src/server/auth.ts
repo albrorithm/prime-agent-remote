@@ -176,6 +176,45 @@ export class AuthService {
   }
 
   /**
+   * Revokes one device by id, wherever the request came from.
+   *
+   * This is sign-out aimed at somebody else: the same reaping, for the same
+   * reason. Dropping the credential while leaving that device's live sessions
+   * running would make "revoke" a promise the gateway does not keep — the phone
+   * you just revoked keeps its socket and its 12-hour TTL, which is precisely
+   * the phone you no longer have.
+   *
+   * The caller still has to close the reaped sockets and drop their push
+   * subscriptions; `isSessionActive` is only consulted on an inbound frame, and
+   * events are outbound. Returns the sessions reaped, or null if no such device.
+   */
+  async revokeDevice(deviceId: string): Promise<string[] | null> {
+    // Checked before anything is reaped: returning "no such device" after
+    // killing its sessions would leave the caller with no list of sockets to
+    // close, and those sockets keep delivering events until told otherwise.
+    if (!this.devices?.list().some((device) => device.id === deviceId)) return null;
+    const reaped: string[] = [];
+    for (const [id, session] of this.sessions) {
+      if (session.deviceId === deviceId) reaped.push(id);
+    }
+    // Deleted before the await, so a request arriving during the revoke cannot
+    // find one of these sessions still live.
+    for (const id of reaped) this.sessions.delete(id);
+    await this.devices.revoke(deviceId);
+    return reaped;
+  }
+
+  /** Clears this browser's own cookies, for a device revoking itself. */
+  clearCredentials(res: ServerResponse): void {
+    res.setHeader("Set-Cookie", [this.sessionCookieHeader(null), this.deviceCookieHeader("", 0)]);
+  }
+
+  /** Which device this session belongs to, so a list can say "this one". */
+  deviceIdFor(session: Session): string | undefined {
+    return session.deviceId;
+  }
+
+  /**
    * Every session a sign-out of this one takes with it.
    *
    * Revoking the device credential while leaving that device's other sessions
