@@ -31,8 +31,14 @@ async function unusedPort(): Promise<number> {
 
 async function startGateway(extraEnv: Record<string, string> = {}): Promise<RunningGateway> {
   const port = await unusedPort();
-  // Keep the spawned gateway off the operator's real subscription store.
-  const pushStore = join(await mkdtemp(join(tmpdir(), "gateway-push-")), "push-subscriptions.json");
+  /* Keep the spawned gateway off EVERY store the operator actually uses.
+     Only the push store was redirected here, so each run of this file paid
+     three test devices into the real ~/.config/prime-agent-web/devices.json —
+     which evicts by insertion order at MAX_DEVICES, so a long enough run of
+     `npm test` would silently unpair the operator's phone. Any new
+     configFilePath()-derived store belongs in this list too. */
+  const stores = await mkdtemp(join(tmpdir(), "gateway-stores-"));
+  const pushStore = join(stores, "push-subscriptions.json");
   const origin = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "src/server/index.ts")], {
     cwd: process.cwd(),
@@ -46,6 +52,9 @@ async function startGateway(extraEnv: Record<string, string> = {}): Promise<Runn
       PRIME_WEB_BACKEND: "demo",
       PRIME_WEB_SECURE_COOKIE: "false",
       PRIME_WEB_PUSH_STORE: pushStore,
+      PRIME_WEB_DEVICE_STORE: join(stores, "devices.json"),
+      PRIME_WEB_PAIRING_TOKEN_FILE: join(stores, "pairing-token"),
+      PRIME_WEB_STATE_FILE: join(stores, "gateway.json"),
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],

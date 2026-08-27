@@ -5,7 +5,8 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
-    setupFiles: ["./src/web/test/setup.ts"],
+    // Store isolation first: it must be in place before any test file runs.
+    setupFiles: ["./src/test/isolate-stores.ts", "./src/web/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     coverage: {
       reporter: ["text", "html"],
