@@ -604,6 +604,50 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(result.current.snapshots["agent-a"]?.revision).toBe(1);
   });
 
+  /* A transcript that fails must say so. Before this, a thrown loadAgent left
+     `snapshots[id]` undefined forever and the panel showed its spinner with no
+     retry and no failed state — so a clean 15s timeout was indistinguishable
+     from the permanent stream_gone deadlock. */
+  it("records why a transcript failed instead of leaving it loading", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(408, "The request timed out"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.transcriptErrors["agent-a"]).toBe("Loading the transcript timed out."));
+    expect(result.current.snapshots["agent-a"]).toBeUndefined();
+  });
+
+  it("retries a failed transcript and clears the failure when it lands", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(408, "The request timed out"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.transcriptErrors["agent-a"]).toBeDefined());
+
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    await act(async () => { await result.current.retryTranscript("agent-a"); });
+
+    expect(result.current.snapshots["agent-a"]).toBeDefined();
+    expect(result.current.transcriptErrors["agent-a"]).toBeUndefined();
+  });
+
+  it("says the gateway is unreachable when the request never got that far", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new TypeError("Failed to fetch"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.transcriptErrors["agent-a"]).toBe("Could not reach the gateway."));
+  });
+
+  it("stays quiet when the load was aborted because the session moved on", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new DOMException("Session changed", "AbortError"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalled());
+    // An abort is the app moving on, not a failure to report.
+    await waitFor(() => expect(result.current.transcriptErrors["agent-a"]).toBeUndefined());
+  });
+
   /* The transcript-never-loads deadlock, from the client's side.
 
      "stream_gone" used to be terminal whatever the reason. For an agent that

@@ -1,4 +1,4 @@
-import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, MessagesSquare, OctagonAlert, Search, User, X } from "lucide-react";
+import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, MessagesSquare, OctagonAlert, Search, TriangleAlert, User, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -410,7 +410,8 @@ export function TranscriptEntry({
 }
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
-  const { selectedAgent, selectedSnapshot, pendingMessages, attentionCount, catalog, selectAgent, backend } = useGateway();
+  const { selectedAgent, selectedSnapshot, pendingMessages, attentionCount, catalog, selectAgent, backend, transcriptErrors, retryTranscript } = useGateway();
+  const transcriptError = selectedAgent ? transcriptErrors[selectedAgent.id] ?? null : null;
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const messageCount = selectedSnapshot?.messages.length ?? 0;
@@ -594,7 +595,22 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           >
             <div className="transcript-content">
               {selectedSnapshot?.attention.map((request) => <AttentionCard key={request.id} request={request} />)}
-              {!selectedSnapshot ? (
+              {!selectedSnapshot && transcriptError ? (
+                /* A spinner that will never stop is worse than an error: it
+                   gives the user nothing to do. Name what happened and offer
+                   the way out. */
+                <div className="transcript-failed" role="alert">
+                  <TriangleAlert aria-hidden="true" />
+                  <p className="transcript-failed-message">{transcriptError}</p>
+                  <button
+                    type="button"
+                    className="transcript-retry"
+                    onClick={() => { void retryTranscript(selectedAgent.id); }}
+                  >
+                    Try again
+                  </button>
+                </div>
+              ) : !selectedSnapshot ? (
                 <div className="loading-state"><LoaderCircle className="spin" /> Loading transcript…</div>
               ) : searching ? (
                 <div className="message-list">

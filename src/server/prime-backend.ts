@@ -291,6 +291,26 @@ const REFINE_EDITS_MAX = 10;
 const MAX_STORED_REFINES = 20;
 const MAX_DASHBOARD_REFINES = 20;
 const CONTEXT_STATS_MIN_INTERVAL_MS = 20_000;
+/**
+ * The daemon `list` is a cheap control-plane round trip that reads state the
+ * daemon already holds, so it shares the budget the socket connect above it
+ * uses: a daemon silent for five seconds is stalled, not slow.
+ */
+export const PRIME_LIST_TIMEOUT_MS = 5_000;
+/**
+ * Attaching to an already-running agent session is another control-plane
+ * handshake against a live daemon, so it gets the same five seconds. It is not
+ * proportional to transcript size: the snapshot below is what reads the
+ * transcript.
+ */
+export const PRIME_ATTACH_TIMEOUT_MS = 5_000;
+/**
+ * The first snapshot reads and projects the entire transcript, which reaches
+ * tens of megabytes on long sessions, so cutting it off at a control-plane
+ * deadline would break exactly the sessions that need it. It gets the same
+ * generous budget already granted to resuming a saved session.
+ */
+export const PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS = 120_000;
 const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 const STABLE_DATE_FALLBACK = "1970-01-01T00:00:00.000Z";
 const DIRECT_SLASH_COMMAND_NAME_SET = new Set<string>(DIRECT_SLASH_COMMAND_NAMES);
@@ -1418,6 +1438,53 @@ function dashboardContextUsage(stats: PrimeSessionStats): SessionContextUsage | 
 }
 
 /**
+ * Bounds a promise that has no timeout argument of its own — the external Prime
+ * module's calls. The deadline rejects with a named error; the abandoned work
+ * is handed to `onAbandoned` if it lands afterwards, because a promise nobody
+ * awaits any more can still deliver a resource that nobody would ever release.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onAbandoned?: (value: T) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let abandoned = false;
+    const timer = setTimeout(() => {
+      abandoned = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (abandoned) {
+          onAbandoned?.(value);
+          return;
+        }
+        // Clearing on the settled path matters: a pending 120s timer would keep
+        // the event loop, and so the process, alive for no reason.
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (abandoned) return;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Releases a connection that arrived after its attach was abandoned. */
+function disposeAbandonedConnection(connection: PrimeConnection): void {
+  try {
+    void Promise.resolve(connection.dispose()).catch(() => {
+      console.error("Could not dispose a Prime connection that arrived after its attach timed out");
+    });
+  } catch { /* Best-effort adapter cleanup. */ }
+}
+
+/**
  * Resolution lives in prime-module.ts because the CLI has to answer "which
  * Prime Agent build would the gateway use?" before starting anything, and two
  * implementations of that question would drift.
@@ -1554,8 +1621,11 @@ export class PrimeBackend implements AgentBackend {
     const replacement = new this.module.DaemonClient(this.socketOverride || this.module.defaultDaemonSocketPath());
     try {
       await replacement.connect(5_000);
-      // Prove the socket answers before swapping it in.
-      const probe = await replacement.request({ type: "list", all: true });
+      // Prove the socket answers before swapping it in. Bounded like every
+      // other list: an unbounded probe against a daemon that accepts sockets
+      // but answers nothing would park here forever and stop the ladder from
+      // ever reaching its next rung.
+      const probe = await replacement.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
       if (!probe.success) throw new Error("Prime daemon list failed");
     } catch {
       try { replacement.close(); } catch { /* Best-effort cleanup. */ }
@@ -2158,7 +2228,7 @@ export class PrimeBackend implements AgentBackend {
   private async loadCatalogOnce(): Promise<void> {
     let response: PrimeResponse;
     try {
-      response = await this.client.request({ type: "list", all: true });
+      response = await this.client.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
     } catch {
       throw new Error("Prime daemon list failed");
     }
@@ -2330,10 +2400,18 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private async createConnection(publicId: string, activeSessionId: string): Promise<ConnectionRecord> {
-    const connection = await this.module.DaemonAgentConnection.attach(this.client, activeSessionId, {
-      closeClientOnDispose: false,
-      supportsExtensionUi: true,
-    });
+    const connection = await withTimeout(
+      this.module.DaemonAgentConnection.attach(this.client, activeSessionId, {
+        closeClientOnDispose: false,
+        supportsExtensionUi: true,
+      }),
+      PRIME_ATTACH_TIMEOUT_MS,
+      "Prime agent attach",
+      // No record exists yet, so a connection that arrives after the deadline
+      // has nothing left holding it: dispose it here or it leaks a daemon
+      // subscription for the lifetime of the gateway.
+      disposeAbandonedConnection,
+    );
     const buffered: PrimeConnectionEvent[] = [];
     let ready = false;
     const record: ConnectionRecord = {
@@ -2362,7 +2440,13 @@ export class PrimeBackend implements AgentBackend {
         else this.handleConnectionEvent(record, event);
       });
       this.connections.set(publicId, record);
-      const snapshot = validatePrimeSnapshot(await connection.getInitialSnapshot());
+      // Inside the try on purpose: a timeout here must reach the catch below so
+      // the half-built record is disposed like any other snapshot failure.
+      const snapshot = validatePrimeSnapshot(await withTimeout(
+        connection.getInitialSnapshot(),
+        PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS,
+        "Prime initial snapshot",
+      ));
       this.applyPrimeSnapshot(record, snapshot, this.hub.has(`agent:${publicId}`));
       ready = true;
       for (const event of buffered) this.handleConnectionEvent(record, event);
@@ -2459,7 +2543,18 @@ export class PrimeBackend implements AgentBackend {
 
   private async runConnectionRefresh(record: ConnectionRecord): Promise<void> {
     if (record.disposed || this.connections.get(record.publicId) !== record) return;
-    const snapshot = validatePrimeSnapshot(await record.connection.getInitialSnapshot());
+    // Bounded like the create path, but deliberately not disposing on failure:
+    // this record is a live connection a client is already watching, and one
+    // stalled refresh is not proof the connection is dead. Rejecting frees the
+    // refresh queue instead of wedging it — the queue re-marks the work dirty
+    // and retries on connectionRefreshRetryDelaysMs, which is the path every
+    // other refresh failure already takes. The abandoned promise yields a
+    // snapshot value, not a resource, so there is nothing to release.
+    const snapshot = validatePrimeSnapshot(await withTimeout(
+      record.connection.getInitialSnapshot(),
+      PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS,
+      "Prime connection refresh snapshot",
+    ));
     if (record.disposed || this.connections.get(record.publicId) !== record) return;
     this.applyPrimeSnapshot(record, snapshot, true);
     await this.refreshCatalog(true);

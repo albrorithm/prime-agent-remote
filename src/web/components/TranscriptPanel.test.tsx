@@ -10,7 +10,7 @@ import { authorLineIds, cwdBasename, deriveAgentLineage, TranscriptEntry, Transc
 type GatewayMockState = Pick<
   ReturnType<typeof useGateway>,
   "catalog" | "selectedAgent" | "selectedSnapshot" | "pendingMessages" | "selectAgent"
->;
+> & Partial<Pick<ReturnType<typeof useGateway>, "transcriptErrors" | "retryTranscript">>;
 
 const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }));
 
@@ -21,7 +21,15 @@ vi.mock("../gateway-store", async () => {
   const { attentionAgentCount } = await import("../../protocol");
   return {
     useGateway: () => gatewayMock.state
-      && { ...gatewayMock.state, attentionCount: attentionAgentCount(gatewayMock.state.catalog.agents) },
+      && {
+        // Defaulted rather than omitted: the real store always carries these,
+        // and a mock that leaves them undefined is kinder than the thing it
+        // stands in for. A test that wants the failed state sets them.
+        transcriptErrors: {},
+        retryTranscript: async () => {},
+        ...gatewayMock.state,
+        attentionCount: attentionAgentCount(gatewayMock.state.catalog.agents),
+      },
   };
 });
 vi.mock("./MessageContent", () => ({
@@ -843,5 +851,52 @@ describe("turn grouping in the panel", () => {
 
     expect(screen.getByRole("textbox", { name: "Search this transcript" })).toHaveValue("");
     expect(screen.queryByText("No messages match that search.")).not.toBeInTheDocument();
+  });
+});
+
+/* jsdom cannot see this render, so these assert only behaviour: that the failed
+   branch replaces the spinner and that its button calls back. Whether the box
+   is legible, and whether the button survives a large text scale, is the
+   `transcript-failed` harness case — captured in WebKit at 1.0 and 1.4. */
+describe("a transcript that failed to load", () => {
+  function setup(transcriptError: string | null) {
+    const selectedAgent = agent("agent-a", null, 0);
+    const retryTranscript = vi.fn(async () => {});
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [selectedAgent] },
+      selectedAgent,
+      selectedSnapshot: null,
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+      transcriptErrors: transcriptError ? { "agent-a": transcriptError } : {},
+      retryTranscript,
+    };
+    return retryTranscript;
+  }
+
+  it("shows the reason and a retry instead of a spinner that never stops", () => {
+    setup("Loading the transcript timed out.");
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Loading the transcript timed out.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading transcript…")).not.toBeInTheDocument();
+  });
+
+  it("keeps the spinner while the transcript is merely still coming", () => {
+    setup(null);
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.getByText("Loading transcript…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  });
+
+  it("asks the store to try that agent again", async () => {
+    const retryTranscript = setup("Could not reach the gateway.");
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(retryTranscript).toHaveBeenCalledWith("agent-a");
   });
 });

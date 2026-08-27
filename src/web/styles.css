@@ -450,6 +450,13 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .empty-transcript { display: grid; min-height: 46vh; gap: 10px; place-items: center; color: var(--muted); text-align: center; }
 .empty-transcript button { min-height: 36px; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 99px; color: var(--text); background: transparent; font-weight: 600; }
 .empty-transcript button:hover { background: var(--accent-soft); }
+/* A transcript that failed rather than one that is still arriving. Sized like
+   .empty-transcript so the panel does not jump between the two states, and the
+   button is a real 40px target because it is the only way forward. */
+.transcript-failed { display: grid; min-height: 46vh; gap: 12px; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+.transcript-failed > svg { width: 26px; height: 26px; color: var(--tone-attention); }
+.transcript-failed-message { margin: 0; max-width: 34ch; color: var(--text); font-size: .875rem; line-height: 1.5; }
+.transcript-retry { min-height: 40px; padding: 8px 16px; border: 1px solid var(--accent); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-weight: 700; }
 .conversation-empty { display: grid; min-height: 0; flex: 1; place-content: center; justify-items: center; padding: 24px; color: var(--muted); text-align: center; }
 .conversation-empty > svg { width: 28px; height: 28px; color: var(--text); }
 .conversation-empty h2 { margin: 14px 0 4px; color: var(--text); font-size: 1.125rem; }

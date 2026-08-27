@@ -94,6 +94,25 @@ export function reconcilePending(pending: PendingMessage[], messages: Transcript
   }));
 }
 
+function clearTranscriptError(errors: Record<string, string>, agentId: string): Record<string, string> {
+  if (!(agentId in errors)) return errors;
+  const next = { ...errors };
+  delete next[agentId];
+  return next;
+}
+
+/* A caller-side abort is the session moving on, not a failure worth showing.
+   Everything else is something the user needs told, with the timeout named
+   rather than left as a silent spinner. */
+export function transcriptErrorMessage(error: unknown): string | null {
+  if (error instanceof DOMException && error.name === "AbortError") return null;
+  if (error instanceof api.ApiError) {
+    if (error.status === 408) return "Loading the transcript timed out.";
+    return error.message;
+  }
+  return "Could not reach the gateway.";
+}
+
 function pruneSnapshots(snapshots: Record<string, AgentSnapshot>, keep: string | null): Record<string, AgentSnapshot> {
   const ids = Object.keys(snapshots);
   if (ids.length <= SNAPSHOT_CAP) return snapshots;
@@ -113,6 +132,10 @@ interface State {
   push: WebPushAvailability | null;
   catalog: CatalogSnapshot;
   snapshots: Record<string, AgentSnapshot>;
+  /* Why a transcript has no snapshot, when the reason is not "still loading".
+     Without this the panel cannot tell a slow load from a failed one, and a
+     clean 15s timeout looks exactly like the permanent deadlock we just fixed. */
+  transcriptErrors: Record<string, string>;
   // Agent ids whose stream was explicitly declared gone (a "stream_gone" detach).
   // Distinct from "no snapshot yet": a late HTTP response for one of these must
   // never resurrect it, whereas an agent that simply hasn't loaded yet should
@@ -161,6 +184,7 @@ type Action =
   | { type: "pending_add"; agentId: string; value: PendingMessage }
   | { type: "pending_remove"; agentId: string; id: string }
   | { type: "evict_snapshot"; agentId: string }
+  | { type: "transcript_error"; agentId: string; message: string | null }
   | { type: "select"; value: string | null }
   | { type: "error"; value: string | null };
 
@@ -173,6 +197,7 @@ const initialState: State = {
   push: null,
   catalog: emptyCatalog,
   snapshots: {},
+  transcriptErrors: {},
   goneAgentIds: new Set(),
   pending: {},
   selectedAgentId: null,
@@ -279,12 +304,21 @@ function reducer(state: State, action: Action): State {
           { ...state.snapshots, [action.value.agentId]: action.value },
           state.selectedAgentId,
         ),
+        // The transcript arrived, so whatever went wrong last time no longer has
+        // anything to say.
+        transcriptErrors: clearTranscriptError(state.transcriptErrors, action.value.agentId),
         goneAgentIds,
         pending: {
           ...state.pending,
           [action.value.agentId]: reconcilePending(state.pending[action.value.agentId] ?? [], action.value.messages),
         },
       };
+    }
+    case "transcript_error": {
+      if (action.message === null) {
+        return { ...state, transcriptErrors: clearTranscriptError(state.transcriptErrors, action.agentId) };
+      }
+      return { ...state, transcriptErrors: { ...state.transcriptErrors, [action.agentId]: action.message } };
     }
     case "event": {
       if (action.value.event.kind === "catalog.replaced") {
@@ -375,6 +409,8 @@ interface GatewayContextValue extends State {
   respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
   signOut: () => Promise<void>;
   reconnect: () => void;
+  /** Try a failed transcript again, from the panel that is showing the failure. */
+  retryTranscript: (agentId: string) => Promise<void>;
 }
 
 const GatewayContext = createContext<GatewayContextValue | null>(null);
@@ -743,14 +779,25 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         const streamId = `agent:${first.id}`;
         subscriptions.current.add(streamId);
         attach(streamId);
-        const loaded = await loadAgentHttp(first.id, { signal: controller.signal });
-        if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-        dispatch({
-          type: "snapshot",
-          value: loaded.snapshot,
-          source: "http",
-          allowEqualRevision: loaded.allowEqualRevision,
-        });
+        try {
+          const loaded = await loadAgentHttp(first.id, { signal: controller.signal });
+          if (generation !== initializationGeneration.current || controller.signal.aborted) return;
+          dispatch({
+            type: "snapshot",
+            value: loaded.snapshot,
+            source: "http",
+            allowEqualRevision: loaded.allowEqualRevision,
+          });
+        } catch (error) {
+          if (generation !== initializationGeneration.current || controller.signal.aborted) return;
+          // This is the path that produced the endless spinner: the agent is
+          // selected, the snapshot never arrives, and there is no selection to
+          // roll back to. Record the reason, then rethrow so the global error
+          // and the offline phase still happen as before.
+          const message = transcriptErrorMessage(error);
+          if (message) dispatch({ type: "transcript_error", agentId: first.id, message });
+          throw error;
+        }
       }
       if (pushClaimedFor.current !== value.csrfToken) {
         pushClaimedFor.current = value.csrfToken;
@@ -858,14 +905,26 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       subscriptions.current.add(streamId);
       attach(streamId);
       if (!stateRef.current.snapshots[id]) {
-        const loaded = await loadAgentHttp(id);
-        if (generation !== sessionGeneration.current) return;
-        dispatch({
-          type: "snapshot",
-          value: loaded.snapshot,
-          source: "http",
-          allowEqualRevision: loaded.allowEqualRevision,
-        });
+        try {
+          const loaded = await loadAgentHttp(id);
+          if (generation !== sessionGeneration.current) return;
+          dispatch({
+            type: "snapshot",
+            value: loaded.snapshot,
+            source: "http",
+            allowEqualRevision: loaded.allowEqualRevision,
+          });
+        } catch (error) {
+          if (generation !== sessionGeneration.current) return;
+          // Recorded for the panel, then rethrown unchanged. Every existing
+          // caller keeps its own handling: selectAgent still rolls the
+          // selection back, createSession still reports that the session was
+          // created but could not be opened. This only adds the per-agent
+          // reason the panel needs to offer a retry.
+          const message = transcriptErrorMessage(error);
+          if (message) dispatch({ type: "transcript_error", agentId: id, message });
+          throw error;
+        }
       }
       if (generation !== sessionGeneration.current) return;
       for (const existing of subscriptions.current) {
@@ -1210,6 +1269,32 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // Signing out resets the catalog, which clears the icon badge for free.
   const attentionCount = attentionAgentCount(state.catalog.agents);
   useAppBadge(attentionCount);
+  /* The way out of a failed transcript. Clearing the error first puts the
+     spinner back, so a retry that is itself slow still looks like progress
+     rather than a dead button. The attach is retried too: the socket may have
+     been the thing that failed. */
+  const retryTranscript = useCallback(async (agentId: string) => {
+    const generation = sessionGeneration.current;
+    const streamId = `agent:${agentId}`;
+    dispatch({ type: "transcript_error", agentId, message: null });
+    subscriptions.current.add(streamId);
+    attach(streamId);
+    try {
+      const loaded = await loadAgentHttp(agentId);
+      if (generation !== sessionGeneration.current) return;
+      dispatch({
+        type: "snapshot",
+        value: loaded.snapshot,
+        source: "http",
+        allowEqualRevision: loaded.allowEqualRevision,
+      });
+    } catch (error) {
+      if (generation !== sessionGeneration.current) return;
+      const message = transcriptErrorMessage(error);
+      if (message) dispatch({ type: "transcript_error", agentId, message });
+    }
+  }, [attach, loadAgentHttp]);
+
   const value = useMemo<GatewayContextValue>(
     () => ({
       ...state,
@@ -1230,8 +1315,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       respond,
       signOut,
       reconnect,
+      retryTranscript,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, deleteSession, respond, signOut, reconnect],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, deleteSession, respond, signOut, reconnect, retryTranscript],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

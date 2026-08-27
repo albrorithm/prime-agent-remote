@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, symlinkSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import process from "node:process";
 import { WebSocket } from "ws";
 
@@ -78,6 +80,37 @@ function startGateway(gatewayPort, extraEnv = {}) {
 
 function stop() {
   for (const gateway of gateways) if (!gateway.killed) gateway.kill("SIGTERM");
+}
+
+/* Runs a command to completion and hands back everything it produced.
+
+   Used for the installed-CLI check below, which is about what a program does
+   when a shell runs it — so it has to be a real child process with a real exit
+   code, not an imported function. The isolated stores go into its environment
+   for the same reason the gateway gets them: nothing here may touch the
+   operator's real ~/.config/prime-agent-web/. */
+function runCommand(command, args, timeoutMs = 20_000) {
+  return new Promise((settle, reject) => {
+    const child = spawn(command, args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ...ISOLATED_STORES },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${command} ${args.join(" ")} did not finish within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(timeout); reject(error); });
+    child.once("exit", (code, signal) => { clearTimeout(timeout); settle({ code, signal, stdout, stderr }); });
+  });
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 // The default deployment: no VAPID keys. Everything below has to work in it.
@@ -519,6 +552,75 @@ try {
   });
   if (configuredUnsubscribe.status !== 202) {
     throw new Error(`Configured unsubscribe failed: ${configuredUnsubscribe.status}`);
+  }
+
+  /* The CLI as npm actually installs it.
+
+     `npm install -g` does not copy the bin entry; it links it. process.argv[1]
+     is then the link in the global bin directory while import.meta.url is the
+     resolved module URL inside the package, so an entry guard that compares
+     the two plainly is false for every real installation. The CLI shipped that
+     way: under its own name every subcommand printed nothing and exited 0,
+     while `node dist-server/cli/index.js` — the only form the tests ever used —
+     worked perfectly. Importing a function cannot see that. Only running the
+     linked binary can.
+
+     Read-only subcommands only: `help` and `status` inspect and print, and
+     neither starts, stops, nor writes. `token` is excluded on purpose, because
+     its entire output is a secret. */
+  const manifest = JSON.parse(await readFile(resolve(process.cwd(), "package.json"), "utf8"));
+  const binName = Object.keys(manifest.bin ?? {})[0];
+  if (!binName) throw new Error("package.json declares no bin entry to install");
+  const binEntry = resolve(process.cwd(), manifest.bin[binName]);
+  const installedBin = join(mkdtempSync(join(tmpdir(), "prime-smoke-bin-")), binName);
+  symlinkSync(binEntry, installedBin);
+
+  // Executing the link, not `node <link>`, so the shipped shebang and the
+  // executable bit the build sets are part of what is being checked.
+  const cliHelp = await runCommand(installedBin, ["help"]);
+  if (cliHelp.code !== 0) {
+    throw new Error(`Installed CLI \`help\` exited ${cliHelp.code} (signal ${cliHelp.signal}): ${cliHelp.stderr}`);
+  }
+  if (!cliHelp.stdout.includes("Usage:") || !cliHelp.stdout.includes(`${binName} start`)) {
+    throw new Error(`Installed CLI \`help\` printed no usage. stdout=${JSON.stringify(cliHelp.stdout)} stderr=${JSON.stringify(cliHelp.stderr)}`);
+  }
+
+  // `status` goes further than `help`: it loads the config and reads the
+  // gateway state file, which the isolated stores point at an empty temp
+  // directory — so the answer is always "not running", and the documented exit
+  // code for that is 1. A guard that never fires would give an empty stdout
+  // and 0 here, which is exactly the shipped bug.
+  const cliStatus = await runCommand(installedBin, ["status"]);
+  if (!cliStatus.stdout.includes("Not running.")) {
+    throw new Error(`Installed CLI \`status\` printed nothing usable. stdout=${JSON.stringify(cliStatus.stdout)} stderr=${JSON.stringify(cliStatus.stderr)}`);
+  }
+  if (cliStatus.code !== 1) {
+    throw new Error(`Expected installed CLI \`status\` to exit 1 with no gateway running, got ${cliStatus.code}`);
+  }
+
+  /* What the gateway serves is what the build produced.
+
+     A web change is not done when `dist/` changes; it is done when the bytes
+     on the phone change. Nothing else in this repo compares the two, and a
+     change reported as live while an old bundle was still being served is a
+     failure no unit test can see. So: take the hashed assets index.html points
+     at, ask the running gateway for them over HTTP, and hash both sides. */
+  const distRoot = resolve(process.cwd(), "dist");
+  const indexBytes = await readFile(join(distRoot, "index.html"));
+  const references = [...indexBytes.toString("utf8").matchAll(/(?:src|href)="(\/assets\/[^"]+)"/gu)]
+    .map((match) => match[1]);
+  if (references.length === 0) throw new Error("dist/index.html references no hashed assets; the build is not what it was");
+
+  for (const [requestPath, expected] of [["/", indexBytes], ...references.map((reference) => [reference, null])]) {
+    const onDisk = expected ?? await readFile(join(distRoot, requestPath.slice(1)));
+    const response = await fetch(`${origin}${requestPath}`, { headers: { Origin: origin } });
+    if (response.status !== 200) throw new Error(`Gateway did not serve ${requestPath}: ${response.status}`);
+    const servedBytes = Buffer.from(await response.arrayBuffer());
+    const servedHash = sha256(servedBytes);
+    const diskHash = sha256(onDisk);
+    if (servedHash !== diskHash) {
+      throw new Error(`Served bytes differ from the build for ${requestPath}: served sha256 ${servedHash} (${servedBytes.byteLength} bytes), on disk ${diskHash} (${onDisk.byteLength} bytes)`);
+    }
   }
 
   console.log("Gateway smoke test passed");

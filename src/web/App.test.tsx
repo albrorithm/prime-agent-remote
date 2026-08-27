@@ -7,7 +7,11 @@ import { App } from "./App";
 import { SettingsProvider } from "./settings";
 
 const gatewayMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
-vi.mock("./gateway-store", () => ({ useGateway: () => gatewayMock.current }));
+// Defaulted for the same reason as in TranscriptPanel.test.tsx: the real store
+// always carries these, so a mock without them is kinder than reality.
+vi.mock("./gateway-store", () => ({
+  useGateway: () => ({ transcriptErrors: {}, retryTranscript: async () => {}, ...gatewayMock.current }),
+}));
 
 // Transcript components read useSettings(); main.tsx mounts the provider above them.
 const render = (ui: ReactElement) => renderBare(ui, { wrapper: SettingsProvider });

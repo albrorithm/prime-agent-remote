@@ -7,7 +7,14 @@ import type { AttentionRequest, ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
-import { PrimeBackend, projectPrimeTranscript, projectSavedSessionTranscript } from "./prime-backend.js";
+import {
+  PRIME_ATTACH_TIMEOUT_MS,
+  PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS,
+  PRIME_LIST_TIMEOUT_MS,
+  PrimeBackend,
+  projectPrimeTranscript,
+  projectSavedSessionTranscript,
+} from "./prime-backend.js";
 
 const FIXTURE_JPEG_DATA = "/9j/wAALCAABAAEBAREA/9oACAEBAAA/AAD/2Q==";
 
@@ -47,6 +54,8 @@ interface FixtureState {
   failClientsBelow: number;
   listDelayMs: number;
   listCalls: number;
+  /** Timeout arguments the backend passed to the daemon client, in order. */
+  requestTimeouts: Array<{ type: unknown; timeoutMs: number }>;
   activeListRequests: number;
   maxConcurrentListRequests: number;
   snapshotCalls: number;
@@ -153,6 +162,7 @@ const fixture: FixtureState = {
   failClientsBelow: 0,
   listDelayMs: 0,
   listCalls: 0,
+  requestTimeouts: [],
   activeListRequests: 0,
   maxConcurrentListRequests: 0,
   snapshotCalls: 0,
@@ -167,7 +177,26 @@ const state = globalThis.__primeWebFixture;
 export class DaemonClient {
   constructor() { state.clientsCreated += 1; this.clientNumber = state.clientsCreated; }
   async connect() { if (state.connectError) throw new Error("private connect failure"); }
-  async request(command) {
+  // The real daemon client fails a request that misses its deadline instead of
+  // waiting on a stalled socket forever; a fixture that ignored timeoutMs could
+  // not produce the state the bounded call exists for.
+  async request(command, timeoutMs) {
+    if (typeof timeoutMs === "number") state.requestTimeouts.push({ type: command.type, timeoutMs });
+    const work = this.dispatch(command);
+    if (typeof timeoutMs !== "number") return await work;
+    let timer;
+    try {
+      return await Promise.race([
+        work,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("private daemon request timed out")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async dispatch(command) {
     if (this.clientNumber <= state.failClientsBelow) throw new Error("private dead client");
     if (command.type === "create") {
       state.creates.push(command);
@@ -321,6 +350,21 @@ function moduleSpecifier(): string {
   return `data:text/javascript;base64,${Buffer.from(moduleSource).toString("base64")}#${crypto.randomUUID()}`;
 }
 
+/**
+ * Records how a promise settles without awaiting it, so a test can assert that
+ * a call is still pending at one point on the fake clock and rejected at the
+ * next. Awaiting instead would turn a missing deadline into a test-runner
+ * timeout rather than a readable failure.
+ */
+function settlement(promise: Promise<unknown>): { readonly outcome: string | undefined } {
+  const box: { outcome: string | undefined } = { outcome: undefined };
+  void promise.then(
+    () => { box.outcome = "resolved"; },
+    (error: unknown) => { box.outcome = `rejected: ${(error as Error).message}`; },
+  );
+  return box;
+}
+
 // The fixture daemon now mutates session rows the way a real one does — a
 // rename changes what the next `list` reports — so the rows are restored
 // between tests instead of being handed on half-renamed.
@@ -328,6 +372,7 @@ const pristineSessions = structuredClone(fixture.sessions);
 const pristineConnectionState = structuredClone(fixture.connectionState);
 
 afterEach(() => {
+  fixture.requestTimeouts = [];
   fixture.sessions = structuredClone(pristineSessions);
   fixture.connectionState = structuredClone(pristineConnectionState);
   delete (globalThis as typeof globalThis & { __primeWebFixture?: FixtureState }).__primeWebFixture;
@@ -2406,6 +2451,260 @@ describe("PrimeBackend", () => {
       vi.useRealTimers();
       fixture.snapshot = originalSnapshot;
       fixture.sessionStats = originalStats;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+
+  /* A stalled daemon used to hold the awaiting HTTP request open with nothing
+     left to end it: three awaits below took no deadline while their neighbours
+     did. Each test drives the stall on the fake clock, so it proves the
+     deadline itself rather than spending it. */
+
+  it("bounds the daemon list so a stalled daemon cannot wedge a catalog refresh", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.requestTimeouts = [];
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    // The poll would queue refreshes of its own across the advanced time; this
+    // test is about the deadline on a single call.
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+
+      // The daemon accepts the call and then never answers it.
+      fixture.listDelayMs = 10 * 60_000;
+      const refresh = settlement(Reflect.get(backend, "refreshCatalog").call(backend, false) as Promise<void>);
+      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS - 1);
+      expect(refresh.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(refresh.outcome).toBe("rejected: Prime daemon list failed");
+      expect(fixture.requestTimeouts).toContainEqual({ type: "list", timeoutMs: PRIME_LIST_TIMEOUT_MS });
+    } finally {
+      fixture.listDelayMs = 0;
+      // Anything still parked on the fake clock has to finish before real
+      // timers return, or an assertion failure would surface as a hung
+      // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("bounds the module attach and disposes a connection that lands after the deadline", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.attachDelayMs = 0;
+    fixture.attachCount = 0;
+    fixture.disposed = 0;
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      const agentId = backend.catalog().agents[0].id;
+
+      // attach() takes no timeout argument, and the module can sit on it.
+      fixture.attachDelayMs = 6 * PRIME_ATTACH_TIMEOUT_MS;
+      const snapshot = settlement(backend.agentSnapshot(agentId));
+      await vi.advanceTimersByTimeAsync(PRIME_ATTACH_TIMEOUT_MS - 1);
+      expect(snapshot.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(snapshot.outcome).toBe(`rejected: Prime agent attach timed out after ${PRIME_ATTACH_TIMEOUT_MS}ms`);
+      expect(fixture.attachCount).toBe(1);
+      expect(fixture.disposed).toBe(0);
+
+      // The abandoned attach still lands. No record was ever built from it, so
+      // unless the timeout path disposes it the daemon subscription leaks for
+      // the lifetime of the gateway.
+      await vi.advanceTimersByTimeAsync(6 * PRIME_ATTACH_TIMEOUT_MS);
+      expect(fixture.disposed).toBe(1);
+    } finally {
+      fixture.attachDelayMs = 0;
+      // Anything still parked on the fake clock has to finish before real
+      // timers return, or an assertion failure would surface as a hung
+      // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("bounds the initial snapshot generously and disposes the half-built connection", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.attachDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.disposed = 0;
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      const agentId = backend.catalog().agents[0].id;
+
+      // Sessions here reach 24 MB, and the first snapshot reads all of it, so a
+      // control-plane deadline on this call would break the largest sessions.
+      expect(PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
+      fixture.snapshotDelayMs = 2 * PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS;
+      const snapshot = settlement(backend.agentSnapshot(agentId));
+      // A 24 MB transcript is slow, not stalled: nothing may cut it off early.
+      await vi.advanceTimersByTimeAsync(PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS - 1);
+      expect(snapshot.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(snapshot.outcome)
+        .toBe(`rejected: Prime initial snapshot timed out after ${PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS}ms`);
+      // The timeout goes through the existing catch, so the record it left
+      // behind — subscription included — is torn down like any other failure.
+      expect(fixture.disposed).toBe(1);
+      expect(Reflect.get(backend, "connections")).toHaveProperty("size", 0);
+    } finally {
+      fixture.snapshotDelayMs = 0;
+      // Anything still parked on the fake clock has to finish before real
+      // timers return, or an assertion failure would surface as a hung
+      // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+
+  it("bounds the reconnect probe so a silent daemon cannot stall the reconnect ladder", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.connectError = false;
+    fixture.listDelayMs = 0;
+    fixture.failClientsBelow = 0;
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    Reflect.set(backend, "reconnectDelaysMs", [10]);
+    const hub = new EventHub();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+
+      // The daemon still accepts sockets but has stopped answering them, so the
+      // probe that proves a replacement client works never comes back.
+      fixture.listDelayMs = 10 * 60_000;
+      fixture.requestTimeouts = [];
+      Reflect.get(backend, "noteDaemonFailure").call(backend);
+      await vi.advanceTimersByTimeAsync(11);
+      const created = fixture.clientsCreated;
+      const closed = fixture.clientsClosed;
+      expect(created).toBeGreaterThan(0);
+
+      // While the probe is inside its budget the attempt is still running.
+      // (Short of the full budget: the probe started a few ticks ago.)
+      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS - 5);
+      expect(fixture.clientsCreated).toBe(created);
+      expect(fixture.clientsClosed).toBe(closed);
+
+      // Past the deadline the attempt gives up: the stalled socket is closed
+      // and the ladder reaches its next rung instead of parking forever.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(fixture.clientsClosed).toBeGreaterThan(closed);
+      expect(fixture.clientsCreated).toBeGreaterThan(created);
+      expect(fixture.requestTimeouts).toContainEqual({ type: "list", timeoutMs: PRIME_LIST_TIMEOUT_MS });
+
+      // And the ladder is still live: once the daemon answers, it reconnects.
+      fixture.listDelayMs = 0;
+      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS + 100);
+      expect(error).toHaveBeenCalledWith("Prime daemon reconnected");
+    } finally {
+      fixture.listDelayMs = 0;
+      // Anything still parked on the fake clock has to finish before real
+      // timers return, or an assertion failure would surface as a hung
+      // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      error.mockRestore();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("bounds a connection refresh and frees its queue to retry instead of wedging it", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.listError = false;
+    fixture.connectError = false;
+    fixture.snapshotError = false;
+    fixture.listDelayMs = 0;
+    fixture.snapshotDelayMs = 0;
+    fixture.attachDelayMs = 0;
+    fixture.disposed = 0;
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    Reflect.set(backend, "connectionRefreshRetryDelaysMs", [10]);
+    const hub = new EventHub();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      const agentId = backend.catalog().agents[0].id;
+      const opened = backend.agentSnapshot(agentId);
+      await vi.advanceTimersByTimeAsync(50);
+      await opened;
+
+      // The refresh path re-reads the whole transcript on an established
+      // connection. respondToAttention awaits this in a finally, so an
+      // unbounded one holds that HTTP request open with nothing to end it.
+      fixture.snapshotDelayMs = 10 * 60_000;
+      const refresh = settlement(Reflect.get(backend, "refreshConnection").call(backend, agentId) as Promise<void>);
+      await vi.advanceTimersByTimeAsync(PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS - 1);
+      expect(refresh.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(refresh.outcome)
+        .toBe(`rejected: Prime connection refresh snapshot timed out after ${PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS}ms`);
+
+      // One stalled refresh is not proof the connection is dead, so unlike the
+      // create path nothing is torn down here.
+      expect(fixture.disposed).toBe(0);
+      expect(Reflect.get(backend, "connections")).toHaveProperty("size", 1);
+      expect(error.mock.calls.filter((call) =>
+        call[0] === "Prime agent refresh failed; retrying with backoff")).toHaveLength(1);
+
+      // The queue was freed, not wedged: its own retry ladder picks the work up
+      // again and converges once the daemon answers.
+      fixture.snapshotDelayMs = 0;
+      (fixture.snapshot.state as Record<string, unknown>).recap = "Recovered after the deadline";
+      await vi.advanceTimersByTimeAsync(100);
+      expect(error).toHaveBeenCalledWith("Prime agent refresh recovered");
+      expect((await backend.agentSnapshot(agentId))?.dashboard?.recap).toBe("Recovered after the deadline");
+    } finally {
+      fixture.snapshotDelayMs = 0;
+      fixture.snapshot = originalSnapshot;
+      // Anything still parked on the fake clock has to finish before real
+      // timers return, or an assertion failure would surface as a hung
+      // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      error.mockRestore();
       hub.close();
       await backend.close();
     }
