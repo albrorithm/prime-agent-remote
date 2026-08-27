@@ -12,48 +12,45 @@ or sponsored by Prime Intellect.
 Prime Agent itself must be installed (`npm install -g prime-agent`). Then:
 
 ```bash
+git clone https://github.com/albrorithm/prime-agent-mobile.git
+cd prime-agent-mobile
 npm install
-npm run build
-./dist-server/cli/index.js start
+npm link
+prime-agent-mobile install-command
 ```
 
-That is the whole setup for running it from this checkout. The launcher finds
+`npm install` builds both halves on its way through — the `prepare` script runs
+the build — so there is no separate build step to remember. `npm link` puts the
+CLI on PATH. `install-command` adds `/webui` to Prime Agent, which is where
+most people will start this from; it is a separate step because writing into
+another tool's configuration is not something an `npm install` should do behind
+your back, and because `/webui` shells out to the CLI by name and cannot work
+before PATH has it.
+
+Then, from a Prime Agent session:
+
+```
+/webui start
+```
+
+or from a terminal, `prime-agent-mobile start`. Either way the launcher finds
 your Prime Agent build, notices whether Tailscale is running, mints a setup
 token the first time and reuses it afterwards, and prints the address to open
 along with the token.
 
-### Getting `prime-agent-mobile` onto PATH
+If you would rather not link anything globally, `./dist-server/cli/index.js
+start` runs the same launcher straight out of the checkout. `/webui` will not
+be available.
 
-Typing the full path to `dist-server/cli/index.js` is not required. `/webui`
-(see below) shells out to a bare `prime-agent-mobile`, and if that is not
-found on PATH it says so and points back here. Two ways to get it there, both
-of which build the package for you via its `prepare` script — no separate
-`npm run build`:
+### Installing without a checkout
 
-- **From this checkout**, so the command tracks your edits:
-  ```bash
-  npm install
-  npm link
-  ```
-- **As a standalone install**, once this package is published to npm:
-  ```bash
-  npm install -g prime-agent-mobile
-  ```
-  Until then, install straight from GitHub:
-  ```bash
-  npm install -g git+https://github.com/albrorithm/prime-agent-mobile.git
-  ```
-  npm 11 and newer gate a git dependency's `prepare` script behind explicit
-  approval (`npm help install-scripts`) and silently skip it otherwise,
-  which leaves the CLI unbuilt with no error. If `prime-agent-mobile help`
-  comes back empty right after installing this way, that is why — approve
-  the script (npm will tell you the exact command; it names this package)
-  and reinstall. If that does not take, the checkout path above always
-  works and is the more reliable option until this is published.
-
-  This does not affect `npm install -g prime-agent-mobile` once published —
-  the registry tarball ships `dist/` and `dist-server/` already built, so
-  nothing needs to run at install time.
+`npm install -g git+https://github.com/albrorithm/prime-agent-mobile.git`
+works, with one catch: npm 11 gates a git dependency's `prepare` script behind
+explicit approval and skips it silently otherwise, which leaves the CLI unbuilt
+with no error. If `prime-agent-mobile help` comes back empty right after
+installing that way, that is why; approve the script and reinstall.
+`install-command` checks for this and says so rather than reporting a `/webui`
+that cannot run.
 
 ```
 prime-agent-mobile start      Start it in the background
@@ -97,13 +94,18 @@ anyone become a paired device.
 
 ## From inside Prime Agent
 
-```bash
-prime-agent-mobile install-command
+`/webui` is installed by `prime-agent-mobile install-command` (see above). It
+copies `extensions/webui.ts` into `~/.prime/agent/extensions/`, so the command
+exists in every session rather than only inside this checkout — and being a
+copy, it needs re-running after that file changes.
+
+```
+/webui [status|start|stop|token|help]
 ```
 
-`/webui` then reports where the interface is served and starts it if it is not
-running. It is a thin wrapper over the same CLI, and it never parents the
-gateway to a session.
+It reports where the interface is served and starts it if it is not running.
+It is a thin wrapper over the same CLI, and it never parents the gateway to a
+session.
 
 ## What it does
 
