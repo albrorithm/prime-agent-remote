@@ -411,7 +411,16 @@ function boundedId(value: unknown): string | undefined {
   return id && !/[\u0000-\u001f\u007f]/u.test(id) ? id : undefined;
 }
 
-function isEmptyStub(summary: PrimeSessionSummary): boolean {
+/* The daemon lists blank stub sessions that are not real work, and they used to
+   show up as ghost "Untitled" rows. A stub is a session with nothing to put in a
+   row: no title of any kind, and either no active session or no messages yet.
+
+   `ownCreations` is the exception. A session this gateway just created on the
+   user's behalf has no title and no messages by definition — that is what a new
+   session is — so without this it would be filtered away the instant it was
+   made. We know it is not a ghost because we asked for it. */
+function isEmptyStub(summary: PrimeSessionSummary, ownCreations: ReadonlySet<string>): boolean {
+  if (ownCreations.has(summary.sessionId)) return false;
   const firstMessage = typeof summary.firstMessage === "string" ? summary.firstMessage.trim() : "";
   const hasTitle = Boolean(summary.sessionName || summary.summary || (firstMessage && firstMessage !== "(no messages)"));
   if (hasTitle) return false;
@@ -1500,6 +1509,9 @@ export class PrimeBackend implements AgentBackend {
   private rawSummaries = new Map<string, PrimeSessionSummary>();
   private publicBySession = new Map<string, string>();
   private publicByActive = new Map<string, string>();
+  /* Daemon session ids this gateway created itself, so `isEmptyStub` keeps a
+     brand-new empty session visible long enough for the user to type into it. */
+  private ownCreations = new Set<string>();
   private readonly snapshots = new Map<string, AgentSnapshot>();
   private readonly connections = new Map<string, ConnectionRecord>();
   private readonly connectionPromises = new Map<string, Promise<ConnectionRecord>>();
@@ -2164,13 +2176,17 @@ export class PrimeBackend implements AgentBackend {
 
   async createSession(input: CreateSessionInput): Promise<SessionCreated> {
     if (!path.isAbsolute(input.cwd)) throw new BackendCapabilityError("Working directory must be an absolute path");
-    const baseName = input.name?.trim() || path.basename(input.cwd) || "New session";
-    const name = uniqueSessionName(baseName, this.catalogState.agents.map((agent) => agent.name));
+    /* Only a name the user actually typed is sent. The daemon leaves `sessionName`
+       unset when we omit it, which is what makes it mean "a person named this" —
+       and that is what lets the daemon's own recap be the title of everything
+       else. Inventing `basename(cwd)` here made every session look named, so the
+       recap could never win and rows read "primeA-mobile-ui 7". */
+    const name = input.name?.trim();
     let response: PrimeResponse;
     try {
       response = await this.client.request({
         type: "create",
-        name,
+        ...(name ? { name } : {}),
         config: { cwd: input.cwd },
       });
     } catch {
@@ -2180,6 +2196,7 @@ export class PrimeBackend implements AgentBackend {
     const data = primeRecord(response.data);
     const activeSessionId = boundedId(data?.activeSessionId) ?? null;
     const sessionId = boundedId(data?.sessionId) ?? null;
+    if (sessionId) this.ownCreations.add(sessionId);
     await this.refreshCatalog(true);
     const publicId = (activeSessionId && this.publicByActive.get(activeSessionId))
       ?? (sessionId && this.publicBySession.get(sessionId))
@@ -2258,7 +2275,7 @@ export class PrimeBackend implements AgentBackend {
     this.publicBySession = nextPublicBySession;
     this.publicByActive = nextPublicByActive;
     const projected = summaries
-      .filter((summary) => !isEmptyStub(summary))
+      .filter((summary) => !isEmptyStub(summary, this.ownCreations))
       .map((summary) => this.projectSummary(summary));
     const roots = new Map(projected.map((summary) => [summary.id, summary]));
     for (const item of projected) {
@@ -2322,17 +2339,24 @@ export class PrimeBackend implements AgentBackend {
         : summary.lifecycle === "draft" || summary.workerState === "starting" || summary.workerState === "recovering"
           ? "starting"
           : "live";
-    const name = conciseTitle(summary.sessionName)
-      ?? conciseTitle(summary.firstMessage)
-      ?? conciseTitle(summary.summary)
-      ?? (parentId ? "Subagent" : "Untitled session");
+    /* The daemon's own summarizer writes `summary` — a present-tense clause of at
+       most twelve words describing what this agent is doing. It is the best title
+       material available and it re-runs as the work moves on, so it is the
+       subtitle wherever something more stable exists to head the row, and the
+       title itself only when nothing does. */
+    const recap = conciseTitle(summary.summary);
+    const title = conciseTitle(summary.sessionName) ?? conciseTitle(summary.firstMessage);
+    const name = title ?? recap ?? (parentId ? "Subagent" : "Untitled session");
+    /* Absent, not invented: a row with no recap should fall back to its working
+       directory on the client, which it cannot do if we hand it boilerplate. */
+    const description = title ? recap : undefined;
     return {
       id,
       rootId: id,
       parentId,
       depth: Math.max(0, summary.rlmDepth ?? (parentId ? 1 : 0)),
       name,
-      description: summary.summary || (parentId ? "Delegated agent" : "Prime Agent session"),
+      ...(description ? { description } : {}),
       cwd: typeof summary.cwd === "string" && summary.cwd ? summary.cwd : undefined,
       lifecycle,
       activity: attention ? "blocked" : working ? "working" : "idle",

@@ -20,8 +20,11 @@ export function directoryLeaf(cwd: string | undefined): string | null {
   return parts.at(-1) ?? null;
 }
 
+/* The daemon's recap — what this agent is doing right now — says more than the
+   folder it is doing it in, and the folder is often already the row's title. It
+   only arrives for live sessions, so the directory stays the fallback. */
 function subtitle(agent: AgentSummary): string {
-  return directoryLeaf(agent.cwd) || agent.description || agentStatus(agent).label;
+  return agent.description || directoryLeaf(agent.cwd) || agentStatus(agent).label;
 }
 
 function StateIcon({ agent }: { agent: AgentSummary }) {

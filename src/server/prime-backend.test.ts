@@ -217,6 +217,10 @@ export class DaemonClient {
         activeSessionId,
         sessionName: command.name ?? null,
         firstMessage: "(no messages)",
+        // The daemon calls a session with no messages a draft, and a new one
+        // never has any. Without this the fixture reports a fresher-than-real
+        // session and the empty-stub filter is never actually exercised.
+        lifecycle: "draft",
       });
       return { success: true, data: { activeSessionId, sessionId } };
     }
@@ -1524,8 +1528,25 @@ describe("PrimeBackend", () => {
         cwd: "/projects/new-thing",
         name: "Fresh start",
       });
-      expect(fixture.creates[1]).toMatchObject({ name: "Fresh start 2", config: { cwd: "/projects/new-thing" } });
+      // A name the user typed is sent as typed, duplicate or not. Renaming it to
+      // "Fresh start 2" was this gateway inventing names, which is the thing that
+      // made every session look explicitly named.
+      expect(fixture.creates[1]).toMatchObject({ name: "Fresh start", config: { cwd: "/projects/new-thing" } });
       expect(second.agentId).not.toBe(result.agentId);
+
+      // No name typed: nothing is sent, so the daemon leaves `sessionName` unset
+      // and it goes on meaning "a person named this". The row must still appear —
+      // an unnamed, message-less session is precisely what the empty-stub filter
+      // throws away, and this one is ours.
+      const unnamed = await backend.createSession({
+        requestId: crypto.randomUUID(),
+        cwd: "/projects/new-thing",
+      });
+      expect(fixture.creates[2]).toEqual({ type: "create", config: { cwd: "/projects/new-thing" } });
+      const blank = backend.catalog().agents.find((agent) => agent.id === unnamed.agentId);
+      expect(blank).toBeDefined();
+      expect(blank?.name).toBe("Untitled session");
+      expect(hub.has(`agent:${unnamed.agentId}`)).toBe(true);
     } finally {
       fixture.sessions = originalSessions;
       hub.close();
