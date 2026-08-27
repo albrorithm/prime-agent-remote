@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
@@ -84,16 +85,58 @@ export interface ResolvedStatus {
   stale: boolean;
 }
 
+/** The gateway's entry path, as it appears in the launched process's argv. */
+export const GATEWAY_ENTRY_MARKER = path.join("dist-server", "server", "index.js");
+
+function readProcessCommand(pid: number): string | null {
+  try {
+    return execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether this pid is still *our* gateway rather than an unrelated process
+ * that inherited the number.
+ *
+ * `kill(pid, 0)` only answers "does some process hold this number", and pids
+ * get reused. `stop` signals the process *group* and now escalates to SIGKILL,
+ * so acting on a recycled pid does not merely fail — it force-kills whatever
+ * the operating system handed the number to next. Checking argv is the same
+ * question a `pkill` pattern should have been asked before it was run: what
+ * else matches this?
+ *
+ * A hung gateway still carries the right argv, so this does not cost the
+ * ability to kill one that has stopped answering. If `ps` cannot be read at
+ * all the check abstains rather than declaring the gateway gone, because
+ * refusing to stop a gateway that is genuinely running is its own failure.
+ */
+export function isGatewayProcess(
+  pid: number,
+  marker: string = GATEWAY_ENTRY_MARKER,
+  read: (pid: number) => string | null = readProcessCommand,
+): boolean {
+  const command = read(pid);
+  if (command === null || command === "") return true;
+  return command.includes(marker);
+}
+
 /**
  * A state file outlives a crash, so its presence is not evidence. The pid is
- * checked before anything reports the gateway as running.
+ * checked before anything reports the gateway as running — and so is what the
+ * pid actually belongs to.
  */
 export async function resolveStatus(
   filePath: string,
   alive: (pid: number) => boolean = (pid) => isProcessAlive(pid),
+  isOurs: (pid: number) => boolean = (pid) => isGatewayProcess(pid),
 ): Promise<ResolvedStatus> {
   const state = await readGatewayState(filePath);
   if (!state) return { running: false, state: null, stale: false };
-  if (!alive(state.pid)) return { running: false, state, stale: true };
+  if (!alive(state.pid) || !isOurs(state.pid)) return { running: false, state, stale: true };
   return { running: true, state, stale: false };
 }

@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   type GatewayState,
+  GATEWAY_ENTRY_MARKER,
   clearGatewayState,
+  isGatewayProcess,
   isProcessAlive,
   readGatewayState,
   resolveStatus,
@@ -93,5 +95,43 @@ describe("resolveStatus", () => {
     await writeGatewayState(filePath, sample);
     const status = await resolveStatus(filePath, () => true);
     expect(status).toEqual({ running: true, state: sample, stale: false });
+  });
+});
+
+describe("isGatewayProcess", () => {
+  // The pid-reuse edge: `stop` signals the process GROUP and escalates to
+  // SIGKILL, so acting on a recycled pid force-kills a bystander.
+  it("recognises our own gateway from its argv", () => {
+    const command = "/opt/homebrew/bin/node /Users/someone/app/dist-server/server/index.js";
+    expect(isGatewayProcess(1234, GATEWAY_ENTRY_MARKER, () => command)).toBe(true);
+  });
+
+  it("rejects an unrelated process that inherited the pid", () => {
+    for (const command of [
+      "/usr/sbin/cupsd -l",
+      "node /Users/someone/other-project/dist-server/server/other.js",
+      "/opt/homebrew/bin/node /Users/someone/app/dist-server/cli/index.js status",
+    ]) {
+      expect(isGatewayProcess(1234, GATEWAY_ENTRY_MARKER, () => command)).toBe(false);
+    }
+  });
+
+  // Refusing to stop a gateway that IS running is its own failure, so an
+  // unreadable `ps` abstains rather than declaring the gateway gone.
+  it("abstains when the process list cannot be read", () => {
+    expect(isGatewayProcess(1234, GATEWAY_ENTRY_MARKER, () => null)).toBe(true);
+    expect(isGatewayProcess(1234, GATEWAY_ENTRY_MARKER, () => "")).toBe(true);
+  });
+
+  it("treats a recycled pid as not running, so stop leaves it alone", async () => {
+    const file = path.join(directory, "recycled.json");
+    await writeGatewayState(file, {
+      pid: 4321, url: "http://127.0.0.1:8787", host: "127.0.0.1", port: 8787,
+      mode: "loopback", backend: "demo", startedAt: new Date(0).toISOString(),
+    });
+    const resolved = await resolveStatus(file, () => true, () => false);
+    expect(resolved.running).toBe(false);
+    expect(resolved.stale).toBe(true);
+    expect(resolved.state?.pid).toBe(4321);
   });
 });
