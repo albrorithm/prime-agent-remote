@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
+import { CONFIG_FILE_VARIABLES } from "./config.js";
 
 interface RunningGateway {
   child: ChildProcess;
@@ -29,16 +30,34 @@ async function unusedPort(): Promise<number> {
   return port;
 }
 
+/* Keep a spawned gateway off EVERY store the operator actually uses.
+
+   Only the push store was redirected once, so each run of this file paid three
+   test devices into the real ~/.config/prime-agent-web/devices.json — which
+   evicts by insertion order at MAX_DEVICES, so a long enough run of `npm test`
+   would silently unpair the operator's phone.
+
+   That was fixed by hand-writing the list, twice, in the two places this file
+   spawns a gateway, under a comment asking the next person to extend it. The
+   next person added vapid-keys.json and extended neither, so `npm test` wrote a
+   generated keypair into the real config directory — and fixing only the first
+   list left the second one still doing it, because `index.ts` resolves its
+   config before it discovers the port is taken.
+
+   One helper, enumerating CONFIG_FILE_VARIABLES: a new store is redirected by
+   existing rather than by being remembered, and there is one place to be wrong
+   instead of two. `config.test.ts` asserts that map is complete. */
+function storeEnv(stores: string): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(CONFIG_FILE_VARIABLES).map(([field, variable]) => [variable, join(stores, `${field}.json`)]),
+  );
+}
+
 async function startGateway(extraEnv: Record<string, string> = {}): Promise<RunningGateway> {
   const port = await unusedPort();
-  /* Keep the spawned gateway off EVERY store the operator actually uses.
-     Only the push store was redirected here, so each run of this file paid
-     three test devices into the real ~/.config/prime-agent-web/devices.json —
-     which evicts by insertion order at MAX_DEVICES, so a long enough run of
-     `npm test` would silently unpair the operator's phone. Any new
-     configFilePath()-derived store belongs in this list too. */
   const stores = await mkdtemp(join(tmpdir(), "gateway-stores-"));
-  const pushStore = join(stores, "push-subscriptions.json");
+  const redirectedStores = storeEnv(stores);
+  const pushStore = redirectedStores[CONFIG_FILE_VARIABLES.webPushStorePath]!;
   const origin = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "src/server/index.ts")], {
     cwd: process.cwd(),
@@ -51,10 +70,7 @@ async function startGateway(extraEnv: Record<string, string> = {}): Promise<Runn
       PRIME_WEB_PAIRING_TOKEN: "transport-test-token",
       PRIME_WEB_BACKEND: "demo",
       PRIME_WEB_SECURE_COOKIE: "false",
-      PRIME_WEB_PUSH_STORE: pushStore,
-      PRIME_WEB_DEVICE_STORE: join(stores, "devices.json"),
-      PRIME_WEB_PAIRING_TOKEN_FILE: join(stores, "pairing-token"),
-      PRIME_WEB_STATE_FILE: join(stores, "gateway.json"),
+      ...redirectedStores,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -277,10 +293,9 @@ describe("gateway startup and shutdown", () => {
           PRIME_WEB_PAIRING_TOKEN: "transport-test-token",
           PRIME_WEB_BACKEND: "demo",
           PRIME_WEB_SECURE_COOKIE: "false",
-          PRIME_WEB_PUSH_STORE: join(stores, "push-subscriptions.json"),
-          PRIME_WEB_DEVICE_STORE: join(stores, "devices.json"),
-          PRIME_WEB_PAIRING_TOKEN_FILE: join(stores, "pairing-token"),
-          PRIME_WEB_STATE_FILE: join(stores, "gateway.json"),
+          // index.ts resolves its config, minting stores, before it ever tries
+          // to bind — so a gateway that fails on a taken port still writes.
+          ...storeEnv(stores),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });

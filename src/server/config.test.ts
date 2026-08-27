@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_VAPID_SUBJECT, loadConfig } from "./config.js";
+import { CONFIG_FILE_VARIABLES, DEFAULT_VAPID_SUBJECT, loadConfig } from "./config.js";
 
 const strongToken = "a-random-production-pairing-token-0001";
 // A real generated pair; only the decoded lengths (65 and 32 bytes) matter here.
@@ -157,6 +157,28 @@ describe("loadConfig", () => {
   it("keeps the minted keypair beside the other gateway state", () => {
     expect(loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: "/srv/config" }).vapidKeysPath)
       .toBe("/srv/config/prime-agent-web/vapid-keys.json");
+  });
+
+  /**
+   * The guard for a mistake already made twice: a new store is added, the test
+   * that spawns a real gateway is not told about it, and `npm test` writes into
+   * the operator's own configuration. `index.test.ts` builds its overrides from
+   * CONFIG_FILE_VARIABLES, so this asserts the map is complete — every config
+   * field that lands under the config directory has an entry, and every entry
+   * actually redirects its field.
+   */
+  it("names every writable store, so nothing can be redirected by accident", () => {
+    const home = loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: "/srv/config" });
+    const underConfigHome = Object.entries(home)
+      .filter(([, value]) => typeof value === "string" && value.startsWith("/srv/config/prime-agent-web/"))
+      .map(([field]) => field);
+
+    expect(underConfigHome.sort()).toEqual(Object.keys(CONFIG_FILE_VARIABLES).sort());
+
+    for (const [field, variable] of Object.entries(CONFIG_FILE_VARIABLES)) {
+      const redirected = loadConfig({ NODE_ENV: "test", XDG_CONFIG_HOME: "/srv/config", [variable]: "/elsewhere/x" });
+      expect(redirected[field as keyof typeof redirected]).toBe("/elsewhere/x");
+    }
   });
 
   it("rejects a truncated or non-base64url VAPID key and a bare subject", () => {

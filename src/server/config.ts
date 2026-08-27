@@ -126,9 +126,28 @@ function parseWebPush(env: NodeJS.ProcessEnv): WebPushConfig | undefined {
 }
 
 /**
- * The gateway's only persistent state. A push subscription has to outlive the
- * session that authorized it — that is the entire point of push — so it cannot
- * live beside the in-memory sessions.
+ * Every store the gateway writes, as `GatewayConfig` field → env override.
+ *
+ * This exists so a test that must keep a spawned gateway off the operator's
+ * real files can enumerate them instead of remembering them. A comment asking
+ * the next person to update a hand-written list was already there, and the next
+ * person added `vapid-keys.json` and walked straight past it — paying a
+ * generated keypair into `~/.config/prime-agent-web` on every `npm test`. A list
+ * that has to be kept in step by hand will not be.
+ */
+export const CONFIG_FILE_VARIABLES = {
+  webPushStorePath: "PRIME_WEB_PUSH_STORE",
+  vapidKeysPath: "PRIME_WEB_VAPID_KEY_FILE",
+  pairingTokenPath: "PRIME_WEB_PAIRING_TOKEN_FILE",
+  gatewayStatePath: "PRIME_WEB_STATE_FILE",
+  deviceStorePath: "PRIME_WEB_DEVICE_STORE",
+} as const satisfies Record<string, string>;
+
+/**
+ * The gateway's persistent state, all of it under one directory. These outlive
+ * the process on purpose: a push subscription has to survive the session that
+ * authorized it — that is the whole point of push — and a device credential has
+ * to survive a restart or every phone re-pairs.
  */
 function configFilePath(env: NodeJS.ProcessEnv, variable: string, filename: string): string {
   const configured = env[variable]?.trim();
@@ -232,10 +251,10 @@ export function loadConfig(env = process.env): GatewayConfig {
     webPush: configuredWebPush,
     generatedWebPush: !configuredWebPush,
     webPushSubject: parseVapidSubject(env) ?? DEFAULT_VAPID_SUBJECT,
-    vapidKeysPath: configFilePath(env, "PRIME_WEB_VAPID_KEY_FILE", "vapid-keys.json"),
-    webPushStorePath: configFilePath(env, "PRIME_WEB_PUSH_STORE", "push-subscriptions.json"),
-    pairingTokenPath: configFilePath(env, "PRIME_WEB_PAIRING_TOKEN_FILE", "pairing-token"),
-    gatewayStatePath: configFilePath(env, "PRIME_WEB_STATE_FILE", "gateway.json"),
-    deviceStorePath: configFilePath(env, "PRIME_WEB_DEVICE_STORE", "devices.json"),
+    vapidKeysPath: configFilePath(env, CONFIG_FILE_VARIABLES.vapidKeysPath, "vapid-keys.json"),
+    webPushStorePath: configFilePath(env, CONFIG_FILE_VARIABLES.webPushStorePath, "push-subscriptions.json"),
+    pairingTokenPath: configFilePath(env, CONFIG_FILE_VARIABLES.pairingTokenPath, "pairing-token"),
+    gatewayStatePath: configFilePath(env, CONFIG_FILE_VARIABLES.gatewayStatePath, "gateway.json"),
+    deviceStorePath: configFilePath(env, CONFIG_FILE_VARIABLES.deviceStorePath, "devices.json"),
   };
 }
