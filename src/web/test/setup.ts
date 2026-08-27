@@ -26,8 +26,14 @@ if (typeof globalThis.localStorage === "undefined") {
   });
 }
 
+/* This file is a global setupFile, so it also runs for the two suites that
+   declare `@vitest-environment node` — where there is no jsdom and therefore no
+   Storage of any kind. A bare `sessionStorage` there is a ReferenceError that
+   fails every test in the file, and it hid on this machine because Node 26
+   happens to define the global that Node 22, which CI runs, does not. Reaching
+   through globalThis asks the question instead of assuming the answer. */
 afterEach(() => {
   cleanup();
-  sessionStorage.clear();
-  localStorage.clear();
+  globalThis.sessionStorage?.clear();
+  globalThis.localStorage?.clear();
 });
