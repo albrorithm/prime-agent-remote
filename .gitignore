@@ -15,3 +15,7 @@ coverage/
 .playwright-mcp/
 .dist-previous/
 .dist-server-previous/
+# Machine-local Claude Code permissions. Ignored globally on one machine, which
+# is not protection a public repo can rely on: the file holds literal tokens
+# from local runs, and a contributor without that global rule would commit it.
+.claude/settings.local.json
