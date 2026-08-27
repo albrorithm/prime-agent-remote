@@ -1,4 +1,4 @@
-import { ArrowDown, Ban, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, CircleMinus, CircleX, Hourglass, Info, ListTree, LoaderCircle, Menu, MessagesSquare, OctagonAlert, Search, TriangleAlert, User, X } from "lucide-react";
+import { ArrowDown, Bot, Brain, Check, ChevronDown, ChevronRight, Circle, CircleAlert, Info, ListTree, LoaderCircle, Menu, MessagesSquare, OctagonAlert, Search, TriangleAlert, User, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { AgentSummary, ImageMimeType, TranscriptMessage } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -16,8 +16,7 @@ import { PythonCellRow } from "./PythonCellRow";
 import { RefineRow } from "./RefineRow";
 import { SwitchHapticButton } from "./SwitchHapticButton";
 import { groupIntoTurns, TurnGroup } from "./TurnGroup";
-import { agentStatus, type AgentStatusTone } from "./agent-status";
-import { collectAgentDescendants } from "./agent-tree-utils";
+import { agentStatus } from "./agent-status";
 
 interface TranscriptPanelProps {
   onOpenSessions: () => void;
@@ -68,22 +67,14 @@ function ToolStatusIcon({ status }: { status: "running" | "waiting" | "complete"
 
 // Tones differ by hue alone, which colorblind users can't rely on — every tone
 // also gets its own glyph shape.
-function StatusGlyph({ tone }: { tone: AgentStatusTone }) {
-  if (tone === "attention") return <CircleAlert aria-hidden="true" />;
-  if (tone === "failed") return <CircleX aria-hidden="true" />;
-  if (tone === "stopped") return <Ban aria-hidden="true" />;
-  if (tone === "inactive") return <CircleMinus aria-hidden="true" />;
-  if (tone === "starting") return <Hourglass aria-hidden="true" />;
-  if (tone === "working") return <LoaderCircle className="spin" aria-hidden="true" />;
-  if (tone === "blocked") return <OctagonAlert aria-hidden="true" />;
-  return <Circle aria-hidden="true" />;
-}
-
 /**
  * Keeps the agent-lineage scroller's fade mask off unless it's actually
- * clipping content, and always scrolls the current agent's name into view
- * when the selection changes (rather than leaving whatever end happened to
- * be onscreen from the previous agent).
+ * clipping content, and returns it to the root end on every selection change.
+ *
+ * It used to scroll to the far end instead, to bring the current agent's name
+ * into view — but the name no longer lives in this scroller, so scrolling away
+ * from the root only ever hid the oldest ancestor and left leading characters
+ * cut off ("ecurity revie…") when the row was re-laid out at a new width.
  */
 function useLineageOverflow(lineageKey: string, currentAgentId: string | null) {
   const ref = useRef<HTMLDivElement>(null);
@@ -105,7 +96,7 @@ function useLineageOverflow(lineageKey: string, currentAgentId: string | null) {
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
-    element.scrollLeft = element.scrollWidth;
+    element.scrollLeft = 0;
   }, [currentAgentId]);
 
   return ref;
@@ -337,7 +328,8 @@ export function TranscriptEntry({
           <ChevronDown className="notice-chevron" aria-hidden="true" />
         </summary>
         <div className="agent-message-body">
-          <MessageContent text={body} />
+          {/* Always a fully-materialized string by the time it reaches here. */}
+          <MessageContent text={body} complete />
         </div>
       </details>
     );
@@ -397,7 +389,13 @@ export function TranscriptEntry({
         {/* Search mode intentionally renders matched bodies as flat plain-text <p> so highlights stay simple. */}
         {searchTerm !== undefined
           ? <p><HighlightedText text={message.text} term={searchTerm} /></p>
-          : <MessageContent text={message.text || (message.state === "streaming" ? "Thinking…" : "")} />}
+          : <MessageContent
+              text={message.text || (message.state === "streaming" ? "Thinking…" : "")}
+              // A message that has stopped arriving is finished even if its
+              // last code fence was never closed. Without this a truncated or
+              // failed reply shows "writing…" forever and never offers Copy.
+              complete={message.state !== "streaming"}
+            />}
       </div>
       {message.state === "streaming" && <span className="streaming-indicator" aria-label="Streaming" />}
       {/* Search mode renders flattened plain text, so copying from it would hand
@@ -425,14 +423,6 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
   const childCount = selectedAgent ? catalog.agents.filter((agent) => agent.parentId === selectedAgent.id).length : 0;
   const snapshotAttention = selectedSnapshot?.attention.length ?? 0;
   const selectedStatus = selectedAgent ? agentStatus(selectedAgent) : null;
-  const selectedDescendants = useMemo(
-    () => (selectedAgent ? collectAgentDescendants(catalog.agents, selectedAgent.id) : []),
-    [catalog.agents, selectedAgent?.id],
-  );
-  // The subagent pill already pulses when a descendant is working; showing the
-  // status chip's own working glyph alongside it doubles up on the same signal.
-  const pillShowsWorking = selectedDescendants.some((agent) => agent.activity === "working");
-  const suppressWorkingChip = selectedStatus?.tone === "working" && pillShowsWorking;
   const lineageKey = lineage.map((agent) => `${agent.id}:${agent.name}`).join("|");
   const lineageRef = useLineageOverflow(lineageKey, selectedAgent?.id ?? null);
   const isDeepLineage = lineage.length > 3;
@@ -440,6 +430,10 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     ? [lineage[0], lineage[lineage.length - 2], lineage[lineage.length - 1]]
     : lineage;
   const hiddenAncestors = isDeepLineage ? lineage.slice(1, lineage.length - 2) : [];
+  // The header splits the lineage in two: everything before the current agent
+  // scrolls, the current agent's name holds its ground.
+  const ancestorLineage = displayedLineage.slice(0, -1);
+  const currentLineageAgent = displayedLineage.at(-1) ?? null;
 
   const { scrollRef, following, unseen, handleTranscriptImageLoad, updateFollowing, jumpToLatest } = useScrollFollowing({
     selectedAgentId: selectedAgent?.id ?? null,
@@ -494,9 +488,23 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           <Menu aria-hidden="true" />
           {attentionCount > 0 && <span className="icon-badge" aria-hidden="true">{attentionCount > 9 ? "9+" : attentionCount}</span>}
         </SwitchHapticButton>
+        <span
+          className={`agent-status-light ${selectedStatus?.tone ?? "idle"}`}
+          role="img"
+          aria-label={selectedStatus?.label ?? "No agent selected"}
+          title={selectedStatus?.label ?? "No agent selected"}
+        />
         <nav className="agent-hierarchy" aria-label="Agent hierarchy" data-gesture-exclusion>
-          <div className="agent-lineage" ref={lineageRef} role="group" aria-label="Agent ancestry" tabIndex={0}>
-            {displayedLineage.map((agent, index) => (
+          {/* Ancestors scroll; the current agent's name does not. Keeping the
+              name inside the scroller let it be squeezed to nothing by the
+              header's unshrinkable neighbours, and put its ellipsis off-screen
+              so long names took a hard character cut instead. */}
+          <div
+            className="agent-lineage"
+            ref={lineageRef}
+            {...(ancestorLineage.length ? { role: "group", "aria-label": "Agent ancestry", tabIndex: 0 } : {})}
+          >
+            {ancestorLineage.map((agent, index) => (
               <Fragment key={agent.id}>
                 {isDeepLineage && index === 1 && (
                   <AncestorMenu
@@ -507,26 +515,29 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                 )}
                 <span className="lineage-item">
                   {index > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
-                  {index === displayedLineage.length - 1 ? (
-                    // A root agent IS the session, so it titles by session name and
-                    // carries the working directory the way the TUI does. A subagent
-                    // titles by agent name — its lineage already names the session.
-                    !agent.parentId && cwdBasename(agent.cwd) ? (
-                      <span className="lineage-title">
-                        <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
-                        <span className="lineage-cwd" title={agent.cwd}>{cwdBasename(agent.cwd)}</span>
-                      </span>
-                    ) : (
-                      <h1 id="transcript-heading" tabIndex={-1} title={agent.name}>{agent.name}</h1>
-                    )
-                  ) : (
-                    <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
-                  )}
+                  <button onClick={() => void selectAgent(agent.id)} title={`Open ${agent.name}`}>{agent.name}</button>
                 </span>
               </Fragment>
             ))}
-            {!lineage.length && <h1 id="transcript-heading" tabIndex={-1}>Prime Agent</h1>}
           </div>
+          <span className="lineage-current">
+            {ancestorLineage.length > 0 && <ChevronRight className="lineage-separator" aria-hidden="true" />}
+            {currentLineageAgent ? (
+              // A root agent IS the session, so it titles by session name and
+              // carries the working directory the way the TUI does. A subagent
+              // titles by agent name — its lineage already names the session.
+              !currentLineageAgent.parentId && cwdBasename(currentLineageAgent.cwd) ? (
+                <span className="lineage-title">
+                  <h1 id="transcript-heading" tabIndex={-1} title={currentLineageAgent.name}>{currentLineageAgent.name}</h1>
+                  <span className="lineage-cwd" title={currentLineageAgent.cwd}>{cwdBasename(currentLineageAgent.cwd)}</span>
+                </span>
+              ) : (
+                <h1 id="transcript-heading" tabIndex={-1} title={currentLineageAgent.name}>{currentLineageAgent.name}</h1>
+              )
+            ) : (
+              <h1 id="transcript-heading" tabIndex={-1}>Prime Agent</h1>
+            )}
+          </span>
           {selectedAgent && (
             <AgentFamilyPicker
               agents={catalog.agents}
@@ -535,17 +546,6 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
             />
           )}
         </nav>
-        {!suppressWorkingChip && (
-          <span
-            className={`agent-status-chip ${selectedStatus?.tone ?? "idle"}`}
-            role="img"
-            aria-label={selectedStatus?.label ?? "No agent selected"}
-            title={selectedStatus?.label ?? "No agent selected"}
-          >
-            <StatusGlyph tone={selectedStatus?.tone ?? "idle"} />
-            <span className="agent-status-chip-label" aria-hidden="true">{selectedStatus?.label ?? "No agent selected"}</span>
-          </span>
-        )}
         {backend === "demo" && <span className="demo-badge">Demo</span>}
         <button
           className={`icon-button search-trigger ${searchOpen ? "active" : ""}`}

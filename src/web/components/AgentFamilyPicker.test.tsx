@@ -43,8 +43,12 @@ describe("forward subagent breadcrumb", () => {
       </>,
     );
 
+    // The pill shows the count alone; the noun lives in the accessible name
+    // this query already matches on, so the header keeps its width for the
+    // agent's own name.
     const trigger = screen.getByRole("button", { name: "Open 3 subagents of root, 1 working" });
-    expect(trigger).toHaveTextContent("3subagents");
+    expect(trigger).toHaveTextContent("3");
+    expect(trigger).not.toHaveTextContent("subagents");
     expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     await user.click(trigger);
@@ -143,7 +147,8 @@ describe("sibling breadcrumb for leaf agents", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "Open 1 sibling of review, 1 working" });
-    expect(trigger).toHaveTextContent("1sibling");
+    expect(trigger).toHaveTextContent("1");
+    expect(trigger).not.toHaveTextContent("sibling");
     await user.click(trigger);
 
     expect(screen.getByRole("dialog", { name: "Siblings" })).toBeInTheDocument();

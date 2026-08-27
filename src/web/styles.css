@@ -215,6 +215,13 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 }
 .conversation-stage { grid-area: 1 / 1; min-width: 0; min-height: 0; height: 100%; }
 .shell-global-ui { position: fixed; z-index: 80; inset: 0; pointer-events: none; }
+/* The layer that may speak over an open drawer.
+   `.shell-global-ui` is `position: fixed` with a z-index, so it opens a
+   stacking context: raising `.connection-banner` itself does nothing against
+   the drawers, because the whole wrapper paints at the wrapper's level. The
+   wrapper is what has to clear 90 — above both drawers, still below the image
+   viewer at 120, which is genuinely modal. */
+.shell-global-ui.is-alert-layer { z-index: 95; }
 .shell-global-ui > .connection-banner, .shell-global-ui > .gesture-hint { pointer-events: auto; }
 .shell-global-ui.is-modal-hidden { visibility: hidden; pointer-events: none; }
 .panel { display: flex; min-width: 0; min-height: 0; height: 100%; flex-direction: column; background: var(--panel); }
@@ -332,7 +339,12 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
    scales. .drawer-header has always been written this way. */
 .conversation-header { display: flex; min-height: var(--header-height); flex: 0 0 auto; align-items: center; gap: 3px; padding: 5px 7px; border-bottom: 1px solid var(--border-soft); background: var(--scrim); backdrop-filter: blur(18px); }
 .agent-hierarchy { display: flex; min-width: 0; flex: 1; align-items: center; }
+/* Ancestors are the part that may be squeezed away — they are all reachable
+   from the ancestor menu and the family picker. The current agent's name is
+   not: it is the one thing the header exists to say, so it keeps a floor
+   below which the ancestors give up their width instead. */
 .agent-lineage { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; overflow-x: auto; scrollbar-width: none; }
+.lineage-current { display: flex; min-width: min(11ch, 100%); flex: 1 1 auto; align-items: center; overflow: hidden; }
 .agent-lineage::-webkit-scrollbar { display: none; }
 .agent-lineage[data-overflowing="true"] { mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 14px), transparent 100%); }
 .lineage-item { display: inline-flex; min-width: 0; flex: 0 0 auto; align-items: center; }
@@ -340,10 +352,13 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 /* A root agent is the session, so its title stacks the session name over the
    working directory — the same two facts the TUI puts in its window title.
    Two lines at 14px + 10px still clear the 54px header. */
-.lineage-title { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; padding: 2px 4px; }
+.lineage-title { display: flex; min-width: 0; max-width: 100%; flex-direction: column; align-items: flex-start; padding: 2px 4px; }
 .lineage-title h1 { max-width: 100%; padding: 0; }
 .lineage-cwd { max-width: 100%; overflow: hidden; color: var(--muted-2); font: 500 .625rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.agent-lineage h1 { max-width: 44vw; overflow: hidden; margin: 0; padding: 6px 4px; font-size: .875rem; font-weight: 680; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
+/* The name's ellipsis has to be drawn by the box the user can see. Held
+   inside the scroller it was clipped by the scroll viewport instead, so a long
+   name was cut mid-character with the "…" rendered somewhere off to the right. */
+.lineage-current h1 { max-width: 100%; overflow: hidden; margin: 0; padding: 6px 4px; font-size: .875rem; font-weight: 680; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
 .agent-lineage button { max-width: 128px; overflow: hidden; padding: 6px 4px; border: 0; color: var(--muted); background: transparent; font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
 .agent-lineage button:hover { color: var(--text); }
 .lineage-ancestors-trigger { display: inline-flex; width: 26px; height: 30px; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; }
@@ -351,7 +366,12 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .lineage-ancestors-trigger svg { width: 15px; height: 15px; }
 .ancestor-row { width: 100%; appearance: none; border: 1px solid transparent; border-radius: 7px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
 .ancestor-row:hover, .ancestor-row:focus { border-color: var(--border); background: var(--panel-raised-2); }
-.agent-hierarchy .lineage-forward-trigger { display: inline-flex; max-width: none; min-height: 42px; align-items: center; gap: 4px; margin-left: 1px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 99px; color: var(--text-soft); background: var(--panel-raised); font-size: .6875rem; font-weight: 680; }
+/* Count and chevron only — the word ("subagents") made a pill tall and wide
+   enough to compete with the name beside it. The visible pill is small; the
+   touch target is restored to full height by the ::after overlay below, so
+   shrinking the padding does not shrink what a thumb has to hit. */
+.agent-hierarchy .lineage-forward-trigger { position: relative; display: inline-flex; max-width: none; min-height: 28px; align-items: center; gap: 3px; margin-left: 2px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 99px; color: var(--text-soft); background: var(--panel-raised); font-size: .6875rem; font-weight: 680; }
+.agent-hierarchy .lineage-forward-trigger::after { content: ""; position: absolute; inset: -7px -4px; }
 .agent-hierarchy .lineage-forward-trigger:hover { border-color: var(--border-bright); background: var(--panel-raised-3); }
 .lineage-forward-trigger > svg { width: 12px; height: 12px; flex: 0 0 auto; }
 .lineage-forward-trigger > svg:first-child { color: var(--muted); }
@@ -373,12 +393,19 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .family-agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
 .family-agent-copy strong { overflow: hidden; font-size: .75rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .family-agent-copy small { overflow: hidden; color: var(--muted); font-size: .5625rem; text-overflow: ellipsis; white-space: nowrap; }
-.agent-status-chip { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; overflow: hidden; padding: 3px 7px; border-radius: 99px; color: var(--muted); background: var(--panel-raised); font-size: .625rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.agent-status-chip svg { width: 12px; height: 12px; flex: 0 0 auto; }
-.agent-status-chip.working svg, .agent-status-chip.starting svg { animation: blink 1.4s ease-in-out infinite; }
-.agent-status-chip.attention, .agent-status-chip.blocked { color: var(--tone-attention); }
-.agent-status-chip.failed { color: var(--tone-danger); }
-.agent-status-chip.inactive, .agent-status-chip.stopped { color: var(--muted-2); }
+/* One light, no word. A status chip wide enough to say "Needs response" was
+   taking its width from the agent's name — so the header announced that
+   something needed answering while hiding which agent was asking. Colour
+   carries the state and the blink carries activity; the full wording stays in
+   the accessible name and the tooltip, and the drawer and dashboard still
+   spell every status out in text. */
+.agent-status-light { width: 9px; height: 9px; flex: 0 0 9px; margin-inline: 3px 1px; border-radius: 50%; background: var(--border-emphasis); }
+.agent-status-light.working, .agent-status-light.starting { background: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); animation: blink 1.4s ease-in-out infinite; }
+.agent-status-light.attention, .agent-status-light.blocked { background: var(--tone-attention); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-attention) 26%, transparent); animation: blink 1.4s ease-in-out infinite; }
+.agent-status-light.failed { background: var(--tone-danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-danger) 26%, transparent); }
+.agent-status-light.stopped { background: var(--muted-2); }
+/* Hollow reads as "asleep" against idle's filled dot without adding a hue. */
+.agent-status-light.inactive { background: transparent; box-shadow: inset 0 0 0 1px var(--border-emphasis); }
 .activity-trigger { position: relative; }
 .activity-trigger > span { position: absolute; top: 3px; right: 1px; display: grid; min-width: 1rem; min-height: 1rem; place-items: center; padding: 1px 4px; border: 1px solid var(--bg); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-size: .5625rem; font-weight: 800; }
 .transcript-scroll { padding: 18px 14px 24px; scroll-padding-bottom: 20px; }
@@ -961,7 +988,7 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
    the right line. 430px stays after 1099px: the narrow-phone rules refine the
    same properties and must win. */
 @media (max-width: 1099px) {
-  .agent-lineage h1 { font-size: 1rem; }
+  .lineage-current h1 { font-size: 1rem; }
   .agent-lineage button { font-size: .875rem; }
   .agent-hierarchy .lineage-forward-trigger { font-size: .8125rem; }
   .message-author { font-size: .6875rem; }
@@ -995,30 +1022,8 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 }
 
 @media (max-width: 430px) {
-  .agent-lineage h1 { max-width: 34vw; }
-  /* No breadcrumb competes for the row when the root is selected, so the
-     session title may use the width the ancestors would have taken. */
-  .lineage-title h1 { max-width: 58vw; }
-  .lineage-title { max-width: 58vw; }
+  /* The name no longer needs a viewport-relative cap: .lineage-current bounds
+     it, and the ancestors beside it yield first. */
   .agent-lineage button { max-width: 84px; }
-  .lineage-forward-label { display: none; }
-  .agent-hierarchy .lineage-forward-trigger { padding-inline: 6px; }
   .state-pill { display: none; }
-  /* Seven of the eight tones are circle-family lucide glyphs at 12px. Icon-only,
-     Circle (idle) and CircleMinus (inactive) are the same smudge on a phone, so
-     hiding the label here cost the chip its meaning. Spend width where the state
-     needs an action: the two quiet tones collapse to a presence dot (the
-     pre-chip behaviour, and the same language as .agent-state-dot), and the
-     tones that ask for something keep icon AND word. */
-  .agent-status-chip-label { display: none; }
-  .agent-status-chip { padding: 5px; }
-  .agent-status-chip.attention .agent-status-chip-label,
-  .agent-status-chip.blocked .agent-status-chip-label,
-  .agent-status-chip.failed .agent-status-chip-label { display: inline; }
-  .agent-status-chip.attention, .agent-status-chip.blocked, .agent-status-chip.failed { padding: 3px 7px; }
-  .agent-status-chip.idle > svg, .agent-status-chip.inactive > svg { display: none; }
-  .agent-status-chip.idle::before, .agent-status-chip.inactive::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
-  .agent-status-chip.idle::before { background: var(--border-emphasis); }
-  /* Hollow reads as "asleep" against idle's filled dot without adding a hue. */
-  .agent-status-chip.inactive::before { box-shadow: inset 0 0 0 1px var(--border-emphasis); }
 }

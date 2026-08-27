@@ -560,7 +560,10 @@ describe("agent switching resets scroll state", () => {
     expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument();
   });
 
-  it("suppresses the working status chip when the subagent pill already shows a descendant working", () => {
+  // The light is the only status channel in the header now, so it stays lit
+  // even when the subagent pill is pulsing for a descendant: the two say
+  // different things, and dropping it left this agent's own state unstated.
+  it("keeps this agent's status light on while the subagent pill pulses for a descendant", () => {
     const workingRoot = { ...agent("root", null, 0), activity: "working" as const };
     const workingChild = { ...agent("worker", "root", 1), activity: "working" as const };
     gatewayMock.state = {
@@ -571,8 +574,44 @@ describe("agent switching resets scroll state", () => {
       selectAgent: vi.fn(async () => {}),
     };
     render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
-    expect(screen.queryByRole("img", { name: "Working" })).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Working" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open 1 subagent of root, 1 working" })).toBeInTheDocument();
+  });
+
+  // The wording that used to sit in the header chip has to survive somewhere a
+  // screen reader can reach it, or stripping the chip would have cost the
+  // status entirely for anyone not looking at the colour.
+  it("keeps the full status wording as the light's accessible name", () => {
+    const waiting = { ...agent("root", null, 0), attention: "dialog" as const };
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [waiting] },
+      selectedAgent: waiting,
+      selectedSnapshot: { revision: 1, agentId: waiting.id, messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    expect(screen.getByRole("img", { name: "Needs response" })).toBeInTheDocument();
+  });
+
+  // Regression: the name used to live inside the horizontally-scrolling
+  // ancestry row, where the header's unshrinkable neighbours could squeeze it
+  // to nothing and its ellipsis rendered outside the scroll viewport.
+  it("keeps the current agent's name outside the scrolling ancestry row", () => {
+    const chain = [agent("root", null, 0), agent("leaf", "root", 1)];
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: chain },
+      selectedAgent: chain[1],
+      selectedSnapshot: { revision: 1, agentId: "leaf", messages: [], attention: [] },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+    };
+    const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+    const heading = screen.getByRole("heading", { name: "leaf" });
+    expect(view.container.querySelector(".agent-lineage")?.contains(heading)).toBe(false);
+    expect(view.container.querySelector(".lineage-current")?.contains(heading)).toBe(true);
+    // The ancestor is still there to navigate back to.
+    expect(screen.getByRole("button", { name: "root" })).toBeInTheDocument();
   });
 
   it("still shows the working status chip when no descendant is working", () => {
@@ -589,7 +628,7 @@ describe("agent switching resets scroll state", () => {
     expect(screen.getByRole("img", { name: "Working" })).toBeInTheDocument();
   });
 
-  it("only masks the lineage row once it actually overflows, and keeps the current agent in view", () => {
+  it("only masks the lineage row once it actually overflows, and returns it to the root end", () => {
     gatewayState("agent-a", messages(1, "a"));
     const view = render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
     const lineageRow = document.querySelector<HTMLElement>(".agent-lineage")!;
@@ -601,7 +640,9 @@ describe("agent switching resets scroll state", () => {
     view.rerender(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
 
     expect(lineageRow).toHaveAttribute("data-overflowing", "true");
-    expect(lineageRow.scrollLeft).toBe(640);
+    // The root end, not the far end: the current agent's name sits outside this
+    // scroller now, so scrolling away from the root only clips ancestors.
+    expect(lineageRow.scrollLeft).toBe(0);
   });
 
   it("collapses a deep lineage behind an ancestor menu, keeping the root and immediate parent legible", async () => {

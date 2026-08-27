@@ -282,10 +282,11 @@ export function AgentFamilyPicker({ agents, selectedAgent, onSelect }: AgentFami
           {workingCount > 0
             ? <span className="lineage-forward-working" aria-hidden="true" />
             : (siblingsMode ? <Users aria-hidden="true" /> : <GitBranch aria-hidden="true" />)}
+          {/* The count and the chevron, and no noun. "subagents" spelled out
+              made this pill wide enough to crowd the agent name beside it, and
+              the icon plus the accessible name already say what is being
+              counted. */}
           <span>{siblingsMode ? siblingCount : descendants.length}</span>
-          <span className="lineage-forward-label">
-            {siblingsMode ? `sibling${siblingCount === 1 ? "" : "s"}` : `subagent${descendants.length === 1 ? "" : "s"}`}
-          </span>
           <ChevronDown className="lineage-forward-chevron" aria-hidden="true" />
         </button>
       </span>
