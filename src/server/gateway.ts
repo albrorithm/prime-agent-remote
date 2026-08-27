@@ -57,6 +57,8 @@ import {
 export const MUTATION_WINDOW_MS = 60_000;
 export const MAX_MUTATIONS_PER_SESSION = 120;
 export const MAX_TRACKED_MUTATION_SESSIONS = 4_096;
+/** How long a shutdown waits for sockets to answer its close before cutting them. */
+export const SHUTDOWN_GRACE_MS = 500;
 
 /**
  * Retries may re-serialize the same body with a different key order; hashing a
@@ -156,6 +158,29 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     json(res, status, value);
   }
 
+  /**
+   * A rejected Origin says which origin was rejected and which setting decides.
+   *
+   * A bare "Origin validation failed" sent an operator who had changed
+   * PRIME_WEB_PORT looking anywhere but at the allowlist, which is exactly
+   * where the answer was.
+   *
+   * Deliberate about what it gives away. The origin echoed back is the one the
+   * caller just sent, so it tells an attacker nothing it did not already know,
+   * and it goes out as problem+json — never HTML — so a hostile Origin cannot
+   * be reflected into a page. The allowlist itself is never named: only the
+   * variable that holds it, which is documented anyway. Same-origin policy is
+   * not a secret, and a failure mode nobody can diagnose is its own risk.
+   */
+  function rejectOrigin(res: ServerResponse, req: IncomingMessage): void {
+    const origin = req.headers.origin;
+    const named = typeof origin === "string" && origin.length <= 256
+      ? `the origin ${JSON.stringify(origin)}`
+      : "a request with no usable Origin header";
+    problem(res, 403, "Origin validation failed",
+      `This gateway does not accept ${named}. Set PRIME_WEB_ALLOWED_ORIGINS to the origin the browser reaches it at.`);
+  }
+
   async function readJson(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
     const declaredLength = Number(req.headers["content-length"]);
     if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error("request_too_large");
@@ -225,7 +250,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     if (!pathname.startsWith("/api/")) return false;
 
     if (req.method === "POST" && pathname === "/api/v1/auth/pair") {
-      if (!auth.isAllowedOrigin(req)) { problem(res, 403, "Origin validation failed"); return true; }
+      if (!auth.isAllowedOrigin(req)) { rejectOrigin(res, req); return true; }
       const parsed = pairRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) { problem(res, 400, "Invalid pairing request"); return true; }
       const session = await auth.pair(req, res, parsed.data.token, parsed.data.deviceName);
@@ -238,7 +263,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     // what lets a phone survive a gateway restart without being handed the
     // pairing token again, and it shares the pairing rate limit.
     if (req.method === "POST" && pathname === "/api/v1/auth/resume") {
-      if (!auth.isAllowedOrigin(req)) { problem(res, 403, "Origin validation failed"); return true; }
+      if (!auth.isAllowedOrigin(req)) { rejectOrigin(res, req); return true; }
       const resumed = await auth.resume(req, res);
       if (!resumed) { problem(res, 401, "No usable device credential"); return true; }
       json(res, 200, { paired: true, csrfToken: resumed.csrfToken });
@@ -342,11 +367,17 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // is attempted first so the wake capability dies with the session, but a
       // failure to persist must not make the session unsignoutable: the record
       // is already out of this process's memory either way.
-      await pushStore.removeSession(session.id).catch((error: unknown) => {
+      // Every session this sign-out will reap, not only the one that asked:
+      // revoking the device credential takes its siblings with it, and each of
+      // them may have registered its own push subscription and its own socket.
+      const reaped = auth.sessionIdsForDevice(session);
+      await Promise.all(reaped.map((id) => pushStore.removeSession(id).catch((error: unknown) => {
         console.error("Could not persist push revocation on sign-out", error);
-      });
-      const sockets = [...(sessionSockets.get(session.id) ?? [])];
+      })));
+      const sockets = reaped.flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       await auth.signOut(res, session);
+      // A socket keeps delivering until it is told to stop: isSessionActive is
+      // only consulted on an inbound frame, and events are outbound.
       for (const ws of sockets) closeWebSocket(ws, 1008, "Signed out");
       json(res, 200, { signedOut: true });
       return true;
@@ -644,7 +675,28 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
 
   function configureWebSocket(ws: WebSocket, session: AuthenticatedSession): void {
     const subscriptions = new Map<string, () => void>();
+    /**
+     * Which subscribe each pending warmup is still working for.
+     *
+     * Attaching to a cold stream finishes an await later, and the socket is
+     * free to speak again in the meantime. Nothing recorded that: a second
+     * subscribe during the same warmup joined the same shared promise and
+     * added a second `.then`, so both attached — every event delivered twice,
+     * and the first registration orphaned for the stream's lifetime because
+     * `subscriptions` only remembers the last detach. A `detach` arriving
+     * during a warmup was ignored just as completely, attaching a stream the
+     * client had already given up on.
+     *
+     * Each subscribe claims a fresh token; a warmup only attaches while its
+     * own claim is the current one. Same shape as the fix in 55ba9b9: state
+     * read before an await has to be re-checked after it.
+     */
+    const pendingAttaches = new Map<string, symbol>();
     const finishAttach = (streamId: string, since: StreamCursor | null | undefined): void => {
+      // Settle any live subscription before adding another. Two registrations
+      // for one socket double-deliver, and only the newer detach is reachable.
+      subscriptions.get(streamId)?.();
+      subscriptions.delete(streamId);
       const attached = hub.attach(streamId, since, send);
       if (!attached) {
         send({ type: "detached", version: PROTOCOL_VERSION, streamId, reason: "stream_gone" });
@@ -666,6 +718,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       if (expiryTimer) clearTimeout(expiryTimer);
       for (const detach of subscriptions.values()) detach();
       subscriptions.clear();
+      pendingAttaches.clear();
       bound.delete(ws);
       if (bound.size === 0) sessionSockets.delete(session.id);
     };
@@ -721,24 +774,30 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         const frame = result.data;
         if (frame.type === "ping") return send({ type: "pong", version: PROTOCOL_VERSION });
         if (frame.type === "detach") {
+          pendingAttaches.delete(frame.streamId);
           subscriptions.get(frame.streamId)?.();
           subscriptions.delete(frame.streamId);
           return;
         }
-        subscriptions.get(frame.streamId)?.();
-        const warmup = warmAgentStream(frame.streamId);
+        const streamId = frame.streamId;
+        const since = frame.since;
+        const warmup = warmAgentStream(streamId);
         if (warmup) {
-          const streamId = frame.streamId;
-          const since = frame.since;
+          const claim = Symbol(streamId);
+          pendingAttaches.set(streamId, claim);
           void warmup.then(() => {
-            // The socket may have gone, or its session expired, while a large
-            // session file was being read. Both are ordinary.
+            // While a large session file was being read the socket may have
+            // gone, its session expired, or the client detached or asked
+            // again. All are ordinary, and only the newest ask may attach.
+            if (pendingAttaches.get(streamId) !== claim) return;
+            pendingAttaches.delete(streamId);
             if (ws.readyState !== ws.OPEN || !auth.isSessionActive(session)) return;
             finishAttach(streamId, since);
           });
           return;
         }
-        finishAttach(frame.streamId, frame.since);
+        pendingAttaches.delete(streamId);
+        finishAttach(streamId, since);
       } catch {
         closeWebSocket(ws, 1011, "WebSocket processing failed");
       }
@@ -789,6 +848,18 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     hub.close();
     await backend.close();
     for (const client of wss.clients) client.close(1001, "Server shutdown");
+    // `close()` only *asks*. A peer that is asleep, or whose network went away
+    // mid-session, never answers — and an upgraded socket is no longer tracked
+    // by the HTTP server, so neither `close()` nor `closeAllConnections()`
+    // reaches it. It holds the listening port until something gives up on it,
+    // which made a stop-then-start collide with the port it had just released.
+    // A live peer closes in a millisecond or two; anything still here after the
+    // grace is not going to answer.
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+    while (wss.clients.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => { setTimeout(resolve, 10).unref(); });
+    }
+    for (const client of wss.clients) client.terminate();
   }
 
   return { requestListener, upgradeListener, backend, hub, auth, pushStore, shutdown };

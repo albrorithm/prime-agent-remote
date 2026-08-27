@@ -14,6 +14,7 @@ import { EventHub } from "./event-hub.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
 import { PushService, type PushSender } from "./push-service.js";
 import { PushSubscriptionStore } from "./push-store.js";
+import { MAX_PAIR_ATTEMPTS_PER_CLIENT } from "./auth.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 
 const ORIGIN = "https://gateway.example.test";
@@ -77,6 +78,37 @@ class LazyStreamBackend extends DemoBackend {
       this.lazyHub.register(`agent:${agentId}`, snapshot);
     }
     return snapshot;
+  }
+}
+
+/**
+ * A LazyStreamBackend whose snapshot projection can be held open.
+ *
+ * The warmup window is the whole bug: on a real gateway it is however long it
+ * takes to parse a multi-megabyte session file line by line, and a phone is
+ * perfectly capable of speaking twice inside it. An ungated backend resolves
+ * in a microtask, so a test built on one closes the window before it can send
+ * the second frame and passes with the fix reverted.
+ */
+class GatedLazyStreamBackend extends LazyStreamBackend {
+  snapshotCalls = 0;
+  private release: (() => void) | null = null;
+  private gate: Promise<void> | null = null;
+
+  hold(): void {
+    this.gate = new Promise<void>((resolve) => { this.release = resolve; });
+  }
+
+  open(): void {
+    this.release?.();
+    this.gate = null;
+    this.release = null;
+  }
+
+  override async agentSnapshot(agentId: string): Promise<AgentSnapshot | null> {
+    this.snapshotCalls += 1;
+    if (this.gate) await this.gate;
+    return await super.agentSnapshot(agentId);
   }
 }
 
@@ -183,6 +215,18 @@ function openSocket(t: TestGateway, client: PairedClient): WebSocketClient {
   return new WebSocketClient(`ws://127.0.0.1:${t.port}/ws/v1/events`, {
     headers: { Origin: ORIGIN, Cookie: client.cookie },
   });
+}
+
+/**
+ * Round-trips a ping so the server has provably handled every frame sent
+ * before it. `socket.send` returns long before the gateway reads the frame, so
+ * a warmup test that opens its gate straight after a send is racing its own
+ * subject and can pass with the fix reverted.
+ */
+async function settleSocket(socket: WebSocketClient, frames: Record<string, unknown>[]): Promise<void> {
+  const before = frames.length;
+  socket.send(JSON.stringify({ type: "ping", version: 1 }));
+  await vi.waitFor(() => expect(frames.slice(before).some((frame) => frame.type === "pong")).toBe(true));
 }
 
 function rawGet(t: TestGateway, rawPath: string): Promise<{ status: number; body: string }> {
@@ -299,6 +343,114 @@ describe("gateway sign-out", () => {
       body: "{}",
     });
     expect(replay.status).toBe(401);
+  });
+
+  /* Sign-out revoked the device but left that device's other sessions alive.
+
+     A second tab, or the same phone reopened, holds its own session started
+     from the same credential. Revoking the device stopped new resumes and did
+     nothing to those: they kept working — sockets included — for the rest of
+     the 12-hour TTL, well after the person had signed out and been told they
+     were. */
+  it("reaps every session belonging to the device it signs out", async () => {
+    const t = await startGateway();
+    const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: "phone" }),
+    });
+    expect(paired.status).toBe(200);
+    const deviceCookie = paired.headers.getSetCookie()
+      .find((value) => value.startsWith("prime_web_device="))!.split(";", 1)[0];
+    const first: PairedClient = {
+      cookie: paired.headers.get("set-cookie")!.split(";", 1)[0],
+      csrfToken: ((await paired.json()) as { csrfToken: string }).csrfToken,
+    };
+
+    // A second tab on the same phone: same device credential, its own session.
+    const resumed = await fetch(`${t.baseUrl}/api/v1/auth/resume`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, Cookie: deviceCookie },
+    });
+    expect(resumed.status).toBe(200);
+    const second: PairedClient = {
+      cookie: resumed.headers.getSetCookie()
+        .find((value) => value.startsWith("prime_web_session="))!.split(";", 1)[0],
+      csrfToken: ((await resumed.json()) as { csrfToken: string }).csrfToken,
+    };
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: second.cookie } })).status).toBe(200);
+
+    const socket = openSocket(t, second);
+    await once(socket, "open");
+    // Listening before the sign-out, not after: the close lands during the
+    // request and a listener attached afterwards would wait for a second one.
+    const closed = once(socket, "close");
+
+    const signedOut = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(first),
+      body: "{}",
+    });
+    expect(signedOut.status).toBe(200);
+
+    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: second.cookie } })).status).toBe(401);
+    // And its socket is told, rather than left delivering until the TTL lapses:
+    // outbound events never consult isSessionActive.
+    const [code] = await closed;
+    expect(code).toBe(1008);
+  });
+
+  /* Behind `tailscale serve` every client is 127.0.0.1, so the five-attempts
+     "per remote address" budget was one bucket for the whole house. More than
+     five phones auto-resuming in the minute after a restart — which is exactly
+     what a restart causes — 401ed people who had paired perfectly correctly. */
+  it("budgets resumes per proven device rather than per address", async () => {
+    const t = await startGateway();
+    const cookies: string[] = [];
+    // Pairing stays address-keyed on purpose — it is the anonymous, guessable
+    // door. Pairing the maximum leaves that budget spent, which is the state a
+    // house full of already-paired phones is permanently in.
+    for (let index = 0; index < MAX_PAIR_ATTEMPTS_PER_CLIENT; index += 1) {
+      const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
+        method: "POST",
+        headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+        body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: `phone-${index}` }),
+      });
+      expect(paired.status).toBe(200);
+      cookies.push(paired.headers.getSetCookie()
+        .find((value) => value.startsWith("prime_web_device="))!.split(";", 1)[0]);
+    }
+
+    // Now the restart: every phone auto-resumes, all from one address, all
+    // inside one window. Sharing the (already spent) pairing budget refused
+    // every one of them.
+    for (const cookie of cookies) {
+      const resumed = await fetch(`${t.baseUrl}/api/v1/auth/resume`, {
+        method: "POST",
+        headers: { Origin: ORIGIN, Cookie: cookie },
+      });
+      expect(resumed.status).toBe(200);
+    }
+  });
+
+  it("still refuses, and still charges for, a device credential that does not verify", async () => {
+    const t = await startGateway();
+    for (let index = 0; index < 6; index += 1) {
+      const refused = await fetch(`${t.baseUrl}/api/v1/auth/resume`, {
+        method: "POST",
+        headers: { Origin: ORIGIN, Cookie: `prime_web_device=guess-${index}` },
+      });
+      expect(refused.status).toBe(401);
+    }
+    // An unverifiable credential is a guess, and a spent guessing budget locks
+    // the address out of pairing too — so minting a fresh id per attempt buys
+    // an attacker nothing.
+    const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
+      method: "POST",
+      headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+      body: JSON.stringify({ token: PAIRING_TOKEN }),
+    });
+    expect(paired.status).toBe(401);
   });
 
   it("resumes a paired device after a restart, without the pairing token", async () => {
@@ -436,6 +588,98 @@ describe("gateway sign-out", () => {
 
     await vi.waitFor(() => expect(frames.some((frame) => frame.type === "detached")).toBe(true));
     expect(frames.find((frame) => frame.type === "detached")).toMatchObject({ reason: "stream_gone" });
+
+    socket.close();
+  });
+
+  /* Two subscribes inside one warmup used to attach twice.
+
+     The warmup promise is shared, so a second subscribe before it resolves
+     added a second `.then` to the same promise rather than doing its own work.
+     Both continuations then called finishAttach: two hub registrations for one
+     socket, every event delivered twice, and — because `subscriptions` only
+     remembers the last detach — the first registration unreachable for the
+     stream's lifetime. Right after a restart every stream is cold, so this is
+     ordinary reconnect traffic, not a narrow race. */
+  it("attaches once when a second subscribe arrives during the same warmup", async () => {
+    const backend = new GatedLazyStreamBackend();
+    const t = await startGateway({ backend });
+    const client = await pairClient(t);
+    const body = await bootstrap(t, client);
+    const agentId = body.catalog.agents[0].id;
+    const streamId = `agent:${agentId}`;
+
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+
+    backend.hold();
+    const attach = JSON.stringify({ type: "attach", version: 1, streamId, since: null });
+    socket.send(attach);
+    // Both subscribes have to land inside the warmup window for this to be the
+    // bug under test, so wait until the server is provably inside it.
+    await vi.waitFor(() => expect(backend.snapshotCalls).toBeGreaterThan(0));
+    socket.send(attach);
+    await settleSocket(socket, frames);
+    backend.open();
+
+    await vi.waitFor(() => expect(t.gateway.hub.has(streamId)).toBe(true));
+    await vi.waitFor(() => expect(frames.some((frame) => frame.type === "snapshot")).toBe(true));
+    // The warmup is shared, so the expensive projection still happens once.
+    expect(backend.snapshotCalls).toBe(1);
+    expect(frames.filter((frame) => frame.type === "snapshot")).toHaveLength(1);
+
+    // The registration count is what actually matters, and it is only visible
+    // in delivery: one publish must reach this socket exactly once.
+    const snapshot = t.gateway.hub.getSnapshot<AgentSnapshot>(streamId);
+    if (!snapshot) throw new Error("The warmed stream has no snapshot");
+    t.gateway.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    await vi.waitFor(() => expect(frames.some((frame) => frame.type === "event")).toBe(true));
+    expect(frames.filter((frame) => frame.type === "event")).toHaveLength(1);
+
+    socket.close();
+  });
+
+  /* The same gap seen from the other side: a detach that lands mid-warmup was
+     dropped entirely, so the continuation attached a stream the client had
+     already given up on and kept feeding it events. */
+  it("does not attach a stream the client detached during its warmup", async () => {
+    const backend = new GatedLazyStreamBackend();
+    const t = await startGateway({ backend });
+    const client = await pairClient(t);
+    const body = await bootstrap(t, client);
+    const agentId = body.catalog.agents[0].id;
+    const streamId = `agent:${agentId}`;
+
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+
+    backend.hold();
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId, since: null }));
+    await vi.waitFor(() => expect(backend.snapshotCalls).toBeGreaterThan(0));
+    socket.send(JSON.stringify({ type: "detach", version: 1, streamId }));
+    await settleSocket(socket, frames);
+    backend.open();
+    await vi.waitFor(() => expect(t.gateway.hub.has(streamId)).toBe(true));
+
+    const snapshot = t.gateway.hub.getSnapshot<AgentSnapshot>(streamId);
+    if (!snapshot) throw new Error("The warmed stream has no snapshot");
+    t.gateway.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
+
+    // A snapshot names its stream directly; an event names it on the envelope.
+    const streamOf = (frame: Record<string, unknown>): string | undefined =>
+      (frame.streamId as string | undefined)
+        ?? (frame.envelope as { streamId?: string } | undefined)?.streamId;
+
+    // A synchronous attach on another stream is the barrier: frames on one
+    // socket are ordered, so anything the abandoned warmup sent is here by the
+    // time the catalog snapshot lands.
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId: "catalog", since: null }));
+    await vi.waitFor(() => expect(frames.some((frame) => streamOf(frame) === "catalog")).toBe(true));
+    expect(frames.filter((frame) => streamOf(frame) === streamId)).toHaveLength(0);
 
     socket.close();
   });

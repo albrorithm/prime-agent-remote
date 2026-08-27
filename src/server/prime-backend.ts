@@ -1964,9 +1964,9 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async rename(input: RenameInput): Promise<MutationAccepted> {
-    const summary = this.rawSummaries.get(input.agentId);
-    if (!summary) throw new BackendNotFoundError("Agent not found");
+    if (!this.rawSummaries.has(input.agentId)) throw new BackendNotFoundError("Agent not found");
     return this.withCommandLock(input.agentId, async () => {
+      const summary = this.lockedSummary(input.agentId);
       const snapshot = this.requiredSnapshot(input.agentId);
       if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
 
@@ -2014,9 +2014,9 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async stop(input: StopInput): Promise<MutationAccepted> {
-    const summary = this.rawSummaries.get(input.agentId);
-    if (!summary) throw new BackendNotFoundError("Agent not found");
+    if (!this.rawSummaries.has(input.agentId)) throw new BackendNotFoundError("Agent not found");
     return this.withCommandLock(input.agentId, async () => {
+      const summary = this.lockedSummary(input.agentId);
       const snapshot = this.requiredSnapshot(input.agentId);
       if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
       const activeSessionId = summary.activeSessionId;
@@ -2036,18 +2036,22 @@ export class PrimeBackend implements AgentBackend {
       // `reconcileConnections` keys the now-stale connection's disposal off —
       // so the cleanup is this refresh's, not a second step here.
       await this.refreshCatalog(true);
+      // The session is over, so project what the agent now is. Bumping the
+      // revision on the old snapshot would republish "responding" to every
+      // viewer of an agent that just stopped.
+      const inactiveRevision = await this.publishInactiveSnapshot(input.agentId);
       return {
         accepted: true,
         requestId: input.requestId,
-        revision: this.advanceSnapshotRevision(input.agentId),
+        revision: inactiveRevision ?? this.advanceSnapshotRevision(input.agentId),
       };
     });
   }
 
   async delete(input: DeleteInput): Promise<MutationAccepted> {
-    const summary = this.rawSummaries.get(input.agentId);
-    if (!summary) throw new BackendNotFoundError("Agent not found");
+    if (!this.rawSummaries.has(input.agentId)) throw new BackendNotFoundError("Agent not found");
     return this.withCommandLock(input.agentId, async () => {
+      const summary = this.lockedSummary(input.agentId);
       const snapshot = this.requiredSnapshot(input.agentId);
       if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
       if (summary.activeSessionId) throw new BackendCapabilityError("Stop this session before deleting it");
@@ -2521,9 +2525,18 @@ export class PrimeBackend implements AgentBackend {
     }
     if (event.type === "closed") {
       this.clearPendingExtensions(record.publicId, true);
+      const publicId = record.publicId;
+      // Nothing was published here at all, so a viewer kept the last live
+      // snapshot — "responding" — with no event ever coming to correct it.
+      const settle = (message: string): Promise<unknown> => this.refreshCatalog(true)
+        // Under the command lock, which `stop` already holds on its own path:
+        // a `send` or `resume` arriving while the transcript is being projected
+        // would otherwise be overwritten by a projection that began before it.
+        .then(() => this.withCommandLock(publicId, () => this.publishInactiveSnapshot(publicId)))
+        .catch(() => console.error(message));
       void this.disposeConnection(record).then(
-        () => this.refreshCatalog(true).catch(() => console.error("Prime catalog refresh failed after connection close")),
-        () => this.refreshCatalog(true).catch(() => console.error("Prime connection cleanup and catalog refresh failed")),
+        () => settle("Prime catalog refresh failed after connection close"),
+        () => settle("Prime connection cleanup and catalog refresh failed"),
       );
       return;
     }
@@ -2904,6 +2917,66 @@ export class PrimeBackend implements AgentBackend {
 
   private withCommandLock<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
     return withSerialLock(this.commandLocks, agentId, operation);
+  }
+
+  /**
+   * The agent's listing row, read inside the command lock rather than before it.
+   *
+   * `refreshCatalog` replaces the whole summaries map, and every mutation waits
+   * on the lock — so a row captured on the way in can be a generation out of
+   * date by the time the lock is granted. Acting on the stale copy let `stop`
+   * name an activeSessionId the daemon had already ended, and let `delete`
+   * decide on a liveness flag from before the session came back.
+   */
+  private lockedSummary(agentId: string): PrimeSessionSummary {
+    const summary = this.rawSummaries.get(agentId);
+    if (!summary) throw new BackendNotFoundError("Agent not found");
+    return summary;
+  }
+
+  /**
+   * Republish an agent as inactive once its live session has ended.
+   *
+   * `advanceSnapshotRevision` bumps and resends the snapshot it already holds.
+   * That is right for a rename, where only the name changed, and wrong here:
+   * the cached object still says `status: "responding"`, so a phone watching an
+   * agent that was just stopped sat on a spinner nothing would ever clear. A
+   * daemon-side `closed` was worse — it published nothing at all, so the freeze
+   * arrived with no notification either. Checking on an agent from a phone is
+   * what this app is for, so a status stuck on "responding" is a product
+   * failure, not a cosmetic one.
+   *
+   * The projection has to replace the cached object and not merely go out on
+   * the wire: the next attach is served from that cache and would hand back
+   * "responding" all over again.
+   */
+  private async publishInactiveSnapshot(agentId: string): Promise<number | null> {
+    const summary = this.rawSummaries.get(agentId);
+    const previous = this.snapshots.get(agentId);
+    // The agent may have been deleted while its session was closing, and a
+    // refresh may have found it live again under a new session id. An active
+    // agent's own connection owns its snapshot; leave it alone.
+    if (!summary || !previous || summary.activeSessionId) return null;
+    const inactive = await this.projectInactiveSnapshot(agentId, summary);
+    // Re-read after the await as well as before it. Projecting a saved
+    // transcript parses the whole session file, and the agent can be resumed
+    // inside that window — writing this projection over a live snapshot would
+    // report a running agent as stopped, which is the same bug in the other
+    // direction. Read-before-await has to be re-checked after it, as in 55ba9b9.
+    const current = this.snapshots.get(agentId);
+    if (!current || this.rawSummaries.get(agentId)?.activeSessionId) return null;
+    // projectInactiveSnapshot always starts a fresh snapshot at revision 1,
+    // which a client that has already seen a higher one discards as stale.
+    // Rebased on wherever the cache got to while we were projecting.
+    inactive.revision = current.revision + 1;
+    this.snapshots.set(agentId, inactive);
+    const record = this.connections.get(agentId);
+    if (record) record.revision = Math.max(record.revision, inactive.revision);
+    const streamId = `agent:${agentId}`;
+    if (this.hub.has(streamId)) {
+      this.hub.publish(streamId, { kind: "agent.replaced", payload: inactive }, inactive);
+    }
+    return inactive.revision;
   }
 
   private advanceSnapshotRevision(agentId: string): number {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
-import type { AttentionRequest, ServerFrame } from "../protocol.js";
+import type { AgentSnapshot, AttentionRequest, ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
@@ -377,6 +377,13 @@ afterEach(() => {
   fixture.connectionState = structuredClone(pristineConnectionState);
   delete (globalThis as typeof globalThis & { __primeWebFixture?: FixtureState }).__primeWebFixture;
 });
+
+/** The agent snapshots a run of frames actually put on the wire, in order. */
+function replacedSnapshots(frames: readonly ServerFrame[]): AgentSnapshot[] {
+  return frames.flatMap((frame) => frame.type === "event" && frame.envelope.event.kind === "agent.replaced"
+    ? [frame.envelope.event.payload as AgentSnapshot]
+    : []);
+}
 
 describe("projectPrimeTranscript", () => {
   it("projects rich thinking and python rows without forwarding daemon content duplicates", () => {
@@ -1301,6 +1308,84 @@ describe("PrimeBackend", () => {
         requestId: crypto.randomUUID(),
         expectedRevision: (await backend.agentSnapshot(saved!.id))!.revision,
       })).rejects.toBeInstanceOf(BackendCapabilityError);
+    } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  /* Stopping a session used to leave every viewer watching it "respond".
+
+     `advanceSnapshotRevision` bumps and republishes the snapshot already in
+     the cache, and after a stop that object still says `status: "responding"`.
+     Nothing ran the inactive projection, so the phone that pressed stop — and
+     every other phone watching — kept a spinner no later event would clear,
+     and the next attach was served the same stale object from the cache. */
+  it("publishes an inactive dashboard after stopping a session", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.kills = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      // The first call opens the connection, which advances the revision; the
+      // second reads the settled one that `stop` will check against.
+      await backend.agentSnapshot(live!.id);
+      const snapshot = await backend.agentSnapshot(live!.id);
+      const frames: ServerFrame[] = [];
+      hub.attach(`agent:${live!.id}`, null, (frame) => { frames.push(frame); });
+
+      const result = await backend.stop({
+        agentId: live!.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: snapshot!.revision,
+      });
+
+      // What went out on the wire, which is all a watching phone ever sees.
+      const latest = replacedSnapshots(frames).at(-1);
+      expect(latest).toBeDefined();
+      expect(latest!.dashboard?.status).toBe("inactive");
+      expect(latest!.revision).toBe(result.revision);
+      // A fresh projection restarts at revision 1, which a client that has seen
+      // a higher one discards as stale.
+      expect(result.revision).toBeGreaterThan(snapshot!.revision);
+      // And the cache behind the next attach, which is served without a publish.
+      expect((await backend.agentSnapshot(live!.id))?.dashboard?.status).toBe("inactive");
+    } finally {
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  /* The worse sibling: a daemon-side `closed` published nothing at all, so a
+     phone watching that agent froze on its last live snapshot with no
+     notification. This app exists to check on an agent from a phone, so a
+     status stuck on "responding" is a product failure, not a cosmetic one. */
+  it("publishes an inactive dashboard when the daemon closes a session on its own", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.snapshotDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const live = backend.catalog().agents.find((agent) => agent.lifecycle === "live");
+      const snapshot = await backend.agentSnapshot(live!.id);
+      const frames: ServerFrame[] = [];
+      hub.attach(`agent:${live!.id}`, null, (frame) => { frames.push(frame); });
+
+      // The daemon ended the session on its own: the next listing reports the
+      // row with no active id, exactly as it does after a kill.
+      const session = fixture.sessions.find((item) => item.activeSessionId === "private-active");
+      delete session!.activeSessionId;
+      session!.sessionFile = session!.sessionFile ?? "/fixture/killed-session.jsonl";
+      const listener = Reflect.get(fixture, "listener") as ((event: unknown) => void);
+      listener({ type: "closed" });
+
+      await vi.waitFor(() => expect(replacedSnapshots(frames)
+        .some((published) => published.dashboard?.status === "inactive")).toBe(true));
+      expect((await backend.agentSnapshot(live!.id))?.dashboard?.status).toBe("inactive");
+      expect((await backend.agentSnapshot(live!.id))!.revision).toBeGreaterThan(snapshot!.revision);
     } finally {
       hub.close();
       await backend.close();

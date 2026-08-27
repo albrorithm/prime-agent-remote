@@ -3,6 +3,7 @@ export class MutationCacheCapacityError extends Error {}
 
 interface MutationCacheEntry<T> {
   binding: string;
+  createdAt: number;
   expiresAt: number;
   settled: boolean;
   promise: Promise<T>;
@@ -16,6 +17,13 @@ export class MutationCache<T> {
     private readonly now: () => number = Date.now,
     private readonly maxEntries = 1_000,
     private readonly pendingTtlMs = 2 * 60_000,
+    // A retry racing a slow-but-alive operation must find the same pending
+    // promise, not trigger a second execution — so prune() never drops an
+    // unsettled entry on the ordinary TTL path (see prune()). This is the
+    // only thing that reaps an operation that never settles at all: a hard
+    // ceiling measured from creation, far longer than any real operation
+    // should take.
+    private readonly unsettledTtlMs = 30 * 60_000,
   ) {}
 
   run(sessionId: string, requestId: string, binding: string, operation: () => Promise<T>): Promise<T> {
@@ -42,6 +50,7 @@ export class MutationCache<T> {
 
     const entry: MutationCacheEntry<T> = {
       binding,
+      createdAt: this.now(),
       expiresAt: this.now() + Math.max(1, this.pendingTtlMs),
       settled: false,
       promise: Promise.resolve().then(operation),
@@ -71,7 +80,15 @@ export class MutationCache<T> {
   private prune(): void {
     const now = this.now();
     for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= now) this.entries.delete(key);
+      // A settled entry expires on the ordinary TTL. An unsettled one never
+      // does on this path — a retry for the same key must keep finding the
+      // in-flight promise, or the operation runs twice. Only an operation
+      // that has genuinely died is reaped, and only past unsettledTtlMs.
+      if (entry.settled) {
+        if (entry.expiresAt <= now) this.entries.delete(key);
+      } else if (entry.createdAt + this.unsettledTtlMs <= now) {
+        this.entries.delete(key);
+      }
     }
   }
 }

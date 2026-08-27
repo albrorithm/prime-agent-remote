@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeTranscriptPreview, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
 
+function hasNoLoneSurrogate(value: string): boolean {
+  return [...value].every((char) => {
+    const point = char.codePointAt(0) ?? 0;
+    return point < 0xd800 || point > 0xdfff;
+  });
+}
+
 describe("thinkingRecap", () => {
   it("uses the last Markdown section heading and removes its formatting", () => {
     expect(thinkingRecap("Opening note\n\n**Planning checks**\nDetails\n\n### Running validation"))
@@ -85,5 +92,64 @@ describe("tool transcript previews", () => {
     expect(sanitizeTranscriptPreview("sed -n '1,40p' 'src/web/styles.css'"))
       .toBe("sed -n '<redacted>' 'src/web/styles.css'");
     expect(sanitizeTranscriptPreview("grep -rn 'visualViewport' src")).toBe("grep -rn '<redacted>' src");
+  });
+});
+
+describe("truncate() grapheme safety", () => {
+  const FAMILY_ZWJ = "\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}"; // 👨‍👩‍👧‍👦
+  const COMBINING_E = "é"; // "e" + combining acute accent
+  const FLAG_PAIR = "\u{1F1FA}\u{1F1F8}"; // 🇺🇸 regional indicator pair
+
+  it("keeps every result free of unpaired surrogates, regardless of where the cut lands", () => {
+    const samples = [
+      sanitizeTranscriptPreview("a".repeat(18) + "\u{1F389}" + " more text after the emoji to force truncation", 20),
+      sanitizeTranscriptPreview("a".repeat(10) + FAMILY_ZWJ + " and then plenty more words after to push past threshold", 20),
+      sanitizeTranscriptPreview("a".repeat(18) + COMBINING_E + " padding words to exceed threshold nicely and reliably", 20),
+      sanitizeTranscriptPreview("a".repeat(17) + COMBINING_E + " padding words to exceed threshold nicely and reliably", 20),
+      sanitizeTranscriptPreview("a".repeat(16) + FLAG_PAIR + " padding words to exceed threshold nicely and reliably", 20),
+      sanitizeTranscriptPreview("a".repeat(15) + FLAG_PAIR + " padding words to exceed threshold nicely and reliably", 20),
+      sanitizeTranscriptPreview("\u{1F600}‍\u{1F600}‍\u{1F600}‍\u{1F600}‍\u{1F600}‍\u{1F600}‍\u{1F600}‍\u{1F600}", 20),
+    ];
+    for (const sample of samples) {
+      expect(hasNoLoneSurrogate(sample)).toBe(true);
+    }
+  });
+
+  it("excludes an astral emoji entirely rather than splitting its surrogate pair", () => {
+    expect(sanitizeTranscriptPreview("a".repeat(18) + "\u{1F389}" + " more text after the emoji to force truncation", 20))
+      .toBe(`${"a".repeat(18)}…`);
+  });
+
+  it("never splits a ZWJ sequence — it is excluded as a whole cluster when it doesn't fit", () => {
+    expect(sanitizeTranscriptPreview("a".repeat(10) + FAMILY_ZWJ + " and then plenty more words after to push past threshold", 20))
+      .toBe(`${"a".repeat(10)}…`);
+  });
+
+  it("never separates a combining mark from its base character", () => {
+    // The cluster doesn't fit at all: excluded together, not left as a bare "e".
+    expect(sanitizeTranscriptPreview("a".repeat(18) + COMBINING_E + " padding words to exceed threshold nicely and reliably", 20))
+      .toBe(`${"a".repeat(18)}…`);
+    // The cluster does fit: base and mark travel together.
+    expect(sanitizeTranscriptPreview("a".repeat(17) + COMBINING_E + " padding words to exceed threshold nicely and reliably", 20))
+      .toBe(`${"a".repeat(17)}${COMBINING_E}…`);
+  });
+
+  it("never splits a regional-indicator flag pair", () => {
+    // Doesn't fit: excluded together, not left as one dangling regional indicator.
+    expect(sanitizeTranscriptPreview("a".repeat(16) + FLAG_PAIR + " padding words to exceed threshold nicely and reliably", 20))
+      .toBe(`${"a".repeat(16)}…`);
+    // Fits: both regional indicators travel together.
+    expect(sanitizeTranscriptPreview("a".repeat(15) + FLAG_PAIR + " padding words to exceed threshold nicely and reliably", 20))
+      .toBe(`${"a".repeat(15)}${FLAG_PAIR}…`);
+  });
+
+  it("returns just the ellipsis when not even one whole grapheme fits the budget", () => {
+    const oneHugeCluster = Array.from({ length: 8 }, () => "\u{1F600}").join("‍");
+    expect(sanitizeTranscriptPreview(oneHugeCluster, 20)).toBe("…");
+  });
+
+  it("still truncates plain ASCII exactly as before (no behavior change for the common case)", () => {
+    const value = "word ".repeat(40).trim();
+    expect(sanitizeTranscriptPreview(value, 30)).toBe(`${value.slice(0, 29).trimEnd()}…`);
   });
 });

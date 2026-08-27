@@ -113,6 +113,37 @@ function parseBackend(value: string | undefined): GatewayConfig["backend"] {
   throw new Error("PRIME_WEB_BACKEND must be demo or prime");
 }
 
+/**
+ * The origins a gateway started with no explicit allowlist will accept: the Vite
+ * dev server, and the gateway's own address.
+ *
+ * The gateway's own port used to be hardcoded at 8787, so following
+ * docs/deployment.md with `PRIME_WEB_PORT=8899` and no explicit origins built a
+ * gateway that could not be paired with at all — the browser sends an Origin on
+ * the port it was actually reached at, and that origin was on no list. The CLI
+ * never hit this because it computes origins from the exposure it just set up,
+ * which is what made the documented raw-node path a trap.
+ *
+ * This is not a widening: every origin here is one this process is listening on
+ * or is developed against, and production still refuses to start without
+ * PRIME_WEB_ALLOWED_ORIGINS set explicitly.
+ */
+function defaultAllowedOrigins(host: string, port: number): string[] {
+  const origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:" + port,
+    "http://127.0.0.1:" + port,
+  ];
+  // A wildcard bind is not an origin any browser can send, so adding one would
+  // be noise. A real hostname is the address this gateway is reached at.
+  const wildcard = host === "0.0.0.0" || host === "::" || host === "[::]";
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const own = `http://${authority}:${port}`;
+  if (!wildcard && !origins.includes(own)) origins.push(own);
+  return origins;
+}
+
 export function loadConfig(env = process.env): GatewayConfig {
   const production = env.NODE_ENV === "production";
   const configuredPairingToken = env.PRIME_WEB_PAIRING_TOKEN?.trim();
@@ -132,8 +163,13 @@ export function loadConfig(env = process.env): GatewayConfig {
     throw new Error(`PRIME_WEB_PAIRING_TOKEN must be at least ${MIN_PRODUCTION_PAIRING_TOKEN_CHARS} characters in production`);
   }
 
+  // Resolved before the allowlist, which needs the port the gateway will
+  // actually bind.
+  const host = env.PRIME_WEB_HOST?.trim() || "127.0.0.1";
+  const port = parseInteger("PRIME_WEB_PORT", env.PRIME_WEB_PORT, 8787, 1, 65_535);
+
   const allowedOrigins = new Set(
-    (configuredOrigins || "http://localhost:5173,http://127.0.0.1:5173,http://127.0.0.1:8787")
+    (configuredOrigins || defaultAllowedOrigins(host, port).join(","))
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean)
@@ -148,8 +184,8 @@ export function loadConfig(env = process.env): GatewayConfig {
   if (allowedOrigins.size === 0) throw new Error("PRIME_WEB_ALLOWED_ORIGINS must contain at least one origin");
 
   return {
-    host: env.PRIME_WEB_HOST?.trim() || "127.0.0.1",
-    port: parseInteger("PRIME_WEB_PORT", env.PRIME_WEB_PORT, 8787, 1, 65_535),
+    host,
+    port,
     allowedOrigins,
     pairingToken: configuredPairingToken || randomBytes(24).toString("base64url"),
     generatedPairingToken: !configuredPairingToken,

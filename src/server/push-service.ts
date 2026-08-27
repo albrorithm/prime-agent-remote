@@ -86,8 +86,12 @@ export class PushService {
   }
 
   private async forget(subscription: StoredPushSubscription): Promise<void> {
+    // The store already applies the removal in memory and retries the write
+    // in the background even if this first attempt fails, so a rejection
+    // here just means the retry is still in flight — not that the endpoint
+    // will keep being sent to.
     await this.store.removeEndpoint(subscription.endpoint).catch(() => {
-      console.error("Could not persist removal of an expired push subscription");
+      console.error("Could not immediately persist removal of an expired push subscription; retrying in the background");
     });
   }
 }

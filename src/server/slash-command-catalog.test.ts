@@ -91,4 +91,24 @@ describe("heartbeat argument parsing", () => {
     expect(parseHeartbeatArgs("every tomorrow Check status")).toBeNull();
     expect(parseHeartbeatArgs("--steer --follow-up Check status")).toBeNull();
   });
+
+  it("rejects a schedule below the 30-second floor, across units", () => {
+    expect(parseHeartbeatArgs("every 0s Check status")).toBeNull();
+    expect(parseHeartbeatArgs("every 0m Check status")).toBeNull();
+    expect(parseHeartbeatArgs("every 0h Check status")).toBeNull();
+    expect(parseHeartbeatArgs("every 29s Check status")).toBeNull();
+  });
+
+  it("accepts a schedule at or above the 30-second floor", () => {
+    expect(parseHeartbeatArgs("every 30s Check status")).toEqual({
+      type: "set",
+      schedule: "every 30s",
+      instruction: "Check status",
+    });
+    expect(parseHeartbeatArgs("every 1m Check status")).toEqual({
+      type: "set",
+      schedule: "every 1m",
+      instruction: "Check status",
+    });
+  });
 });

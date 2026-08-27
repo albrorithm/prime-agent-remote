@@ -18,6 +18,45 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ NODE_ENV: "production" })).toThrow("PRIME_WEB_ALLOWED_ORIGINS");
   });
 
+  /* A custom port with the default allowlist used to be unpaireable.
+
+     The defaults hardcoded 8787, so following docs/deployment.md with
+     PRIME_WEB_PORT=8899 and no explicit origins produced a gateway that
+     refused every request from the browser reaching it — the Origin the
+     browser sends names the port it actually used, and that was on no list.
+     The CLI never hit it because it computes origins from the exposure it
+     just configured, which is what made the raw-node path a trap. */
+  it("trusts the configured port in the default origin allowlist", () => {
+    const value = loadConfig({ NODE_ENV: "test", PRIME_WEB_PORT: "8899" });
+    expect(value.port).toBe(8899);
+    expect(value.allowedOrigins.has("http://127.0.0.1:8899")).toBe(true);
+    expect(value.allowedOrigins.has("http://localhost:8899")).toBe(true);
+    // Still no wider than before: the stale hardcoded port is gone, and the
+    // dev server stays because the app is developed against it.
+    expect(value.allowedOrigins.has("http://127.0.0.1:8787")).toBe(false);
+    expect(value.allowedOrigins.has("http://127.0.0.1:5173")).toBe(true);
+  });
+
+  it("adds the configured host to the default allowlist, but never a wildcard bind", () => {
+    const named = loadConfig({ NODE_ENV: "test", PRIME_WEB_HOST: "gateway.local", PRIME_WEB_PORT: "9000" });
+    expect(named.allowedOrigins.has("http://gateway.local:9000")).toBe(true);
+
+    // 0.0.0.0 is not an origin any browser can send, so listing it would only
+    // be noise on the allowlist.
+    const wildcard = loadConfig({ NODE_ENV: "test", PRIME_WEB_HOST: "0.0.0.0", PRIME_WEB_PORT: "9000" });
+    expect(wildcard.allowedOrigins.has("http://0.0.0.0:9000")).toBe(false);
+    expect(wildcard.allowedOrigins.has("http://127.0.0.1:9000")).toBe(true);
+  });
+
+  it("still lets an explicit allowlist replace the defaults outright", () => {
+    const value = loadConfig({
+      NODE_ENV: "test",
+      PRIME_WEB_PORT: "8899",
+      PRIME_WEB_ALLOWED_ORIGINS: "https://agent.example.test",
+    });
+    expect(value.allowedOrigins).toEqual(new Set(["https://agent.example.test"]));
+  });
+
   it("lets production run without a configured token, which is then minted and persisted", () => {
     const value = loadConfig({
       NODE_ENV: "production",

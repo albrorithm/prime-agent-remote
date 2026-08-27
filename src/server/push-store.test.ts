@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_PUSH_SUBSCRIPTIONS,
   PushSubscriptionStore,
@@ -33,6 +33,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await chmod(root, 0o700).catch(() => {});
+  await chmod(path.dirname(storePath), 0o700).catch(() => {});
   await rm(root, { recursive: true, force: true });
 });
 
@@ -174,5 +175,79 @@ describe("PushSubscriptionStore", () => {
 
     await expect(store.upsert(subscription({ endpoint: "https://push.example.test/later" }))).resolves.toBeUndefined();
     expect((await readStore()).subscriptions).toHaveLength(2);
+  });
+
+  // A push subscription is a capability to wake a device. If a revocation's
+  // write fails, the in-memory view must drop it immediately regardless —
+  // the running process must never send to it again — even though the file
+  // on disk is still stale until a retry succeeds.
+  it("removes a record from the in-memory view even when persisting the removal fails", async () => {
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    await store.upsert(subscription());
+    // The store directory already exists (from the upsert above), so
+    // chmod-ing root alone wouldn't block writes into it — the store's own
+    // directory has to lose write permission.
+    await chmod(path.dirname(storePath), 0o500);
+
+    await expect(store.removeEndpoint(subscription().endpoint)).rejects.toThrow();
+    expect(store.list()).toEqual([]);
+  });
+
+  it("retries a failed removal in the background and eventually persists it", async () => {
+    const store = new PushSubscriptionStore(storePath, [5, 5, 5]);
+    await store.load();
+    await store.upsert(subscription());
+    await chmod(path.dirname(storePath), 0o500);
+
+    await store.removeEndpoint(subscription().endpoint).catch(() => {});
+    expect(store.list()).toEqual([]);
+    expect((await readStore()).subscriptions).toHaveLength(1); // still stale on disk
+
+    await chmod(path.dirname(storePath), 0o700);
+    // Give the 5ms background retry time to fire and succeed.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect((await readStore()).subscriptions).toEqual([]);
+  });
+
+  it("bounds persistence retries with backoff and never holds the event loop open", async () => {
+    const realSetTimeout = global.setTimeout;
+    const scheduled: number[] = [];
+    const unrefSpies: ReturnType<typeof vi.fn>[] = [];
+    vi.spyOn(global, "setTimeout").mockImplementation(((fn: (...fnArgs: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      const handle = realSetTimeout(fn, ms, ...args);
+      if (ms === 1 || ms === 2 || ms === 3) {
+        scheduled.push(ms);
+        const originalUnref = handle.unref.bind(handle);
+        const unrefSpy = vi.fn(() => originalUnref());
+        handle.unref = unrefSpy;
+        unrefSpies.push(unrefSpy);
+      }
+      return handle;
+    }) as typeof setTimeout);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const store = new PushSubscriptionStore(storePath, [1, 2, 3]);
+      await store.load();
+      await store.upsert(subscription());
+      await chmod(path.dirname(storePath), 0o500);
+      await store.removeEndpoint(subscription().endpoint).catch(() => {});
+
+      // Real time for all three backoff retries to fire; the directory stays
+      // unwritable throughout, so every retry fails and none writes past the
+      // configured ceiling.
+      await new Promise((resolve) => realSetTimeout(resolve, 150));
+
+      expect(scheduled).toEqual([1, 2, 3]);
+      expect(unrefSpies).toHaveLength(3);
+      for (const unrefSpy of unrefSpies) expect(unrefSpy).toHaveBeenCalledTimes(1);
+      const logged = vi.mocked(console.error).mock.calls.flat().join(" ");
+      expect(logged).toContain("may return after a restart");
+    } finally {
+      vi.restoreAllMocks();
+      await chmod(path.dirname(storePath), 0o700);
+    }
   });
 });

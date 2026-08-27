@@ -251,6 +251,105 @@ describe("gateway WebSocket transport", () => {
   }, 15_000);
 });
 
+describe("gateway startup and shutdown", () => {
+  /* A port already in use used to kill the process with an unhandled 'error'
+     event and no message of its own. `prime-agent-web start` detaches the child
+     with stdio ignored, so from the operator's side the gateway just was not
+     there — nothing said why, and nothing named the port. */
+  it("explains a port that is already in use instead of dying silently", async () => {
+    const blocker = createNetServer();
+    blocker.listen(0, "127.0.0.1");
+    await once(blocker, "listening");
+    const address = blocker.address();
+    if (!address || typeof address === "string") throw new Error("Could not allocate a test port");
+    const port = address.port;
+    const stores = await mkdtemp(join(tmpdir(), "gateway-inuse-"));
+
+    try {
+      const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "src/server/index.ts")], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          NODE_ENV: "test",
+          PRIME_WEB_PORT: String(port),
+          PRIME_WEB_HOST: "127.0.0.1",
+          PRIME_WEB_ALLOWED_ORIGINS: `http://127.0.0.1:${port}`,
+          PRIME_WEB_PAIRING_TOKEN: "transport-test-token",
+          PRIME_WEB_BACKEND: "demo",
+          PRIME_WEB_SECURE_COOKIE: "false",
+          PRIME_WEB_PUSH_STORE: join(stores, "push-subscriptions.json"),
+          PRIME_WEB_DEVICE_STORE: join(stores, "devices.json"),
+          PRIME_WEB_PAIRING_TOKEN_FILE: join(stores, "pairing-token"),
+          PRIME_WEB_STATE_FILE: join(stores, "gateway.json"),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr!.on("data", (chunk) => { stderr += String(chunk); });
+      const [code] = await once(child, "exit") as [number | null];
+
+      expect(code).toBe(1);
+      expect(stderr).toContain(String(port));
+      expect(stderr).toContain("already in use");
+      // Names the setting that fixes it, not just the symptom.
+      expect(stderr).toContain("PRIME_WEB_PORT");
+      // A bare unhandled 'error' event is what this replaced.
+      expect(stderr).not.toContain("ERR_UNHANDLED");
+    } finally {
+      blocker.close();
+      await once(blocker, "close");
+      await rm(stores, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  /* `server.close()` waits for every open connection to end on its own, and a
+     WebSocket close handshake the peer never answers does not end. The port
+     stayed bound for the whole five-second hard-exit window, so a stop
+     followed by a start could fail EADDRINUSE on the port it had just given
+     up. */
+  it("releases its port promptly when a socket never answers the close frame", async () => {
+    const gateway = await startGateway();
+    const { cookie } = await pair(gateway);
+    // A phone that is asleep, or whose network went away mid-session. The
+    // upgrade succeeded, so the connection is real and open; the peer simply
+    // never replies. `gateway.shutdown()` only *initiates* the WebSocket close
+    // handshake, and `server.close()` then waits for a connection that will
+    // never end on its own — the whole hard-exit window, with the port still
+    // bound, which is what a stop-then-start collides with.
+    const mute = connect(gateway.port, "127.0.0.1");
+    await once(mute, "connect");
+    mute.write([
+      "GET /ws/v1/events HTTP/1.1",
+      "Host: 127.0.0.1",
+      `Origin: ${gateway.origin}`,
+      `Cookie: ${cookie}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      "Sec-WebSocket-Version: 13",
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+      "",
+      "",
+    ].join("\r\n"));
+    const [handshake] = await once(mute, "data") as [Buffer];
+    expect(handshake.toString()).toContain("101");
+    // And then nothing: no close frame is ever answered.
+
+    const startedAt = Date.now();
+    await stopGateway(gateway);
+    // Comfortably inside the 5s backstop the old path spent in full.
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+
+    // Binding the port again is the only proof that matters, and it is exactly
+    // what a stop-then-start does next.
+    const rebind = createNetServer();
+    rebind.listen(gateway.port, "127.0.0.1");
+    await once(rebind, "listening");
+    rebind.close();
+    await once(rebind, "close");
+    mute.destroy();
+  }, 20_000);
+});
+
 describe("gateway static responses", () => {
   it("uses PNG MIME, 404s missing assets, and restricts methods", async () => {
     const filename = `transport-test-${randomUUID()}.png`;

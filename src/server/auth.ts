@@ -15,6 +15,19 @@ export const PAIR_ATTEMPT_WINDOW_MS = 60_000;
 export const MAX_PAIR_ATTEMPTS_PER_CLIENT = 5;
 export const MAX_TRACKED_PAIR_CLIENTS = 4_096;
 export const MAX_ACTIVE_SESSIONS = 4_096;
+/**
+ * Resumes are budgeted per proven device rather than per address.
+ *
+ * Behind `tailscale serve` every client arrives as 127.0.0.1, so the address
+ * bucket is not one bucket per caller — it is one bucket for the whole house.
+ * Five phones auto-resuming in the minute after a restart, which is precisely
+ * what a restart causes, would spend it and 401 people who had paired
+ * perfectly correctly. A device id is the only caller identity that survives
+ * that hop, and it is only trusted once the credential has been verified.
+ */
+export const RESUME_ATTEMPT_WINDOW_MS = 60_000;
+export const MAX_RESUME_ATTEMPTS_PER_DEVICE = 30;
+export const MAX_TRACKED_RESUME_DEVICES = 4_096;
 
 interface Session {
   id: string;
@@ -53,6 +66,11 @@ export class AuthService {
     PAIR_ATTEMPT_WINDOW_MS,
     MAX_PAIR_ATTEMPTS_PER_CLIENT,
     MAX_TRACKED_PAIR_CLIENTS,
+  );
+  private readonly resumeAttempts = new SlidingWindowLimiter(
+    RESUME_ATTEMPT_WINDOW_MS,
+    MAX_RESUME_ATTEMPTS_PER_DEVICE,
+    MAX_TRACKED_RESUME_DEVICES,
   );
   private lastSessionPruneAt = Number.NEGATIVE_INFINITY;
 
@@ -100,21 +118,27 @@ export class AuthService {
    */
   async resume(req: IncomingMessage, res: ServerResponse): Promise<Session | null> {
     if (!this.devices) return null;
-    const key = req.socket.remoteAddress ?? "unknown";
+    const address = req.socket.remoteAddress ?? "unknown";
     const now = Date.now();
     this.pruneSessions(now, this.sessions.size >= MAX_ACTIVE_SESSIONS);
-    // Shares the pairing budget: a device token is a bearer credential and
-    // guessing one deserves the same ceiling as guessing the pairing token.
-    if (!this.pairAttempts.allow(key, now).allowed) return null;
     const presented = parseCookies(req.headers.cookie)[DEVICE_COOKIE];
-    if (!presented) return null;
-    const device = await this.devices.verify(presented);
+    const device = presented ? await this.devices.verify(presented) : null;
     if (!device) {
+      // An unproven attempt is a guess, and guesses are what the address budget
+      // exists for — a burnt budget locks this address out of `pair` too, so
+      // guessing device tokens still costs what guessing the pairing token
+      // costs. Charged only *after* verification fails: keying a limiter on an
+      // id nobody has verified would let an attacker mint a fresh id per guess
+      // and buy an unlimited number of empty buckets.
+      this.pairAttempts.allow(address, now);
       // The credential was revoked or the store was rebuilt. Clear it so the
       // browser stops presenting something that can never work again.
-      res.setHeader("Set-Cookie", this.deviceCookieHeader("", 0));
+      if (presented) res.setHeader("Set-Cookie", this.deviceCookieHeader("", 0));
       return null;
     }
+    // A proven device gets its own budget, so a houseful of phones reconnecting
+    // through one tailscale address no longer share a single bucket.
+    if (!this.resumeAttempts.allow(device.id, now).allowed) return null;
     if (this.sessions.size >= MAX_ACTIVE_SESSIONS) return null;
     const session = this.startSession(now, device.id);
     res.setHeader("Set-Cookie", this.sessionCookieHeader(session));
@@ -137,14 +161,41 @@ export class AuthService {
    * revokes the device credential too, so the browser cannot quietly resume.
    * Expiry keeps the device, which is what lets a phone survive a restart.
    */
-  async signOut(res: ServerResponse, session: Session): Promise<void> {
-    this.sessions.delete(session.id);
+  async signOut(res: ServerResponse, session: Session): Promise<string[]> {
+    const reaped = this.sessionIdsForDevice(session);
+    // Deleted before the await, so a request arriving during the revoke cannot
+    // find one of these sessions still live.
+    for (const id of reaped) this.sessions.delete(id);
     const cookies = [this.sessionCookieHeader(null)];
     if (session.deviceId && this.devices) {
       await this.devices.revoke(session.deviceId);
       cookies.push(this.deviceCookieHeader("", 0));
     }
     res.setHeader("Set-Cookie", cookies);
+    return reaped;
+  }
+
+  /**
+   * Every session a sign-out of this one takes with it.
+   *
+   * Revoking the device credential while leaving that device's other sessions
+   * running made sign-out a promise the gateway did not keep: a second tab, or
+   * the same phone reopened, kept a working session — and its live socket — for
+   * the rest of the 12-hour TTL, long after the person had signed out. Those
+   * sessions all descend from the credential being revoked, so revoking it has
+   * to take them too.
+   *
+   * A session with no device id is its own only member: nothing links it to
+   * any other, and reaping by absence would sign out every token-paired
+   * session at once.
+   */
+  sessionIdsForDevice(session: Session): string[] {
+    const ids = [session.id];
+    if (!session.deviceId) return ids;
+    for (const [id, other] of this.sessions) {
+      if (id !== session.id && other.deviceId === session.deviceId) ids.push(id);
+    }
+    return ids;
   }
 
   authenticate(req: IncomingMessage): Session | null {

@@ -20,9 +20,23 @@ function asRecord(value: unknown): UnknownRecord | undefined {
   return value && typeof value === "object" ? value as UnknownRecord : undefined;
 }
 
+// Hoisted once: constructing an Intl.Segmenter per call is expensive and truncate()
+// is the chokepoint for every preview cutoff in this module.
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 function truncate(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
-  return `${value.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+  // Budget stays in UTF-16 code units so existing maxChars semantics hold, but the
+  // cut point is snapped to the nearest grapheme-cluster boundary that fits, so an
+  // astral emoji, ZWJ sequence, combining mark, or flag pair is never split in half.
+  const budget = Math.max(1, maxChars - 1);
+  let cut = "";
+  for (const { segment } of GRAPHEME_SEGMENTER.segment(value)) {
+    if (cut.length + segment.length > budget) break;
+    cut += segment;
+  }
+  const trimmed = cut.trimEnd();
+  return trimmed ? `${trimmed}…` : "…";
 }
 
 function isSafeQuotedPreview(value: string): boolean {

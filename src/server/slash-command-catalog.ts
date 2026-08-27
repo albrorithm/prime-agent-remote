@@ -88,7 +88,24 @@ export type ParsedHeartbeatArgs =
   | { type: "pause" | "resume" | "clear" }
   | { type: "set"; schedule: string; instruction: string; deliveryMode?: "steer" | "follow_up" };
 
-const HEARTBEAT_DURATION = /^\d+(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$/i;
+const HEARTBEAT_DURATION = /^(\d+)(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$/i;
+const HEARTBEAT_MIN_SECONDS = 30;
+const HEARTBEAT_UNIT_SECONDS: Record<string, number> = {
+  s: 1, sec: 1, secs: 1, second: 1, seconds: 1,
+  m: 60, min: 60, mins: 60, minute: 60, minutes: 60,
+  h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600,
+};
+
+/** Reject (rather than silently clamp) a schedule below the floor, so a tight-loop
+ *  request surfaces the command's normal error instead of a schedule the user did
+ *  not ask for. */
+function isBelowHeartbeatFloor(duration: string): boolean {
+  const match = HEARTBEAT_DURATION.exec(duration);
+  if (!match) return false;
+  const [, amount, unit] = match;
+  const seconds = Number(amount) * HEARTBEAT_UNIT_SECONDS[unit.toLowerCase()];
+  return seconds < HEARTBEAT_MIN_SECONDS;
+}
 
 export function parseHeartbeatArgs(input: string): ParsedHeartbeatArgs | null {
   const text = input.trim();
@@ -111,7 +128,7 @@ export function parseHeartbeatArgs(input: string): ParsedHeartbeatArgs | null {
   let schedule = "every 5m";
   if (remaining[0] === "every" || remaining[0] === "--every") {
     const duration = remaining[1];
-    if (!duration || !HEARTBEAT_DURATION.test(duration)) return null;
+    if (!duration || !HEARTBEAT_DURATION.test(duration) || isBelowHeartbeatFloor(duration)) return null;
     schedule = `every ${duration}`;
     remaining.splice(0, 2);
   }
