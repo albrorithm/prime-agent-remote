@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Moon, SlidersHorizontal, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 import { agentStatus } from "./agent-status";
 import { buildVisibleAgents } from "./agent-tree-utils";
@@ -27,18 +27,18 @@ function subtitle(agent: AgentSummary): string {
   return agent.description || directoryLeaf(agent.cwd) || agentStatus(agent).label;
 }
 
+/* The same light the conversation header uses: colour carries the state, the
+   pulse carries activity. It replaced a set of glyphs whose working state was a
+   spinner, and a spinner is the one shape that cannot survive
+   `prefers-reduced-motion` — those rules cut every animation to a single .01ms
+   iteration, which parks the spinner at a fixed angle and reads as a hung app
+   rather than a busy one. A dot that stops pulsing is still a dot.
+
+   Passing the tone straight through also lets attention and failed look
+   different, which the glyphs could not. `.state-pill` beside it still collapses
+   the two and stays grayscale for that reason. */
 function StateIcon({ agent }: { agent: AgentSummary }) {
-  const status = agentStatus(agent);
-  if (status.tone === "attention" || status.tone === "failed") {
-    return <CircleAlert className="agent-state attention" aria-hidden="true" />;
-  }
-  if (status.tone === "working" || status.tone === "starting") {
-    return <LoaderCircle className="agent-state working spin" aria-hidden="true" />;
-  }
-  if (status.tone === "inactive" || status.tone === "stopped") {
-    return <Moon className="agent-state" aria-hidden="true" />;
-  }
-  return <span className="agent-state-dot" aria-hidden="true" />;
+  return <span className={`agent-status-light ${agentStatus(agent).tone}`} aria-hidden="true" />;
 }
 
 export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, drawerOpen }: Props) {

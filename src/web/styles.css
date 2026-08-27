@@ -304,19 +304,16 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .disclosure { display: inline-flex; width: 26px; height: 42px; flex: 0 0 26px; align-items: center; justify-content: center; border: 0; color: var(--muted-2); background: transparent; }
 .disclosure:hover { color: var(--text); }
 .disclosure svg { width: 15px; height: 15px; }
-.agent-state { width: 15px; height: 15px; flex: 0 0 auto; margin-right: 8px; color: var(--muted-2); }
-.agent-state.working { color: var(--text); }
-/* AgentTree.tsx applies this same "attention" class for both the attention
-   AND failed tones (no separate class exists to tell them apart), so a single
-   tone color here would misrepresent one of the two states. Left grayscale
-   until the component distinguishes them. */
-.agent-state.attention { color: var(--text); filter: drop-shadow(0 0 5px color-mix(in srgb, var(--text) 45%, transparent)); }
-.agent-state-dot { width: 7px; height: 7px; flex: 0 0 auto; margin: 0 12px 0 4px; border-radius: 50%; background: var(--border-emphasis); }
+/* The row's status light. Sizing and colour come from `.agent-status-light`
+   below; only the gap to the title is a tree concern. */
+.agent-row .agent-status-light { margin: 0 11px 0 4px; }
 .agent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .agent-copy strong { overflow: hidden; font-size: .8125rem; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .agent-copy > span { overflow: hidden; color: var(--muted); font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
 .state-pill { max-width: 5.5rem; flex: 0 0 auto; overflow: hidden; padding: 3px 6px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .5625rem; font-weight: 650; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
-/* Same attention/failed conflation as .agent-state.attention above — grayscale until AgentTree.tsx splits the classes. */
+/* AgentTree.tsx gives this one class to both the attention AND failed tones, so
+   a single tone colour here would misrepresent one of them. Grayscale until the
+   component distinguishes them, as its status light now does. */
 .state-pill.attention { border-color: var(--border-active); color: var(--text); background: var(--panel-raised-3); }
 .row-stop { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-soft); background: var(--panel-raised-3); }
 .row-stop:hover { border-color: var(--border-emphasis); color: var(--text); background: var(--panel-raised-4); }
