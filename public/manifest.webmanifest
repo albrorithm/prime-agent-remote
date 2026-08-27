@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Prime Agent",
-  "short_name": "Prime",
+  "name": "Prime Agent Mobile",
+  "short_name": "Prime Mobile",
   "description": "Mobile control for Prime Agent",
   "start_url": "/",
   "scope": "/",

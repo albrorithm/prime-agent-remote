@@ -4,6 +4,9 @@ A mobile-first web interface for [Prime Agent](https://github.com/PrimeIntellect
 It keeps the daemon on your machine and puts a small authenticated gateway in
 front of it, so a phone can drive an agent without exposing a terminal.
 
+It is an independent client. This project is not affiliated with, endorsed by,
+or sponsored by Prime Intellect.
+
 ## Install and start
 
 Prime Agent itself must be installed (`npm install -g prime-agent`). Then:
@@ -150,3 +153,9 @@ demo instance — without it they look at your real one.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The butterfly mark used as the app icon comes from the Prime Agent repository
+and is used under its MIT license — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). That license covers the
+artwork, not the Prime Agent name or mark as a trademark; no rights in either
+are claimed here.
