@@ -14,3 +14,4 @@ coverage/
 /start-live.local.sh
 .playwright-mcp/
 .dist-previous/
+.dist-server-previous/

@@ -46,11 +46,22 @@ describe("resolveExposure: lan", () => {
     expect(exposure.secureCookie).toBe(false);
   });
 
-  it("drops the secure-context warning and turns the cookie Secure once a trusted certificate exists", () => {
+  it("warns that plain HTTP puts the token, session cookie, and device credential on the wire in the clear", () => {
+    const warnings = resolveExposure({ mode: "lan", port: 8787, localHostname: "study.local" }).warnings.join(" ");
+    // Distinct from "reachable by every device": reachability is what the
+    // token defends against, this is the token (and what it issues) itself
+    // being interceptable, which is a worse and longer-lived exposure.
+    expect(warnings).toContain("setup token");
+    expect(warnings).toContain("session cookie");
+    expect(warnings).toContain("400-day device credential");
+  });
+
+  it("drops the secure-context and cleartext-credential warnings and turns the cookie Secure once a trusted certificate exists", () => {
     const exposure = resolveExposure({ mode: "lan", port: 8787, localHostname: "study.local", tlsConfigured: true });
     expect(exposure.url).toBe("https://study.local:8787");
     expect(exposure.secureCookie).toBe(true);
     expect(exposure.warnings.join(" ")).not.toContain("not a secure context");
+    expect(exposure.warnings.join(" ")).not.toContain("400-day device credential");
     // Still experimental, and still reachable by the whole network.
     expect(exposure.warnings.join(" ")).toContain("every device on this network");
   });

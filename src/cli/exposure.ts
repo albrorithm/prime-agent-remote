@@ -46,6 +46,19 @@ const INSECURE_CONTEXT_WARNING =
   "Plain HTTP outside localhost is not a secure context: no installable app, no service worker, "
   + "no notifications, and no app badge. Supply a certificate the device already trusts to get them back.";
 
+/**
+ * Reachability and encryption are different failures, and only one of them is
+ * covered by "the setup token is what stops them." Without a trusted
+ * certificate, LAN mode also puts every credential that authenticates a
+ * request on the wire in the clear — including ones that outlive the setup
+ * token by a long way.
+ */
+const LAN_CLEARTEXT_CREDENTIAL_WARNING =
+  "That same lack of a trusted certificate also means plain HTTP: the setup token, the session cookie, and the "
+  + "400-day device credential all cross the network in the clear. A bystander who can observe LAN traffic can "
+  + "copy any of them off the wire — copying the device credential is worse than merely reaching the gateway, "
+  + "because it is a paired device for the next 400 days, not a single guess against the token.";
+
 export function resolveExposure(input: ExposureInput): Exposure {
   const { mode, port } = input;
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -95,7 +108,7 @@ export function resolveExposure(input: ExposureInput): Exposure {
     // gateway is reachable by anything that can route to it.
     "The gateway is reachable by every device on this network. The setup token is what stops them.",
   ];
-  if (!input.tlsConfigured) warnings.push(INSECURE_CONTEXT_WARNING);
+  if (!input.tlsConfigured) warnings.push(LAN_CLEARTEXT_CREDENTIAL_WARNING, INSECURE_CONTEXT_WARNING);
   return {
     mode,
     host: "0.0.0.0",

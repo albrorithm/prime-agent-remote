@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const BUILD_ID_PATTERN = /const BUILD_ID = "dev";/;
 
@@ -33,9 +34,38 @@ export function hashBuiltServiceWorker(outDir) {
   return buildId;
 }
 
+/**
+ * Whether this module is the program being run, rather than a library import
+ * (used by its own test). Comparing `import.meta.url` — the RESOLVED module
+ * URL — against a naive `file://${process.argv[1]}` leaves anything that
+ * needs percent-encoding unescaped, so a checkout in a directory with a space
+ * in its name made the comparison false. The script then exited 0 having
+ * printed nothing, and `dist/sw.js` shipped with `BUILD_ID = "dev"`: every
+ * installed PWA freezes on its first cached shell, which is the exact
+ * failure this script exists to prevent. `pathToFileURL(realpathSync(...))`
+ * is the same fix `src/cli/index.ts`'s `isProgramEntry` already needed for
+ * the identical bug.
+ */
+export function isProgramEntry(entry, moduleUrl, resolve = realpathSync) {
+  if (!entry) return false;
+  try {
+    return pathToFileURL(resolve(entry)).href === moduleUrl;
+  } catch {
+    return false;
+  }
+}
+
 // Allow running directly as a postbuild step: node scripts/hash-sw.mjs [outDir]
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isProgramEntry(process.argv[1], import.meta.url)) {
   const outDir = process.argv[2] ?? "dist";
   const buildId = hashBuiltServiceWorker(outDir);
-  console.log(buildId ? `sw.js cache name pinned to build ${buildId}` : `sw.js in ${outDir} not patched (missing file or placeholder)`);
+  if (buildId) {
+    console.log(`sw.js cache name pinned to build ${buildId}`);
+  } else {
+    // Loud, not a no-op: this runs as `&&`-chained build step in package.json,
+    // and silently continuing here is how a build shipped an unpatched
+    // service worker without the chain ever noticing.
+    console.error(`sw.js in ${outDir} not patched (missing file or placeholder) — refusing to ship an unpinned BUILD_ID`);
+    process.exitCode = 1;
+  }
 }

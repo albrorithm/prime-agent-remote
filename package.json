@@ -1,8 +1,17 @@
 {
-  "name": "prime-agent-mobile-web",
+  "name": "prime-agent-mobile",
   "version": "0.1.0",
-  "private": true,
+  "description": "A mobile-first, installable web UI for Prime Agent: an authenticated gateway that puts a phone-sized chat interface in front of your local agent daemon.",
   "license": "MIT",
+  "author": "albrorithm",
+  "homepage": "https://github.com/albrorithm/prime-agent-mobile#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/albrorithm/prime-agent-mobile.git"
+  },
+  "bugs": {
+    "url": "https://github.com/albrorithm/prime-agent-mobile/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -11,13 +20,14 @@
     "dev": "concurrently -k -n gateway,web -c blue,magenta \"npm:dev:gateway\" \"npm:dev:web\"",
     "dev:gateway": "tsx watch src/server/index.ts",
     "dev:web": "vite",
-    "build": "npm run clean:server && npm run typecheck && vite build && node scripts/hash-sw.mjs dist && tsc -p tsconfig.server.json && node -e \"require('node:fs').chmodSync('dist-server/cli/index.js', 0o755)\"",
+    "build": "npm run typecheck && vite build && node scripts/hash-sw.mjs dist && npm run clean:server && tsc -p tsconfig.server.json && node -e \"require('node:fs').chmodSync('dist-server/cli/index.js', 0o755)\"",
     "clean:server": "node -e \"require('node:fs').rmSync('dist-server', { recursive: true, force: true })\"",
     "start": "NODE_ENV=production node dist-server/server/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.server.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "npm run build && node scripts/smoke.mjs"
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "prepare": "node scripts/prepare.mjs"
   },
   "dependencies": {
     "lowlight": "^3.3.0",
@@ -56,6 +66,7 @@
     "dist-server",
     "docs",
     "extensions",
+    "scripts",
     "README.md",
     "LICENSE"
   ]

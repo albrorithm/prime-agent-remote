@@ -49,14 +49,18 @@ const ACTION_LIST = ACTIONS.map((action) => action.value).join("|");
 
 function usageLines(): string {
 	const width = Math.max(...ACTIONS.map((action) => action.value.length));
-	return [`/webui [${ACTION_LIST}]`, ...ACTIONS.map(
-		(action) => `  ${action.value.padEnd(width)}  ${action.description}`,
-	)].join("\n");
+	return [
+		`/webui [${ACTION_LIST}] [args...]`,
+		...ACTIONS.map((action) => `  ${action.value.padEnd(width)}  ${action.description}`),
+		"",
+		"Anything after the action passes straight to the CLI, e.g.",
+		"`/webui start --port 9000` or `/webui token --rotate`.",
+	].join("\n");
 }
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("webui", {
-		description: `Prime Agent mobile web UI [${ACTION_LIST}]`,
+		description: `Prime Agent mobile web UI [${ACTION_LIST}] [args...]`,
 		getArgumentCompletions: (prefix: string) => {
 			const items = ACTIONS
 				.filter((action) => action.value.startsWith(prefix))
@@ -83,7 +87,11 @@ export default function (pi: ExtensionAPI) {
 				}
 			};
 
-			let result = await run([action]);
+			// Everything after the action forwards verbatim — `--port`, `--demo`,
+			// `--rotate`, whatever the CLI itself understands for that subcommand.
+			// This extension does not parse or validate those; the CLI already does.
+			const passthrough = requested.slice(1);
+			let result = await run([action, ...passthrough]);
 
 			if (result.code === 127) {
 				ctx.ui.notify(
@@ -95,10 +103,12 @@ export default function (pi: ExtensionAPI) {
 
 			// `status` exits non-zero when nothing is running. Starting from
 			// there is the whole point of asking, so it is the default path
-			// rather than an error to report back.
+			// rather than an error to report back. Passthrough carries over —
+			// `/webui status --demo` should start the demo instance, not the real
+			// one, if that is the one it was asking about.
 			if (action === "status" && result.code !== 0) {
 				ctx.ui.notify("Web UI is not running. Starting it...", "info");
-				result = await run(["start"]);
+				result = await run(["start", ...passthrough]);
 			}
 
 			const output = `${result.stdout}${result.stderr}`.trim();
