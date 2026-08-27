@@ -87,17 +87,17 @@ export async function waitForOurGateway(options: {
 }
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const HELP = `prime-agent-mobile — a phone-sized web UI for Prime Agent
+const HELP = `prime-agent-remote — a phone-sized web UI for Prime Agent
 
 Usage:
-  prime-agent-mobile start [options]     Start the gateway in the background
-  prime-agent-mobile status [--demo]     Say whether it is running, and where
-  prime-agent-mobile stop [--demo]       Stop it
-  prime-agent-mobile token [--rotate] [--demo]   Print the setup token
-  prime-agent-mobile devices [--revoke <id|all>] [--demo]  List or revoke paired devices
-  prime-agent-mobile rebuild [--demo]    Rebuild the UI and make it live
-  prime-agent-mobile install-command     Add /webui to Prime Agent
-  prime-agent-mobile help
+  prime-agent-remote start [options]     Start the gateway in the background
+  prime-agent-remote status [--demo]     Say whether it is running, and where
+  prime-agent-remote stop [--demo]       Stop it
+  prime-agent-remote token [--rotate] [--demo]   Print the setup token
+  prime-agent-remote devices [--revoke <id|all>] [--demo]  List or revoke paired devices
+  prime-agent-remote rebuild [--demo]    Rebuild the UI and make it live
+  prime-agent-remote install-command     Add /webui to Prime Agent
+  prime-agent-remote help
 
 --demo targets the demo instance, which keeps its own pairing token, paired
 devices, and gateway state entirely separate from a real run — pass it to
@@ -145,7 +145,7 @@ export function parseArguments(argv: readonly string[]): Options {
       if (!Number.isInteger(value)) throw new Error(`--port needs a number, not ${argv[index + 1] ?? "nothing"}`);
       options.port = value;
       index += 1;
-    } else throw new Error(`Unknown option ${argument}. Run \`prime-agent-mobile help\`.`);
+    } else throw new Error(`Unknown option ${argument}. Run \`prime-agent-remote help\`.`);
   }
   return options;
 }
@@ -292,7 +292,7 @@ async function start(options: Options): Promise<number> {
   const status = await resolveStatus(config.gatewayStatePath);
   if (status.running && status.state) {
     line(`Already running at ${status.state.url} (pid ${status.state.pid}).`);
-    line("Use `prime-agent-mobile stop` first, or `status` to see it.");
+    line("Use `prime-agent-remote stop` first, or `status` to see it.");
     return 1;
   }
   if (status.stale) await clearGatewayState(config.gatewayStatePath);
@@ -313,7 +313,7 @@ async function start(options: Options): Promise<number> {
       line();
       line(error instanceof Error ? error.message : String(error));
       line();
-      line("Or start without it: `prime-agent-mobile start --demo`.");
+      line("Or start without it: `prime-agent-remote start --demo`.");
       return 1;
     }
   } else {
@@ -332,7 +332,7 @@ async function start(options: Options): Promise<number> {
   // CLI started, so it cannot catch this on its own.
   if (await respondsAsGateway(gatewayOrigin(exposure.host, port))) {
     line();
-    line(`Port ${port} already answers as a prime-agent-mobile gateway, and it is not one this CLI started.`);
+    line(`Port ${port} already answers as a prime-agent-remote gateway, and it is not one this CLI started.`);
     line("Another checkout, a real gateway when you asked for --demo (both default to the");
     line("same port), or one left behind by a --foreground run that was killed.");
     line();
@@ -397,7 +397,7 @@ async function start(options: Options): Promise<number> {
     line();
     if (outcome === "died") line(`The gateway (pid ${pid}) exited without serving port ${port}.`);
     else line(`The gateway started (pid ${pid}) but nothing is listening on port ${port}.`);
-    line("Run `prime-agent-mobile start --foreground` to see why.");
+    line("Run `prime-agent-remote start --foreground` to see why.");
     signal(pid, "SIGTERM");
     return 1;
   }
@@ -414,7 +414,7 @@ async function start(options: Options): Promise<number> {
 
   printStartupInfo(exposure, token, port);
   line("Open that address on your phone and enter the setup token.");
-  line("It stays paired across restarts. `prime-agent-mobile stop` ends it.");
+  line("It stays paired across restarts. `prime-agent-remote stop` ends it.");
   return 0;
 }
 
@@ -423,7 +423,7 @@ async function status(options: Pick<Options, "demo">): Promise<number> {
   const resolved = await resolveStatus(config.gatewayStatePath);
   if (!resolved.state) {
     line("Not running.");
-    line("Start it with `prime-agent-mobile start`.");
+    line("Start it with `prime-agent-remote start`.");
     return 1;
   }
   if (!resolved.running) {
@@ -606,19 +606,19 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
   if (restarted !== 0) {
     line();
     line("The revocation is applied, but the gateway did not come back up.");
-    line("Start it again with `prime-agent-mobile start`.");
+    line("Start it again with `prime-agent-remote start`.");
     return restarted;
   }
   return outcome.kind === "unknown" ? 1 : 0;
 }
 
 /** The name `/webui` shells out to, and the name npm installs this under. */
-export const CLI_NAME = "prime-agent-mobile";
+export const CLI_NAME = "prime-agent-remote";
 
 /**
  * What `/webui` will actually find when it shells out.
  *
- * The extension calls a bare `prime-agent-mobile`, so copying the file into
+ * The extension calls a bare `prime-agent-remote`, so copying the file into
  * ~/.prime proves nothing on its own — the command is only as good as the one
  * on PATH, and a checkout that was never linked has none. Reporting a clean
  * install in that case moves the failure to first use inside a Prime Agent
@@ -699,7 +699,7 @@ async function rebuild(options: Pick<Options, "demo">): Promise<number> {
 
   if (!before.running || !before.state) {
     line();
-    line("Rebuilt. The gateway is not running; `prime-agent-mobile start` will serve it.");
+    line("Rebuilt. The gateway is not running; `prime-agent-remote start` will serve it.");
     return 0;
   }
 

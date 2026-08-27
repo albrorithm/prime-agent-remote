@@ -39,11 +39,11 @@ describe("generateVapidKeys", () => {
     const publicKey = createPublicKey({ key: jwk, format: "jwk" });
 
     const signer = createSign("SHA256");
-    signer.update("prime-agent-mobile");
+    signer.update("prime-agent-remote");
     const signature = signer.sign(privateKey);
 
     const verifier = createVerify("SHA256");
-    verifier.update("prime-agent-mobile");
+    verifier.update("prime-agent-remote");
     expect(verifier.verify(publicKey, signature)).toBe(true);
   });
 

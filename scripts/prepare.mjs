@@ -10,7 +10,7 @@ import { join } from "node:path";
  * plain local `npm install` in a dev checkout, and for `npm install -g
  * git+…` of this package — npm installs devDependencies for exactly that
  * second case specifically so a git dependency can build itself here.
- * Without this, `npm install -g git+https://github.com/albrorithm/prime-agent-mobile.git`
+ * Without this, `npm install -g git+https://github.com/albrorithm/prime-agent-remote.git`
  * leaves the bin entry (dist-server/cli/index.js) never built, and every
  * subcommand ENOENTs.
  *
@@ -24,7 +24,7 @@ const devDependenciesPresent = existsSync(join(process.cwd(), "node_modules", "v
   && existsSync(join(process.cwd(), "node_modules", "typescript"));
 
 if (!devDependenciesPresent) {
-  console.log("prime-agent-mobile: devDependencies not installed; skipping the build.");
+  console.log("prime-agent-remote: devDependencies not installed; skipping the build.");
   process.exit(0);
 }
 

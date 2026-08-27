@@ -31,7 +31,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_HOST` | `127.0.0.1` | Gateway bind address |
 | `PRIME_WEB_PORT` | `8787` | Gateway port |
 | `PRIME_WEB_ALLOWED_ORIGINS` | local development origins | Exact comma-separated browser origins |
-| `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override for a directly-run gateway (`npm start`); a configured one must be 32 or more characters in production. The `prime-agent-mobile` CLI ignores this variable and always reads or mints its own token file instead — see `docs/security.md` |
+| `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override for a directly-run gateway (`npm start`); a configured one must be 32 or more characters in production. The `prime-agent-remote` CLI ignores this variable and always reads or mints its own token file instead — see `docs/security.md` |
 | `PRIME_WEB_SECURE_COOKIE` | true in production | Add the cookie `Secure` attribute; accepts only `true`, `false`, `1`, or `0` |
 | `PRIME_WEB_BACKEND` | `demo` | `demo` or `prime`; other values fail startup |
 | `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |

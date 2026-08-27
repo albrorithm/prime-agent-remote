@@ -3,7 +3,7 @@
  *
  * A deliberately thin wrapper. Every decision about how the gateway starts,
  * which interface it binds, and how it is stopped lives in the
- * `prime-agent-mobile` CLI, and this shells out to it. Two implementations of
+ * `prime-agent-remote` CLI, and this shells out to it. Two implementations of
  * a process lifecycle would drift, and the one that drifted would be the one
  * nobody ran by hand.
  *
@@ -13,12 +13,12 @@
  * whichever session happened to start it. The CLI detaches it instead.
  *
  * Install: copy to ~/.prime/agent/extensions/, or run
- * `prime-agent-mobile install-command`.
+ * `prime-agent-remote install-command`.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const CLI = "prime-agent-mobile";
+const CLI = "prime-agent-remote";
 
 /**
  * The actions, each with the one line that says what it is for.

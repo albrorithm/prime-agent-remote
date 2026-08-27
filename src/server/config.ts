@@ -55,7 +55,7 @@ export interface GatewayConfig {
  * project URL identifies the software, which is the useful half.
  * `PRIME_WEB_VAPID_SUBJECT` overrides it.
  */
-export const DEFAULT_VAPID_SUBJECT = "https://github.com/albrorithm/prime-agent-mobile";
+export const DEFAULT_VAPID_SUBJECT = "https://github.com/albrorithm/prime-agent-remote";
 
 const MIN_PRODUCTION_PAIRING_TOKEN_CHARS = 32;
 const MAX_PAIRING_TOKEN_CHARS = 512;

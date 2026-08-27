@@ -161,7 +161,7 @@ describe("DeviceStore.load", () => {
   });
 });
 
-/* Why `prime-agent-mobile devices --revoke` stops the gateway before writing.
+/* Why `prime-agent-remote devices --revoke` stops the gateway before writing.
    A store instance is a full in-memory copy that overwrites the file on every
    persist, so two live instances do not merge — the last writer wins with
    whatever it happened to be holding. The CLI revoking behind a running gateway

@@ -68,7 +68,7 @@ maximum age, which is the ceiling browsers enforce anyway.
 - Rotating the setup token does not revoke any device. Revoking a device does
   not affect the others.
 - Devices are listed and revoked from Settings → Paired devices in the app, or
-  from `prime-agent-mobile devices [--revoke <id|all>]` at the machine. The CLI
+  from `prime-agent-remote devices [--revoke <id|all>]` at the machine. The CLI
   reads and writes the store directly and needs no running gateway, which is
   what makes it the answer when no device you still hold can sign in. Because a
   running gateway holds the device list in memory and rewrites the file from
@@ -96,7 +96,7 @@ directory, which is stronger than a human-chosen value. Where that token ends
 up depends on how the gateway is started. Run directly (`npm start`, the
 `docs/deployment.md` production path), the process reads or mints the file
 into its own in-memory config and never puts the token in its environment.
-Run through the CLI (`prime-agent-mobile start`, the normal path — see the
+Run through the CLI (`prime-agent-remote start`, the normal path — see the
 README) it does: the launcher reads or mints the same file itself, then passes
 the value to the spawned gateway process as `PRIME_WEB_PAIRING_TOKEN`, so under
 the CLI the token is present in the running gateway's environment for the life

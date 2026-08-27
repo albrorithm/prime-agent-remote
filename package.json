@@ -1,16 +1,16 @@
 {
-  "name": "prime-agent-mobile",
+  "name": "@albrorithm/prime-agent-remote",
   "version": "0.1.0",
   "description": "A mobile-first, installable web UI for Prime Agent: an authenticated gateway that puts a phone-sized chat interface in front of your local agent daemon.",
   "license": "MIT",
   "author": "albrorithm",
-  "homepage": "https://github.com/albrorithm/prime-agent-mobile#readme",
+  "homepage": "https://github.com/albrorithm/prime-agent-remote#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/albrorithm/prime-agent-mobile.git"
+    "url": "git+https://github.com/albrorithm/prime-agent-remote.git"
   },
   "bugs": {
-    "url": "https://github.com/albrorithm/prime-agent-mobile/issues"
+    "url": "https://github.com/albrorithm/prime-agent-remote/issues"
   },
   "type": "module",
   "engines": {
@@ -59,7 +59,7 @@
     "vitest-axe": "^0.1.0"
   },
   "bin": {
-    "prime-agent-mobile": "dist-server/cli/index.js"
+    "prime-agent-remote": "dist-server/cli/index.js"
   },
   "files": [
     "dist",

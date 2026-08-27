@@ -1,8 +1,12 @@
-# Prime Agent Mobile Web
+# Prime Agent Remote
 
-A mobile-first web interface for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
+A remote interface for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 It keeps the daemon on your machine and puts a small authenticated gateway in
-front of it, so a phone can drive an agent without exposing a terminal.
+front of it, so another device can drive an agent without exposing a terminal.
+
+Built phone-first — installable as a home-screen app, with a swipe-open session
+drawer — and it adapts to a desktop browser, where that drawer becomes a
+permanent sidebar.
 
 It is an independent client. This project is not affiliated with, endorsed by,
 or sponsored by Prime Intellect.
@@ -19,11 +23,11 @@ curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 Then:
 
 ```bash
-git clone https://github.com/albrorithm/prime-agent-mobile.git
-cd prime-agent-mobile
+git clone https://github.com/albrorithm/prime-agent-remote.git
+cd prime-agent-remote
 npm install
 npm link
-prime-agent-mobile install-command
+prime-agent-remote install-command
 ```
 
 `npm install` builds both halves on its way through — the `prepare` script runs
@@ -40,7 +44,7 @@ Then, from a Prime Agent session:
 /webui start
 ```
 
-or from a terminal, `prime-agent-mobile start`. Either way the launcher finds
+or from a terminal, `prime-agent-remote start`. Either way the launcher finds
 your Prime Agent build, notices whether Tailscale is running, mints a setup
 token the first time and reuses it afterwards, and prints the address to open
 along with the token.
@@ -51,22 +55,22 @@ be available.
 
 ### Installing without a checkout
 
-`npm install -g git+https://github.com/albrorithm/prime-agent-mobile.git`
+`npm install -g git+https://github.com/albrorithm/prime-agent-remote.git`
 works, with one catch: npm 11 gates a git dependency's `prepare` script behind
 explicit approval and skips it silently otherwise, which leaves the CLI unbuilt
-with no error. If `prime-agent-mobile help` comes back empty right after
+with no error. If `prime-agent-remote help` comes back empty right after
 installing that way, that is why; approve the script and reinstall.
 `install-command` checks for this and says so rather than reporting a `/webui`
 that cannot run.
 
 ```
-prime-agent-mobile start      Start it in the background
-prime-agent-mobile status     Where is it, and is it up
-prime-agent-mobile stop       Stop it
-prime-agent-mobile token      Print the setup token (--rotate to replace it)
-prime-agent-mobile devices    List paired devices (--revoke <id|all> to cut one off)
-prime-agent-mobile rebuild    Rebuild the UI and make it live
-prime-agent-mobile install-command   Add /webui to Prime Agent
+prime-agent-remote start      Start it in the background
+prime-agent-remote status     Where is it, and is it up
+prime-agent-remote stop       Stop it
+prime-agent-remote token      Print the setup token (--rotate to replace it)
+prime-agent-remote devices    List paired devices (--revoke <id|all> to cut one off)
+prime-agent-remote rebuild    Rebuild the UI and make it live
+prime-agent-remote install-command   Add /webui to Prime Agent
 ```
 
 ### How it is reachable
@@ -101,7 +105,7 @@ anyone become a paired device.
 
 ## From inside Prime Agent
 
-`/webui` is installed by `prime-agent-mobile install-command` (see above). It
+`/webui` is installed by `prime-agent-remote install-command` (see above). It
 copies `extensions/webui.ts` into `~/.prime/agent/extensions/`, so the command
 exists in every session rather than only inside this checkout — and being a
 copy, it needs re-running after that file changes.
@@ -136,7 +140,7 @@ read-only directory-name browser for choosing a working directory.
 
 ## Demo mode
 
-`prime-agent-mobile start --demo` runs against a safe fake backend that never
+`prime-agent-remote start --demo` runs against a safe fake backend that never
 touches a real agent. Useful for looking at the interface.
 
 It also keeps its own pairing token, paired devices, and gateway state in a

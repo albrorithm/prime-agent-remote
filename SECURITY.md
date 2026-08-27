@@ -20,7 +20,7 @@ Out of scope:
 
 ## How to report
 
-Please use GitHub private vulnerability reporting on [github.com/albrorithm/prime-agent-mobile](https://github.com/albrorithm/prime-agent-mobile/security/advisories/new) instead of opening a public issue.
+Please use GitHub private vulnerability reporting on [github.com/albrorithm/prime-agent-remote](https://github.com/albrorithm/prime-agent-remote/security/advisories/new) instead of opening a public issue.
 
 Include:
 

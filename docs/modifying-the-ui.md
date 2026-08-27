@@ -19,7 +19,7 @@ observed on 5173 at all.
 Ask the running system where it is rather than assuming:
 
 ```
-prime-agent-mobile status
+prime-agent-remote status
 ```
 
 From inside a Prime Agent session, `/webui` answers the same question and
@@ -33,7 +33,7 @@ second one on another port.
 ## Making a change live
 
 ```
-prime-agent-mobile rebuild
+prime-agent-remote rebuild
 ```
 
 This rebuilds and restarts a running gateway, then names the address to check.
@@ -49,7 +49,7 @@ In a git checkout, ordinary git:
 
 ```
 git checkout -- src/web
-prime-agent-mobile rebuild
+prime-agent-remote rebuild
 ```
 
 In an installed copy, reinstall the package. Local edits are not preserved

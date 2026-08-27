@@ -13,14 +13,14 @@ import { applyRevocation, connectableHost, gatewayOrigin, isProgramEntry, localH
 describe("isProgramEntry", () => {
   const moduleUrl = "file:///opt/pkg/dist-server/cli/index.js";
   const realpath = (target: string) =>
-    target === "/opt/homebrew/bin/prime-agent-mobile" ? "/opt/pkg/dist-server/cli/index.js" : target;
+    target === "/opt/homebrew/bin/prime-agent-remote" ? "/opt/pkg/dist-server/cli/index.js" : target;
 
   it("recognises the file run directly", () => {
     expect(isProgramEntry("/opt/pkg/dist-server/cli/index.js", moduleUrl, realpath)).toBe(true);
   });
 
   it("recognises the file run through an installed bin symlink", () => {
-    expect(isProgramEntry("/opt/homebrew/bin/prime-agent-mobile", moduleUrl, realpath)).toBe(true);
+    expect(isProgramEntry("/opt/homebrew/bin/prime-agent-remote", moduleUrl, realpath)).toBe(true);
   });
 
   it("rejects a different program", () => {
@@ -190,12 +190,12 @@ describe("waitForOurGateway", () => {
 });
 
 /* `install-command` copying the file is the easy half. The command it installs
-   shells out to a bare `prime-agent-mobile`, so a checkout that was never
+   shells out to a bare `prime-agent-remote`, so a checkout that was never
    linked gets a clean "Installed /webui" and then a failure inside a Prime
    Agent session, where nothing points back at the cause. */
 describe("readCliCheck", () => {
   it("passes a CLI that answers", () => {
-    expect(readCliCheck({ stdout: "prime-agent-mobile — a phone-sized web UI\n" })).toBe("ok");
+    expect(readCliCheck({ stdout: "prime-agent-remote — a phone-sized web UI\n" })).toBe("ok");
   });
 
   it("calls a name nothing on PATH answers to missing", () => {
