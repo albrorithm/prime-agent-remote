@@ -95,6 +95,13 @@ describe("normalizeSettings", () => {
     expect(settings.enterSends).toBe(false);
   });
 
+  it("defaults haptics on, and remembers being told otherwise", () => {
+    // A payload written before haptics existed must not read as "off".
+    expect(normalizeSettings({ theme: "light" }).haptics).toBe(true);
+    expect(normalizeSettings({ haptics: false }).haptics).toBe(false);
+    expect(normalizeSettings({ haptics: "no" }).haptics).toBe(true);
+  });
+
   it("survives a payload from a newer build", () => {
     const settings = normalizeSettings({ version: 99, theme: "light", somethingNew: { deep: true } });
 

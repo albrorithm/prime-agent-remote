@@ -440,6 +440,23 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           />
         </section>
 
+        <section className="settings-group" aria-labelledby="settings-haptics">
+          <h3 id="settings-haptics">Haptics</h3>
+          {/* No capability claim in the hint. Whether a device can do this is
+              not reliably knowable from here — desktop Safari reports support
+              for the switch this rides on and has nothing to fire — so it says
+              what it asks for and lets the device answer. */}
+          <Toggle
+            id="setting-haptics"
+            label="Tap feedback"
+            hint={settings.haptics
+              ? "A brief response to a tap, on devices that have one. Touch only."
+              : "Taps do nothing you can feel."}
+            checked={settings.haptics}
+            onChange={toggle("haptics")}
+          />
+        </section>
+
         <section className="settings-group" aria-labelledby="settings-about">
           <h3 id="settings-about">About</h3>
           <dl className="settings-facts">

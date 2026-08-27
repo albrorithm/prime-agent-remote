@@ -34,6 +34,18 @@ export interface Settings {
    * its record, or enabling it would last exactly until the next launch.
    */
   turnEndNotifications: boolean;
+  /**
+   * Whether a tap should be felt as well as seen.
+   *
+   * Two unrelated mechanisms answer to this one switch, because a person does
+   * not care which one their phone has. iOS fires the Taptic Engine when a
+   * native switch toggles, which is why `SwitchHapticButton` keeps a
+   * transparent one over each control; Android has the Vibration API and no
+   * equivalent gesture, so it buzzes the motor instead. Safari does not
+   * implement the second and Chrome does not do the first, so neither platform
+   * can fire twice.
+   */
+  haptics: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -48,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
   turnsCollapsed: true,
   enterSends: true,
   turnEndNotifications: false,
+  haptics: true,
 };
 
 function pickString<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -85,6 +98,7 @@ export function normalizeSettings(value: unknown): Settings {
     turnsCollapsed: pickBoolean(stored.turnsCollapsed, DEFAULT_SETTINGS.turnsCollapsed),
     enterSends: pickBoolean(stored.enterSends, DEFAULT_SETTINGS.enterSends),
     turnEndNotifications: pickBoolean(stored.turnEndNotifications, DEFAULT_SETTINGS.turnEndNotifications),
+    haptics: pickBoolean(stored.haptics, DEFAULT_SETTINGS.haptics),
   };
 }
 
@@ -194,6 +208,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }), [settings, systemPrefersDark, setSetting, resetSettings]);
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
+}
+
+/**
+ * The haptics preference, for components that may render without a provider.
+ *
+ * `useSettings` throws without one, which is right for a settings screen and
+ * wrong here: `SwitchHapticButton` sits inside message rows and composers that
+ * several tests render bare, and a control should not refuse to exist because
+ * nobody wrapped it. Absent a provider the default answer is the default
+ * setting, and under one it stays reactive like any other.
+ */
+export function useHapticsEnabled(): boolean {
+  return useContext(SettingsContext)?.settings.haptics ?? DEFAULT_SETTINGS.haptics;
 }
 
 export function useSettings(): SettingsContextValue {
