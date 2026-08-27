@@ -133,14 +133,24 @@ export async function expandPackageDirectory(specifier: string): Promise<string>
   }
 }
 
+/**
+ * How Prime Agent is actually installed. Not `npm install -g prime-agent`:
+ * that package does not exist on the registry and never has, so the previous
+ * message sent anyone who hit it — which is precisely the people who do not
+ * have Prime Agent — to a 404. Its own installer places the package under the
+ * global node_modules this module already searches, which is why resolution
+ * was right while the instruction was wrong.
+ */
+export const PRIME_INSTALL_COMMAND = "curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh";
+
 export class PrimeModuleResolutionError extends Error {
   constructor(readonly attempted: PrimeModuleCandidate[]) {
     super(
       attempted.length === 0
-        ? `Could not find a Prime Agent build. Install it with \`npm install -g ${PRIME_PACKAGE_NAME}\`.`
+        ? `Could not find a Prime Agent build. Install it with \`${PRIME_INSTALL_COMMAND}\`.`
         : `Could not load a Prime Agent build exporting ${REQUIRED_PRIME_EXPORTS.join(", ")}. Tried:\n`
           + attempted.map((c) => `  - ${c.specifier} (${c.origin})`).join("\n")
-          + `\n\nInstall Prime Agent with \`npm install -g ${PRIME_PACKAGE_NAME}\`, or set PRIME_AGENT_MODULE`
+          + `\n\nInstall Prime Agent with \`${PRIME_INSTALL_COMMAND}\`, or set PRIME_AGENT_MODULE`
           + ` to a built module that exports them.`,
     );
     this.name = "PrimeModuleResolutionError";

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  PRIME_INSTALL_COMMAND,
   PRIME_PACKAGE_NAME,
   PrimeModuleResolutionError,
   REQUIRED_PRIME_EXPORTS,
@@ -148,7 +149,9 @@ describe("resolvePrimeModule", () => {
     const message = (error as Error).message;
     expect(message).toContain(PRIME_PACKAGE_NAME);
     expect(message).toContain(path.join(GLOBAL_ROOT, PRIME_PACKAGE_NAME));
-    expect(message).toContain("npm install -g");
+    // The instruction has to be one that works: `npm install -g prime-agent`
+      // resolves to nothing on the registry.
+      expect(message).toContain(PRIME_INSTALL_COMMAND);
   });
 });
 

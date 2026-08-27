@@ -9,7 +9,14 @@ or sponsored by Prime Intellect.
 
 ## Install and start
 
-Prime Agent itself must be installed (`npm install -g prime-agent`). Then:
+Prime Agent itself must be installed first — it is not on npm, so use its own
+installer:
+
+```bash
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+```
+
+Then:
 
 ```bash
 git clone https://github.com/albrorithm/prime-agent-mobile.git
