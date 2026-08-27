@@ -38,6 +38,15 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   useEffect(() => {
     if (manageId && !managed) setManageId(null);
   }, [manageId, managed]);
+  // The panel is hidden (not unmounted) on mobile, so a search typed before
+  // closing the drawer would otherwise survive to the next open and silently
+  // filter sessions the user no longer remembers searching for. Reset only on
+  // the visible->not-visible transition: this never fires while `visible`
+  // stays true (e.g. persistentDesktop, where the panel is always visible and
+  // must not clobber active typing).
+  useEffect(() => {
+    if (!visible) setQuery("");
+  }, [visible]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return catalog.agents;

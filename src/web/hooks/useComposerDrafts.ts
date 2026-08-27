@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export const DRAFTS_KEY = "prime-web-drafts";
 export const MAX_STORED_DRAFTS = 100;
@@ -62,6 +62,15 @@ export interface ComposerDrafts {
 // other composer hooks this one has no reset effect tied to `id`.
 export function useComposerDrafts(id: string): ComposerDrafts {
   const [drafts, setDraftsState] = useState<Record<string, string>>(loadDrafts);
+  // Per id, the last value this tab knows both it and storage agree on: the
+  // value at mount, or the value last adopted from another tab's write.
+  // Deliberately NOT updated by this tab's own edits (setDrafts below) — a
+  // draft's current value staying equal to this baseline is what marks it
+  // "untouched since last sync" (safe to adopt an incoming remote write);
+  // once a local edit makes them differ, that id stays a "this tab is
+  // actively editing it" conflict until the tab reloads, rather than
+  // silently adopting a remote write and clobbering what's being typed.
+  const syncedRef = useRef(drafts);
 
   function setDrafts(update: (current: Record<string, string>) => Record<string, string>) {
     setDraftsState((current) => {
@@ -74,6 +83,48 @@ export function useComposerDrafts(id: string): ComposerDrafts {
       return next;
     });
   }
+
+  // Two tabs open on the same session each keep their own in-memory copy of
+  // this draft map; without this, whichever tab's keystroke happens to write
+  // last silently overwrites the other's unsent text. This reconciles on the
+  // `storage` event (which only ever fires in *other* tabs, never the one
+  // that wrote): per agent id, adopt the incoming value only where this tab
+  // has no edit of its own since its last known sync — an id this tab is
+  // actively typing into is left alone rather than merged or clobbered, since
+  // a real conflict here isn't worth a CRDT for a draft textbox.
+  useEffect(() => {
+    function onStorage(event: StorageEvent) {
+      // sessionStorage is only ever read once (legacy migration) and then
+      // cleared, never written going forward, so nothing else can raise a
+      // same-key `storage` event that isn't this hook's own localStorage
+      // write in another tab.
+      if (event.key !== DRAFTS_KEY) return;
+      let incoming: Record<string, string>;
+      try {
+        incoming = event.newValue === null ? {} : parseDraftsPayload(event.newValue);
+      } catch {
+        return;
+      }
+      setDraftsState((current) => {
+        const synced = syncedRef.current;
+        const next: Record<string, string> = { ...current };
+        let changed = false;
+        for (const agentId of new Set([...Object.keys(current), ...Object.keys(incoming)])) {
+          const incomingValue = incoming[agentId] ?? "";
+          const currentValue = current[agentId] ?? "";
+          const syncedValue = synced[agentId] ?? "";
+          if (incomingValue === currentValue || currentValue !== syncedValue) continue;
+          next[agentId] = incomingValue;
+          changed = true;
+        }
+        if (!changed) return current;
+        syncedRef.current = next;
+        return next;
+      });
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   return { draft: drafts[id] ?? "", setDrafts };
 }

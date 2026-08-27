@@ -444,11 +444,21 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const sessionGeneration = useRef(0);
   const lifecycleAbort = useRef<AbortController | null>(null);
   const selectionGeneration = useRef(0);
+  // Bumped on every openAgent() entry, so a call superseded by a newer one
+  // (two sessions opened back to back, before the first's fetch resolves) can
+  // tell it no longer owns the trailing subscription cleanup below — without
+  // this, a stale call's cleanup can detach the *newer* call's just-attached
+  // stream, because it only sees "no snapshot yet" and not "superseded".
+  const openAgentGeneration = useRef(0);
   const socketRetryBlocked = useRef(false);
   // Holds the latest `initialize` so the socket-retry scheduler (defined before
   // `initialize` exists) can call it without a circular useCallback dependency.
   const initializeRef = useRef<() => Promise<void>>(async () => {});
-  // `undefined` until the launch URL has been read; null once consumed.
+  // `undefined` until the launch URL has been read; null once consumed. Set to
+  // null the instant a bootstrap succeeds, so the deep link is honored exactly
+  // once per app launch — not once per successful bootstrap, which would
+  // reapply it on every reconnect. A bootstrap that never succeeds leaves this
+  // `undefined`, so a later attempt can still consume it.
   const requestedAgentId = useRef<string | null | undefined>(undefined);
   // The CSRF token of the session this device last claimed its push
   // subscription for. Changes exactly when the session does.
@@ -771,9 +781,17 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       // the pairing token again, with the resume path sitting there unused.
       const value = await api.bootstrap({ signal: controller.signal, ownsUnauthorized: true });
       if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-      if (requestedAgentId.current === undefined) requestedAgentId.current = takeRequestedAgentId();
-      dispatch({ type: "bootstrap", value, requestedAgentId: requestedAgentId.current });
-      const first = value.catalog.agents.find((agent) => agent.id === requestedAgentId.current)
+      // Read-and-clear in one step: the ref is consumed for good the instant a
+      // bootstrap succeeds, regardless of what happens afterward, so a later
+      // re-initialize (socket backoff, online/visibilitychange, a manual
+      // reconnect) never reapplies a notification tap the user has since
+      // navigated away from. A local var carries the one value both the
+      // dispatch and the `first` lookup below need — `requestedAgentId.current`
+      // is already null by the time they run.
+      const requested = requestedAgentId.current === undefined ? takeRequestedAgentId() : requestedAgentId.current;
+      requestedAgentId.current = null;
+      dispatch({ type: "bootstrap", value, requestedAgentId: requested });
+      const first = value.catalog.agents.find((agent) => agent.id === requested)
         ?? value.catalog.agents.find((agent) => agent.parentId === null);
       if (first) {
         const streamId = `agent:${first.id}`;
@@ -901,6 +919,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const openAgent = useCallback(
     async (id: string) => {
       const generation = sessionGeneration.current;
+      // Captured before any await, so two calls fired back to back (a fast
+      // double-tap between two cold sessions) get distinct, increasing values.
+      const openGeneration = ++openAgentGeneration.current;
       const streamId = `agent:${id}`;
       subscriptions.current.add(streamId);
       attach(streamId);
@@ -908,6 +929,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         try {
           const loaded = await loadAgentHttp(id);
           if (generation !== sessionGeneration.current) return;
+          // Deliberately not gated on openGeneration: a superseded call's own
+          // snapshot is still worth caching, and dispatching it here is what
+          // lets the *newer* call's own cleanup below see this agent already
+          // has a snapshot instead of wrongly detaching it.
           dispatch({
             type: "snapshot",
             value: loaded.snapshot,
@@ -927,6 +952,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         }
       }
       if (generation !== sessionGeneration.current) return;
+      // A call that has been superseded by a newer openAgent() must not run
+      // this cleanup: it can only see "no snapshot yet" for the newer call's
+      // agent, not "superseded", and would detach the live stream the newer
+      // (currently selected) call just attached.
+      if (openGeneration !== openAgentGeneration.current) return;
       for (const existing of subscriptions.current) {
         if (existing !== "catalog" && existing !== streamId && !stateRef.current.snapshots[existing.slice(6)]) {
           detach(existing);

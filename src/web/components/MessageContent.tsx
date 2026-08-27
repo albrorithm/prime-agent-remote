@@ -343,15 +343,15 @@ function appendPart(parts: InlinePart[], value: string): void {
   else parts.push(value);
 }
 
-function renderList(list: Tokens.List, key: string): ReactElement {
+function renderList(list: Tokens.List, key: string, messageComplete: boolean): ReactElement {
   const items = list.items.map((item, itemIndex) => {
     const itemKey = `${key}-${itemIndex}`;
     const content = (item.tokens ?? []).map((child, childIndex) => {
       const childKey = `${itemKey}-${childIndex}`;
       if (child.type === "checkbox") return null;
-      if (child.type === "list") return renderList(child as Tokens.List, childKey);
+      if (child.type === "list") return renderList(child as Tokens.List, childKey, messageComplete);
       if (child.type === "text") return renderInlineTokens(child.tokens ?? [child], childKey);
-      return renderBlockToken(child, childKey);
+      return renderBlockToken(child, childKey, messageComplete);
     });
     return (
       <li key={itemKey} className={item.task ? "markdown-task-item" : undefined}>
@@ -432,7 +432,7 @@ function renderHeading(depth: number, tokens: Token[], key: string): ReactElemen
   }
 }
 
-function renderBlockquote(quote: Tokens.Blockquote, key: string): ReactElement {
+function renderBlockquote(quote: Tokens.Blockquote, key: string, messageComplete: boolean): ReactElement {
   const chain: Tokens.Blockquote[] = [quote];
   while (true) {
     const children = chain[chain.length - 1].tokens ?? [];
@@ -442,7 +442,7 @@ function renderBlockquote(quote: Tokens.Blockquote, key: string): ReactElement {
 
   const innermost = chain[chain.length - 1];
   let content: ReactNode = innermost.tokens?.map((child, childIndex) =>
-    renderBlockToken(child, `${key}-${chain.length}-${childIndex}`),
+    renderBlockToken(child, `${key}-${chain.length}-${childIndex}`, messageComplete),
   );
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     content = (
@@ -475,7 +475,7 @@ function isUnterminatedFencedCode(raw: string): boolean {
   return !lines.slice(1).some((line) => closer.test(line));
 }
 
-function renderBlockToken(token: Token, key: string): ReactNode {
+function renderBlockToken(token: Token, key: string, messageComplete: boolean): ReactNode {
   switch (token.type) {
     case "heading": {
       const heading = token as Tokens.Heading;
@@ -493,7 +493,10 @@ function renderBlockToken(token: Token, key: string): ReactNode {
           key={key}
           lang={(token as Tokens.Code).lang ?? ""}
           code={(token as Tokens.Code).text}
-          streaming={isUnterminatedFencedCode(token.raw)}
+          // A message already marked complete never shows a "writing…" block:
+          // fence-balance is only a stand-in for streaming state while the
+          // message itself is still in flight (see isUnterminatedFencedCode).
+          streaming={!messageComplete && isUnterminatedFencedCode(token.raw)}
         />
       );
     case "blockMath":
@@ -501,9 +504,9 @@ function renderBlockToken(token: Token, key: string): ReactNode {
     case "table":
       return renderTable(token as Tokens.Table, key);
     case "list":
-      return renderList(token as Tokens.List, key);
+      return renderList(token as Tokens.List, key, messageComplete);
     case "blockquote":
-      return renderBlockquote(token as Tokens.Blockquote, key);
+      return renderBlockquote(token as Tokens.Blockquote, key, messageComplete);
     case "hr":
       return <hr key={key} className="markdown-hr" />;
     case "space":
@@ -536,16 +539,25 @@ interface MarkdownBlockProps {
   token: Token;
   fingerprint: string;
   start: number;
+  messageComplete: boolean;
 }
 
 const MemoizedMarkdownBlock = memo(
-  function MarkdownBlock({ token, start }: MarkdownBlockProps) {
-    return <>{renderBlockToken(token, `md-${start}`)}</>;
+  function MarkdownBlock({ token, start, messageComplete }: MarkdownBlockProps) {
+    return <>{renderBlockToken(token, `md-${start}`, messageComplete)}</>;
   },
-  (previous, next) => previous.start === next.start && previous.fingerprint === next.fingerprint,
+  (previous, next) =>
+    previous.start === next.start
+    && previous.fingerprint === next.fingerprint
+    // A token's own text can stay byte-identical while the message around it
+    // flips from streaming to complete (an unclosed fence finishes with no
+    // further edits to that block's raw text) — the memo must still re-render
+    // in that case, or the "writing…" state and missing Copy button persist
+    // forever even though the message is done. See MessageContent's `complete`.
+    && previous.messageComplete === next.messageComplete,
 );
 
-function renderProse(text: string, segmentStart: number): ReactNode {
+function renderProse(text: string, segmentStart: number, messageComplete: boolean): ReactNode {
   if (text.length > MARKDOWN_PARSE_MAX_CHARS) return <p className="markdown-paragraph">{text}</p>;
   const tokens = pickMarkdownParser(text).lexer(text);
   const linksFingerprint = Object.keys(tokens.links).length > 0 ? JSON.stringify(tokens.links) : "";
@@ -556,7 +568,15 @@ function renderProse(text: string, segmentStart: number): ReactNode {
         const start = tokenStart;
         tokenStart += token.raw.length;
         const fingerprint = `${token.type}\0${token.raw}\0${linksFingerprint}`;
-        return <MemoizedMarkdownBlock key={start} token={token} fingerprint={fingerprint} start={start} />;
+        return (
+          <MemoizedMarkdownBlock
+            key={start}
+            token={token}
+            fingerprint={fingerprint}
+            start={start}
+            messageComplete={messageComplete}
+          />
+        );
       })}
     </>
   );
@@ -604,12 +624,23 @@ export function renderInline(text: string): Array<string | ReactElement> {
   return renderInlineTokens(tokens, "inline");
 }
 
-export function MessageContent({ text }: { text: string }) {
+export function MessageContent({ text, complete = false }: { text: string; complete?: boolean }) {
   const { settings } = useSettings();
   const { rawMarkdown } = settings;
   // The raw escape hatch must never reach marked or latex.ts, so the parse is
   // skipped rather than rendered and discarded.
-  const content = useMemo(() => (rawMarkdown ? null : renderProse(text, 0)), [text, rawMarkdown]);
+  //
+  // `complete` is the caller's authoritative "no more content is coming"
+  // signal (e.g. a message's `state === "complete"`). When true, every code
+  // block renders finished — indicator gone, Copy button present — even if
+  // its markdown happens to contain an unbalanced/odd fence count (the model
+  // legitimately emitted or truncated one). Fence-balance heuristics
+  // (isUnterminatedFencedCode) remain in charge only while `complete` is
+  // false, i.e. while a message may still be actively streaming.
+  const content = useMemo(
+    () => (rawMarkdown ? null : renderProse(text, 0, complete)),
+    [text, rawMarkdown, complete],
+  );
   if (!text) return null;
   if (rawMarkdown) return <p className="markdown-paragraph" data-raw-markdown="true">{text}</p>;
   return <>{content}</>;

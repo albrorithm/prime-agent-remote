@@ -11,6 +11,7 @@ export function Login() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError("");
     try {

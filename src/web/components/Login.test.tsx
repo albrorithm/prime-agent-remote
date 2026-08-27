@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Login } from "./Login";
@@ -56,6 +56,25 @@ describe("Login", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid pairing token");
     expect(screen.getByLabelText("Pairing token")).toHaveValue("bad-token");
+  });
+
+  it("ignores a second submit while the first pairing call is still in flight", async () => {
+    let resolvePair: () => void = () => {};
+    gatewayMock.pair = vi.fn(() => new Promise<void>((resolve) => { resolvePair = resolve; }));
+    const user = userEvent.setup();
+    render(<Login />);
+
+    await user.type(screen.getByLabelText("Pairing token"), "secret-token");
+    const form = screen.getByRole("button", { name: "Pair device" }).closest("form")!;
+
+    // Fire two submits back to back, before React has re-rendered the
+    // disabled submit button — a double-Enter or a slow-network double-tap
+    // can race past the disabled attribute this way.
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+
+    resolvePair();
+    await waitFor(() => expect(gatewayMock.pair).toHaveBeenCalledTimes(1));
   });
 
   it("falls back to a generic error for a non-Error rejection", async () => {

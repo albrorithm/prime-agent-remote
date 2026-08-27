@@ -334,6 +334,17 @@ describe("MessageContent", () => {
     expect(screen.queryByRole("button", { name: /copy/i })).toBeNull();
     expect(screen.getByText("writing…")).toBeDefined();
   });
+
+  it("renders a completed message with an unclosed fence as finished, not stuck writing", () => {
+    // A message the server has already marked complete can still contain an
+    // odd number of ``` fences (the model's own output legitimately included
+    // or truncated one). Completion must come from the caller's `complete`
+    // flag, not be re-derived from fence balance, or the UI shows "writing…"
+    // forever and never offers Copy.
+    render(<MessageContent text={"Before\n```js\nconst a = 1;"} complete />);
+    expect(screen.queryByText("writing…")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeDefined();
+  });
   it("keeps fenced code inside its ordered list container", () => {
     const { container } = render(
       <MessageContent text={"1. Do this:\n\n   ```js\n   work()\n   ```\n\n2. Continue"} />,

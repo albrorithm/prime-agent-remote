@@ -134,4 +134,78 @@ describe("useComposerDrafts", () => {
     expect(result.current.draft).toBe("from an old tab");
     expect(sessionStorage.getItem(DRAFTS_KEY)).toBeNull();
   });
+
+  describe("cross-tab reconciliation", () => {
+    function fireStorageEvent(newValue: string | null, oldValue: string | null = null) {
+      window.dispatchEvent(new StorageEvent("storage", { key: DRAFTS_KEY, newValue, oldValue }));
+    }
+
+    it("adopts another tab's newer draft for an id this tab hasn't touched", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      expect(result.current.draft).toBe("");
+
+      act(() => {
+        localStorage.setItem(DRAFTS_KEY, JSON.stringify({ "agent-1": "typed in another tab" }));
+        fireStorageEvent(JSON.stringify({ "agent-1": "typed in another tab" }));
+      });
+
+      expect(result.current.draft).toBe("typed in another tab");
+    });
+
+    it("does not clobber this tab's in-progress edit with a stale cross-tab write", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      act(() => {
+        result.current.setDrafts((current) => ({ ...current, "agent-1": "this tab's edit" }));
+      });
+      expect(result.current.draft).toBe("this tab's edit");
+
+      // Another tab's write races in after this tab already diverged from
+      // its last known sync (empty) — this tab's active edit must survive.
+      act(() => {
+        fireStorageEvent(JSON.stringify({ "agent-1": "other tab's stale value" }));
+      });
+
+      expect(result.current.draft).toBe("this tab's edit");
+    });
+
+    it("adopts an update for an untouched id while leaving an actively-edited id alone", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      act(() => {
+        result.current.setDrafts((current) => ({ ...current, "agent-1": "editing here" }));
+      });
+
+      act(() => {
+        localStorage.setItem(
+          DRAFTS_KEY,
+          JSON.stringify({ "agent-1": "clobber attempt", "agent-2": "from another tab" }),
+        );
+        fireStorageEvent(JSON.stringify({ "agent-1": "clobber attempt", "agent-2": "from another tab" }));
+      });
+
+      expect(result.current.draft).toBe("editing here");
+      const { result: other } = renderHook(() => useComposerDrafts("agent-2"));
+      expect(other.current.draft).toBe("from another tab");
+    });
+
+    it("ignores storage events for unrelated keys", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: "some-other-key",
+            newValue: JSON.stringify({ "agent-1": "should not apply" }),
+          }),
+        );
+      });
+      expect(result.current.draft).toBe("");
+    });
+
+    it("does not throw on a malformed cross-tab payload", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      expect(() => {
+        act(() => fireStorageEvent("not json"));
+      }).not.toThrow();
+      expect(result.current.draft).toBe("");
+    });
+  });
 });

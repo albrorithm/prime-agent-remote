@@ -165,12 +165,23 @@ export function App() {
       onPointerCancel={gesture.handlers.onPointerCancel}
       style={{ "--drawer-progress": drawerProgress } as React.CSSProperties}
     >
+      {/* A mutation error (e.g. "Could not end the session") can fire while a
+          drawer or the manage sheet is open. It must stay visible instead of
+          being hidden with the rest of the connection chrome, so this banner
+          gets its own shell-global-ui wrapper that only hides on overlay when
+          there's nothing to say. */}
+      <div
+        className={`shell-global-ui is-alert-layer ${mobileOverlayOpen && !gateway.error ? "is-modal-hidden" : ""}`}
+        aria-hidden={mobileOverlayOpen && !gateway.error ? "true" : undefined}
+        inert={mobileOverlayOpen && !gateway.error ? true : undefined}
+      >
+        <ConnectionBanner />
+      </div>
       <div
         className={`shell-global-ui ${mobileOverlayOpen ? "is-modal-hidden" : ""}`}
         aria-hidden={mobileOverlayOpen ? "true" : undefined}
         inert={mobileOverlayOpen ? true : undefined}
       >
-        <ConnectionBanner />
         {gateway.connection === "live" && <GestureHint />}
       </div>
 

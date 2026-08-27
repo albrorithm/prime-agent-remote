@@ -148,36 +148,56 @@ describe("mobile shell navigation", () => {
   });
 
   it("contains mobile modal focus and hides global controls above the drawer", async () => {
-    gatewayMock.current = { ...gatewayMock.current, backend: "demo", error: "Request failed" };
+    gatewayMock.current = { ...gatewayMock.current, backend: "demo" };
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "Open sessions" }));
     expect(screen.getByRole("dialog", { name: "Sessions" })).toHaveAttribute("aria-modal", "true");
     const stage = document.querySelector(".conversation-stage")!;
-    const globalUi = document.querySelector(".shell-global-ui")!;
+    // The gesture hint lives in its own shell-global-ui wrapper, separate from
+    // the connection banner's (see the next test) — it has no reason to stay
+    // reachable while a modal drawer sits on top of it.
+    const hintUi = document.querySelector(".gesture-hint")!.closest(".shell-global-ui")!;
     expect(stage).toHaveAttribute("inert");
     expect(stage).toHaveAttribute("aria-hidden", "true");
-    expect(globalUi).toHaveAttribute("inert");
-    expect(globalUi).toHaveAttribute("aria-hidden", "true");
-    expect(globalUi).toHaveClass("is-modal-hidden");
-    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(hintUi).toHaveAttribute("inert");
+    expect(hintUi).toHaveAttribute("aria-hidden", "true");
+    expect(hintUi).toHaveClass("is-modal-hidden");
     expect(screen.queryByRole("button", { name: "Dismiss hint" })).not.toBeInTheDocument();
     // The demo chip lives in the transcript header now (a static chip, not a
     // floating overlay), so it inerts along with the rest of the stage.
     expect(document.querySelector(".conversation-header")).toContainElement(screen.getByText("Demo"));
 
     // Even programmatic focus outside the modal is recovered on the next Tab.
-    const hiddenRetry = document.querySelector<HTMLButtonElement>(".connection-banner button")!;
-    hiddenRetry.focus();
-    fireEvent.keyDown(hiddenRetry, { key: "Tab" });
+    const hiddenDismiss = document.querySelector<HTMLButtonElement>(".gesture-hint button")!;
+    hiddenDismiss.focus();
+    fireEvent.keyDown(hiddenDismiss, { key: "Tab" });
     expect(screen.getByRole("button", { name: "Open settings" })).toHaveFocus();
 
     await user.click(screen.getByRole("button", { name: "Close sessions" }));
     expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
     expect(stage).not.toHaveAttribute("inert");
-    expect(globalUi).not.toHaveAttribute("inert");
-    expect(globalUi).not.toHaveClass("is-modal-hidden");
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(hintUi).not.toHaveAttribute("inert");
+    expect(hintUi).not.toHaveClass("is-modal-hidden");
+    expect(screen.getByRole("button", { name: "Dismiss hint" })).toBeInTheDocument();
+  });
+
+  it("keeps a live action error visible and reachable even with a drawer open", async () => {
+    // A mutation error (e.g. "Could not end the session") fired from the
+    // drawer or the manage sheet must not go invisible behind the overlay it
+    // was triggered from.
+    gatewayMock.current = { ...gatewayMock.current, error: "Could not end the session" };
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Open sessions" }));
+    const bannerUi = document.querySelector(".connection-banner")!.closest(".shell-global-ui")!;
+    expect(bannerUi).not.toHaveAttribute("inert");
+    expect(bannerUi).not.toHaveAttribute("aria-hidden");
+    expect(bannerUi).not.toHaveClass("is-modal-hidden");
+    expect(screen.getByRole("status")).toHaveTextContent("Could not end the session");
+    // Honest button: a live connection with an action error offers no Retry,
+    // since reconnect() would not fix it.
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
   it("restores focus to the connected header trigger when the opener disappears", async () => {

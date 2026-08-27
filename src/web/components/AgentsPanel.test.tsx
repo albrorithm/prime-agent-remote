@@ -176,4 +176,32 @@ describe("AgentsPanel", () => {
     expect(screen.getByPlaceholderText("Search sessions")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
   });
+
+  it("clears a typed search when the drawer closes, so reopening starts fresh", async () => {
+    // The panel is hidden rather than unmounted on mobile, so React state
+    // like `query` otherwise survives a close/reopen: a stale search would
+    // silently filter sessions the user no longer remembers searching for.
+    const user = userEvent.setup();
+    const { rerender } = render(<SettingsProvider><AgentsPanel visible /></SettingsProvider>);
+
+    await user.type(screen.getByPlaceholderText("Search sessions"), "db-migration");
+    expect(screen.getByPlaceholderText("Search sessions")).toHaveValue("db-migration");
+
+    rerender(<SettingsProvider><AgentsPanel visible={false} /></SettingsProvider>);
+    rerender(<SettingsProvider><AgentsPanel visible /></SettingsProvider>);
+
+    expect(screen.getByPlaceholderText("Search sessions")).toHaveValue("");
+    expect(screen.queryByRole("treeitem", { name: /docs-cleanup/i })).toBeInTheDocument();
+  });
+
+  it("does not clear an in-progress search while the panel stays visible", async () => {
+    // persistentDesktop keeps `visible` true throughout, so a naive
+    // every-render reset would erase what the user is actively typing.
+    const user = userEvent.setup();
+    render(<SettingsProvider><AgentsPanel visible /></SettingsProvider>);
+
+    await user.type(screen.getByPlaceholderText("Search sessions"), "db-migration");
+
+    expect(screen.getByPlaceholderText("Search sessions")).toHaveValue("db-migration");
+  });
 });

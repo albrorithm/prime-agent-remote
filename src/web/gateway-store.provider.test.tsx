@@ -230,6 +230,48 @@ describe("GatewayProvider notification routing", () => {
 
     await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-a"));
   });
+
+  // The deep link is a one-time launch instruction, not a standing preference.
+  // Before this, the ref that caches it was never cleared, so every later
+  // re-initialize (socket backoff, online/visibilitychange, a manual
+  // reconnect) reapplied it and silently snapped the user back to whatever
+  // notification they tapped, however long ago.
+  it("does not re-apply a notification deep link on a later reconnect", async () => {
+    window.history.replaceState(null, "", "/?agent=agent-b");
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
+
+    // The user moves on from the deep-linked session.
+    await act(() => result.current.selectAgent("agent-a"));
+    expect(result.current.selectedAgentId).toBe("agent-a");
+
+    // A reconnect re-runs the whole bootstrap flow.
+    act(() => result.current.reconnect());
+    await waitFor(() => expect(apiMock.bootstrap).toHaveBeenCalledTimes(2));
+
+    expect(result.current.selectedAgentId).toBe("agent-a");
+  });
+
+  // The consuming read sits after the `await api.bootstrap(...)`, deliberately:
+  // a bootstrap that never succeeds must leave the deep link unconsumed, so a
+  // later attempt can still honor it. This pins that placement.
+  it("still honors the deep link on the first bootstrap that actually succeeds", async () => {
+    window.history.replaceState(null, "", "/?agent=agent-b");
+    apiMock.bootstrap
+      .mockRejectedValueOnce(new Error("bootstrap unavailable"))
+      .mockResolvedValueOnce(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.connection).toBe("offline"));
+
+    act(() => result.current.reconnect());
+
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
+  });
 });
 
 describe("GatewayProvider recovery and state ownership", () => {
@@ -602,6 +644,60 @@ describe("GatewayProvider recovery and state ownership", () => {
     // the agent instead of leaving it stuck with no snapshot at all.
     await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
     expect(result.current.snapshots["agent-a"]?.revision).toBe(1);
+  });
+
+  /* A fast double-tap between two cold sessions. openAgent()'s trailing
+     cleanup detaches any subscription that has no snapshot yet, to prune
+     abandoned in-flight selections. Before the generation guard, two
+     concurrent openAgent calls shared no way to tell "abandoned" apart from
+     "still loading, but winning": whichever call's fetch resolved first ran
+     that cleanup and saw the *other* call's subscription with no snapshot —
+     even when that other call was the one the user actually landed on. Its
+     live stream was silently detached, with no visible sign beyond realtime
+     updates simply stopping. */
+  it("does not detach the winning session's stream when a superseded openAgent call resolves first", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-r"), summary("agent-a"), summary("agent-b")]));
+    const deferredA = deferred<AgentSnapshot>();
+    const deferredB = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockImplementation((id: string) => {
+      if (id === "agent-a") return deferredA.promise;
+      if (id === "agent-b") return deferredB.promise;
+      return Promise.resolve(snapshot(id));
+    });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-r"));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    // Tap agent-a, then tap agent-b immediately after — before agent-a's
+    // snapshot load finishes. agent-b is what the user actually lands on.
+    let selectingA!: Promise<void>;
+    let selectingB!: Promise<void>;
+    act(() => {
+      selectingA = result.current.selectAgent("agent-a");
+      selectingB = result.current.selectAgent("agent-b");
+    });
+    expect(result.current.selectedAgentId).toBe("agent-b");
+
+    // The superseded call's (agent-a's) fetch resolves first — the ordering
+    // that lets its trailing cleanup see agent-b's subscription with no
+    // snapshot yet, and wrongly detach it, without the generation guard.
+    await act(async () => {
+      deferredA.resolve(snapshot("agent-a"));
+      await selectingA;
+    });
+    await act(async () => {
+      deferredB.resolve(snapshot("agent-b"));
+      await selectingB;
+    });
+
+    expect(result.current.selectedAgentId).toBe("agent-b");
+    expect(result.current.snapshots["agent-b"]).toBeDefined();
+    const detachedWinner = socket.sent.some((frame) => {
+      const parsed = JSON.parse(frame) as { type?: string; streamId?: string };
+      return parsed.type === "detach" && parsed.streamId === "agent:agent-b";
+    });
+    expect(detachedWinner).toBe(false);
   });
 
   /* A transcript that fails must say so. Before this, a thrown loadAgent left
