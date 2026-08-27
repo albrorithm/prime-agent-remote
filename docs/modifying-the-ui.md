@@ -109,6 +109,36 @@ is up, so fixed would fail twice over.
 **If you are about to make the shell hold still while the keyboard opens: that
 is the bug. It has been tried.**
 
+### Hands-off needs a way out
+
+Being hands-off is half a rule. The first version of it decided the question
+with `focusedEditable() || (trackingKeyboard && keyboard > 0)`, which has no
+exit while a field keeps focus — and iOS does not reliably blur when its
+keyboard goes. Tapping Done, or swiping the keyboard away, leaves the textarea
+focused with nothing on screen.
+
+The hook then stayed hands-off for the rest of the session, and three separate
+complaints came out of that one latch:
+
+- the page stayed where iOS scrolled it, so the header was gone and stayed
+  gone — and the document is `overflow: hidden` at the top level, so that is
+  not something a reader can scroll back;
+- `--viewport-height` was never re-published, so the shell kept a
+  keyboard-shrunk height into the next keyboard, and the composer sat at the
+  bottom of a box that ended well above the keyboard with black below it;
+- `--keyboard-height` stayed published, so the composer kept its home-indicator
+  inset drained with no keyboard covering the strip.
+
+A visual viewport at its full height means there is no keyboard, whatever has
+focus, and that is the release. It waits `KEYBOARD_GONE_MS` first: a full-height
+reading *during* the animation is one frame between two others, not an ending,
+and believing it would put the scroll clamp back.
+
+Restoring the scroll once the keyboard is gone is not that clamp. The clamp ran
+inside the scroll event, mid-animation, against a scroll iOS was still making.
+Restoring runs a quarter second after the keyboard has left, when nothing is
+competing for the scroll position.
+
 The rules that follow from this:
 
 - A new full-screen fixed layer joins the `--viewport-top` / `--viewport-height`
@@ -129,6 +159,15 @@ any of this — but know its limit: it changes the numbers a scripted viewport
 reports and cannot scroll the page the way iOS does. It can prove the shell is
 left alone; it cannot tell you where the composer ends up. That answer needs a
 real device, and six rounds of this bug were spent learning it.
+
+For that answer there is `src/web/viewport-trace.ts`, which is inert unless the
+URL carries `?vptrace=1`. It prints the numbers that tell the two shapes of this
+bug apart on a phone: `shellH` against `docH` says whether the shell is short or
+merely scrolled, and `GAP` measures how far the composer is from the bottom of
+the visible viewport — zero is hugging. It samples on a timer and never on
+`requestAnimationFrame`, because iOS starves rAF for ~85ms across a keyboard
+transition and an earlier version of this panel reported "nothing moved" when
+the truth was "we never looked".
 
 ## House rules that apply to any change here
 
