@@ -125,9 +125,11 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   if (pushService) {
     backend.onAttentionAdded?.((attention) => {
       const agents = backend.catalog().agents;
+      // `notificationLabel`, never `name`: a display name may be the first user
+      // message or the daemon's recap, and neither is allowed on a lock screen.
       const payload = buildAttentionPushPayload(
         attention,
-        agents.find((agent) => agent.id === attention.agentId)?.name,
+        agents.find((agent) => agent.id === attention.agentId)?.notificationLabel,
         attentionAgentCount(agents),
       );
       void pushService.notify(payload);

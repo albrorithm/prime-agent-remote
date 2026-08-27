@@ -2347,6 +2347,11 @@ export class PrimeBackend implements AgentBackend {
     const recap = conciseTitle(summary.summary);
     const title = conciseTitle(summary.sessionName) ?? conciseTitle(summary.firstMessage);
     const name = title ?? recap ?? (parentId ? "Subagent" : "Untitled session");
+    /* Neither of these can be conversation text: one is typed into the name
+       field, the other is a path. `name` cannot be used here — it falls back to
+       the first user message. */
+    const notificationLabel = conciseTitle(summary.sessionName)
+      ?? (typeof summary.cwd === "string" && summary.cwd ? conciseTitle(path.basename(summary.cwd)) : undefined);
     /* Absent, not invented: a row with no recap should fall back to its working
        directory on the client, which it cannot do if we hand it boilerplate. */
     const description = title ? recap : undefined;
@@ -2356,6 +2361,7 @@ export class PrimeBackend implements AgentBackend {
       parentId,
       depth: Math.max(0, summary.rlmDepth ?? (parentId ? 1 : 0)),
       name,
+      ...(notificationLabel ? { notificationLabel } : {}),
       ...(description ? { description } : {}),
       cwd: typeof summary.cwd === "string" && summary.cwd ? summary.cwd : undefined,
       lifecycle,

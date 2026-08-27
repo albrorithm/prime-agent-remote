@@ -1554,6 +1554,70 @@ describe("PrimeBackend", () => {
     }
   });
 
+  // docs/security.md and push-payload.ts both say categorically that a
+  // notification carries no conversation text. Since a display name can now be
+  // the first user message, the push path needs a label drawn from somewhere
+  // else, and that has to hold for a session the user never named.
+  it("never lets conversation text become the label a lock screen may show", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = [
+      {
+        id: "unnamed-row",
+        sessionId: "private-unnamed",
+        activeSessionId: "private-unnamed-active",
+        firstMessage: "Rotate the production signing key before Friday",
+        cwd: "/projects/alpha",
+      },
+      {
+        id: "named-row",
+        sessionId: "private-named",
+        activeSessionId: "private-named-active",
+        sessionName: "Key rotation",
+        firstMessage: "Rotate the production signing key before Friday",
+        cwd: "/projects/alpha",
+      },
+      {
+        id: "homeless-row",
+        sessionId: "private-homeless",
+        activeSessionId: "private-homeless-active",
+        firstMessage: "Rotate the production signing key before Friday",
+      },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agents = backend.catalog().agents;
+      expect(agents).toHaveLength(3);
+
+      const unnamed = agents.find((agent) => agent.cwd === "/projects/alpha" && agent.name.startsWith("Rotate"));
+      expect(unnamed).toBeDefined();
+      // The title is the message, because that is the best thing to call it
+      // in an authenticated list...
+      expect(unnamed?.name).toBe("Rotate the production signing key before Friday");
+      // ...and the lock screen gets the directory instead.
+      expect(unnamed?.notificationLabel).toBe("alpha");
+
+      const named = agents.find((agent) => agent.name === "Key rotation");
+      expect(named?.notificationLabel).toBe("Key rotation");
+
+      // No name and no directory: nothing safe to say, so it says nothing and
+      // push-payload falls back to "Prime Agent".
+      const homeless = agents.find((agent) => agent.cwd === undefined && agent.name.startsWith("Rotate"));
+      expect(homeless).toBeDefined();
+      expect(homeless?.notificationLabel).toBeUndefined();
+
+      for (const agent of agents) {
+        expect(agent.notificationLabel ?? "").not.toContain("signing key");
+      }
+    } finally {
+      fixture.sessions = originalSessions;
+      hub.close();
+      await backend.close();
+    }
+  });
+
   it("projects compact thinking and tool rows from an inactive saved session", async () => {
     const directory = await mkdtemp(join(tmpdir(), "prime-mobile-session-"));
     const sessionFile = join(directory, "session.jsonl");

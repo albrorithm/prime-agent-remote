@@ -99,6 +99,10 @@ function agent(
     createdAt: now,
     updatedAt: now,
     capabilities: fullCapabilities,
+    /* Safe to mirror `name` here only because every demo name is fixture text
+       written into this file. The live backend must not do this: there, a name
+       can be the first user message. */
+    notificationLabel: input.name,
     ...input,
   };
 }

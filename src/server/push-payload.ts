@@ -32,7 +32,12 @@ const FALLBACK_AGENT_NAME = "Prime Agent";
  */
 export interface AttentionPushPayload {
   version: typeof PUSH_PAYLOAD_VERSION;
-  /** Who wants you: the session's display name. */
+  /**
+   * Who wants you. Not the session's display name — that falls back to the
+   * first user message and then to the daemon's recap, both conversation text.
+   * The caller passes `AgentSummary.notificationLabel`, which is drawn only
+   * from a name a person typed or the session's directory.
+   */
   title: string;
   /** What kind of attention, and nothing about its subject. */
   body: string;

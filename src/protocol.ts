@@ -82,6 +82,15 @@ export interface AgentSummary {
   parentId: string | null;
   depth: number;
   name: string;
+  /**
+   * What a lock screen may call this session, when `name` may not be said aloud.
+   * `name` falls back to the first user message and then to the daemon's recap,
+   * both of which are conversation text; `docs/security.md` and
+   * `push-payload.ts` state categorically that a notification carries none. So
+   * this is drawn only from sources that never are: a name a person typed, and
+   * the directory the session runs in. Absent when neither exists.
+   */
+  notificationLabel?: string;
   description?: string;
   cwd?: string;
   lifecycle: AgentLifecycle;
