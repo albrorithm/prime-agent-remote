@@ -267,6 +267,17 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .switch-haptic-button { position: relative; display: inline-grid; cursor: pointer; }
 .switch-haptic-input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .switch-haptic-input:disabled { cursor: not-allowed; }
+/* The switch exists to be tapped by a finger, because toggling a native switch
+   is what makes iOS fire the Taptic Engine. A pointer that hovers has no
+   haptics to gain from it and something to lose: the switch is a sibling of the
+   button it covers, not a child, so with it in the way the pointer is never
+   over the button and `:hover` on the real control never matches. Dropping it
+   for fine pointers restores every hover and active state, and the click falls
+   through to the button, which does the same work. An iPad with a trackpad
+   matches this too and loses nothing — iPads have no switch haptics either. */
+@media (hover: hover) and (pointer: fine) {
+  .switch-haptic-input { display: none; }
+}
 
 .connection-banner { position: fixed; z-index: 80; top: calc(var(--viewport-top, 0px) + env(safe-area-inset-top) + 5px); left: 50%; display: flex; align-items: center; justify-content: center; gap: 7px; max-width: calc(100vw - 24px); min-height: 36px; padding: 6px 10px; transform: translateX(-50%); border: 1px solid var(--border-emphasis); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 30px var(--shadow); font-size: .75rem; font-weight: 650; }
 .connection-banner svg { width: 14px; height: 14px; }
