@@ -18,12 +18,14 @@ import { clearGatewayState, isProcessAlive, resolveStatus, writeGatewayState } f
 const execFileAsync = promisify(execFile);
 
 /**
- * Whether the thing answering on `host:port` is THIS gateway, not merely
- * something that accepted the connection — another process already on the
- * port, or this gateway's own predecessor still tearing down mid-restart.
+ * Whether the thing answering on `host:port` is a gateway of ours at all, as
+ * opposed to something else that merely accepted the connection.
+ *
  * `GET /api/v1/bootstrap` unauthenticated always 401s with a fixed body; see
  * `gateway-identity.ts` for why that is a safe thing to check without a
- * dedicated health endpoint.
+ * dedicated health endpoint. Note the limit: it identifies the software, not
+ * the instance. Two gateways answer this identically, so nothing here can tell
+ * ours from somebody else's.
  */
 async function respondsAsGateway(origin: string): Promise<boolean> {
   try {
@@ -35,25 +37,53 @@ async function respondsAsGateway(origin: string): Promise<boolean> {
   }
 }
 
+/** A wildcard bind is not a connectable address; loopback is inside it. */
+export function connectableHost(host: string): string {
+  return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+}
+
+export function gatewayOrigin(host: string, port: number): string {
+  return `http://${connectableHost(host)}:${port}`;
+}
+
 /**
- * Waits until this gateway, specifically, is serving the port.
+ * Waits for a freshly spawned gateway to come up, and says which way it ended.
  *
  * A spawned process is not a serving one, and a serving process is not
- * necessarily this one. Reporting "running" from a live pid alone, or from
- * any TCP accept, is how a launcher ends up telling someone to open a URL
- * that refuses the connection or belongs to something else entirely, and how
- * an agent concludes a change is live when nothing is listening.
+ * necessarily this one. `probe` can only answer "is a gateway serving this
+ * port" — never "is it mine" — so a probe on its own reports success when the
+ * port belongs to somebody else's gateway and this child died on EADDRINUSE.
+ * That is how `start --demo` against an occupied port printed a demo token for
+ * a URL serving the real backend, and how `stop` was then left holding a pid
+ * that had never served anything.
+ *
+ * `isAlive` supplies the missing half. It is still not proof of identity —
+ * only `start`'s refusal to spawn onto a port that already answers gives that
+ * — but a probe that succeeds counts only while the process it was started
+ * for is still running, and a child that dies is reported as died rather than
+ * waited out for the full timeout.
  */
-async function waitForListening(host: string, port: number, timeoutMs = 15_000): Promise<boolean> {
-  // A wildcard bind is not a connectable address; loopback is inside it.
-  const target = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const origin = `http://${target}:${port}`;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await respondsAsGateway(origin)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+export async function waitForOurGateway(options: {
+  probe: () => Promise<boolean>;
+  isAlive: () => boolean;
+  timeoutMs?: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<"listening" | "died" | "timeout"> {
+  const { probe, isAlive } = options;
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const intervalMs = options.intervalMs ?? 200;
+  const now = options.now ?? (() => Date.now());
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (await probe()) return isAlive() ? "listening" : "died";
+    if (!isAlive()) return "died";
+    await sleep(intervalMs);
   }
-  return false;
+  return "timeout";
 }
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -294,6 +324,22 @@ async function start(options: Options): Promise<number> {
   const mode = options.mode ?? defaultExposureMode({ tailscale: Boolean(tailscaleHost) });
   const exposure = resolveExposure({ mode, port, tailscaleHost, localHostname: localHostname() });
 
+  // Refuse the port before spawning anything. A gateway cannot recognise
+  // itself over HTTP (see `waitForOurGateway`), so once a second one is in
+  // the picture every later check reads the first one's replies as proof that
+  // our child came up — and we go on to print a URL, and a setup token, for
+  // somebody else's gateway. The state file only knows about instances this
+  // CLI started, so it cannot catch this on its own.
+  if (await respondsAsGateway(gatewayOrigin(exposure.host, port))) {
+    line();
+    line(`Port ${port} already answers as a prime-agent-mobile gateway, and it is not one this CLI started.`);
+    line("Another checkout, a real gateway when you asked for --demo (both default to the");
+    line("same port), or one left behind by a --foreground run that was killed.");
+    line();
+    line("Give this one its own port with `--port`, or stop the other one first.");
+    return 1;
+  }
+
   await ensureBuilt();
 
   const token = await loadOrCreatePairingToken(config.pairingTokenPath);
@@ -337,25 +383,27 @@ async function start(options: Options): Promise<number> {
     stdio: "ignore",
   });
   child.unref();
-  if (!child.pid) {
+  const pid = child.pid;
+  if (!pid) {
     line("Could not start the gateway.");
     return 1;
   }
 
-  if (!await waitForListening(exposure.host, port)) {
+  const outcome = await waitForOurGateway({
+    probe: () => respondsAsGateway(gatewayOrigin(exposure.host, port)),
+    isAlive: () => isProcessAlive(pid),
+  });
+  if (outcome !== "listening") {
     line();
-    line(`The gateway started (pid ${child.pid}) but nothing is listening on port ${port}.`);
+    if (outcome === "died") line(`The gateway (pid ${pid}) exited without serving port ${port}.`);
+    else line(`The gateway started (pid ${pid}) but nothing is listening on port ${port}.`);
     line("Run `prime-agent-mobile start --foreground` to see why.");
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      try { process.kill(child.pid, "SIGTERM"); } catch { /* already gone */ }
-    }
+    signal(pid, "SIGTERM");
     return 1;
   }
 
   await writeGatewayState(config.gatewayStatePath, {
-    pid: child.pid,
+    pid,
     url: exposure.url,
     host: exposure.host,
     port,
@@ -502,9 +550,45 @@ async function devices(options: Options): Promise<number> {
   return 0;
 }
 
+/** The name `/webui` shells out to, and the name npm installs this under. */
+export const CLI_NAME = "prime-agent-mobile";
+
+/**
+ * What `/webui` will actually find when it shells out.
+ *
+ * The extension calls a bare `prime-agent-mobile`, so copying the file into
+ * ~/.prime proves nothing on its own — the command is only as good as the one
+ * on PATH, and a checkout that was never linked has none. Reporting a clean
+ * install in that case moves the failure to first use inside a Prime Agent
+ * session, where the cause is no longer visible.
+ *
+ * Running `help` rather than merely locating a file also catches the npm 11
+ * case: a git install whose `prepare` script was skipped leaves the bin entry
+ * present but unbuilt, and every subcommand exits 0 having printed nothing.
+ */
+export function readCliCheck(result: { error?: NodeJS.ErrnoException; stdout?: string }): "ok" | "missing" | "silent" {
+  if (result.error) return result.error.code === "ENOENT" ? "missing" : "silent";
+  return (result.stdout ?? "").trim().length > 0 ? "ok" : "silent";
+}
+
+async function checkCliOnPath(): Promise<"ok" | "missing" | "silent"> {
+  try {
+    const { stdout } = await execFileAsync(CLI_NAME, ["help"], { timeout: 10_000 });
+    return readCliCheck({ stdout });
+  } catch (error) {
+    return readCliCheck({ error: error as NodeJS.ErrnoException });
+  }
+}
+
 /**
  * Installs the /webui slash command globally, so it exists in every Prime
  * Agent session rather than only inside this checkout.
+ *
+ * Deliberately a command someone runs, not something `npm install` does for
+ * them: `prepare` fires for contributors and CI too, and writing into another
+ * tool's config directory from a build script is not a side effect an install
+ * should have. It would also install a command that cannot work yet, since
+ * nothing has put the CLI on PATH by then.
  */
 async function installCommand(): Promise<number> {
   const source = path.join(projectRoot, "extensions", "webui.ts");
@@ -518,6 +602,18 @@ async function installCommand(): Promise<number> {
   await copyFile(source, destination);
   line(`Installed /webui to ${destination}`);
   line();
+
+  const cli = await checkCliOnPath();
+  if (cli !== "ok") {
+    line(`It will not work yet. \`/webui\` shells out to a bare \`${CLI_NAME}\`, and`);
+    line(cli === "missing"
+      ? "nothing on PATH answers to that name."
+      : `\`${CLI_NAME} help\` prints nothing, which is a git install whose build was skipped.`);
+    line();
+    line("From this checkout: `npm link`. Then run `/webui` in a new session.");
+    return 1;
+  }
+
   line("`/webui` reports where the UI is served, which is the address to verify");
   line("changes against. See docs/modifying-the-ui.md.");
   line();

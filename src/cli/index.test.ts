@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isProgramEntry, localHostname, parseArguments } from "./index.js";
+import { connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
 
 /* Every npm `bin` is a symlink, so this is the ordinary case, not an edge one:
    installed under its own name the CLI used to print nothing and exit 0 for
@@ -97,5 +97,115 @@ describe("localHostname", () => {
 
   it("strips a trailing dot", () => {
     expect(localHostname("study.local.")).toBe("study.local");
+  });
+});
+
+describe("connectableHost", () => {
+  it("turns a wildcard bind into an address something can actually connect to", () => {
+    expect(connectableHost("0.0.0.0")).toBe("127.0.0.1");
+    expect(connectableHost("::")).toBe("127.0.0.1");
+  });
+
+  it("leaves a real bind address alone", () => {
+    expect(connectableHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(gatewayOrigin("0.0.0.0", 8787)).toBe("http://127.0.0.1:8787");
+  });
+});
+
+/* The bug this exists for: `start --demo` on a port a real gateway already
+   held printed a demo token and "Running at ...", because a probe cannot tell
+   one gateway from another and the demo child had already died on EADDRINUSE.
+   An already-paired phone opening that URL lands in real sessions with no
+   token prompt in the way. */
+describe("waitForOurGateway", () => {
+  const clock = () => {
+    let time = 0;
+    return { now: () => time, sleep: async (ms: number) => { time += ms; } };
+  };
+
+  it("reports listening only when the process it waited for is still alive", async () => {
+    const { now, sleep } = clock();
+    await expect(waitForOurGateway({
+      probe: async () => true,
+      isAlive: () => true,
+      now,
+      sleep,
+    })).resolves.toBe("listening");
+  });
+
+  it("calls a port that answers while our child is gone somebody else's gateway", async () => {
+    const { now, sleep } = clock();
+    await expect(waitForOurGateway({
+      probe: async () => true,
+      isAlive: () => false,
+      now,
+      sleep,
+    })).resolves.toBe("died");
+  });
+
+  it("gives up as soon as the child dies rather than waiting out the timeout", async () => {
+    const { now, sleep } = clock();
+    let alive = true;
+    let polls = 0;
+    const outcome = await waitForOurGateway({
+      probe: async () => { polls += 1; if (polls === 2) alive = false; return false; },
+      isAlive: () => alive,
+      now,
+      sleep,
+      timeoutMs: 15_000,
+      intervalMs: 200,
+    });
+    expect(outcome).toBe("died");
+    expect(polls).toBe(2);
+    expect(now()).toBeLessThan(1_000);
+  });
+
+  it("waits out a slow but living start, then reports it", async () => {
+    const { now, sleep } = clock();
+    let polls = 0;
+    await expect(waitForOurGateway({
+      probe: async () => { polls += 1; return polls > 5; },
+      isAlive: () => true,
+      now,
+      sleep,
+      intervalMs: 200,
+    })).resolves.toBe("listening");
+  });
+
+  it("times out when nothing ever answers and the process never dies", async () => {
+    const { now, sleep } = clock();
+    await expect(waitForOurGateway({
+      probe: async () => false,
+      isAlive: () => true,
+      now,
+      sleep,
+      timeoutMs: 1_000,
+      intervalMs: 200,
+    })).resolves.toBe("timeout");
+  });
+});
+
+/* `install-command` copying the file is the easy half. The command it installs
+   shells out to a bare `prime-agent-mobile`, so a checkout that was never
+   linked gets a clean "Installed /webui" and then a failure inside a Prime
+   Agent session, where nothing points back at the cause. */
+describe("readCliCheck", () => {
+  it("passes a CLI that answers", () => {
+    expect(readCliCheck({ stdout: "prime-agent-mobile — a phone-sized web UI\n" })).toBe("ok");
+  });
+
+  it("calls a name nothing on PATH answers to missing", () => {
+    expect(readCliCheck({ error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) })).toBe("missing");
+  });
+
+  it("calls a bin that runs but prints nothing silent, not ok", () => {
+    // npm 11 skipping a git dependency's prepare script: the bin exists,
+    // exits 0, and has no build behind it.
+    expect(readCliCheck({ stdout: "" })).toBe("silent");
+    expect(readCliCheck({ stdout: "   \n" })).toBe("silent");
+  });
+
+  it("does not read a non-ENOENT failure as absence", () => {
+    expect(readCliCheck({ error: Object.assign(new Error("EACCES"), { code: "EACCES" }) })).toBe("silent");
   });
 });
