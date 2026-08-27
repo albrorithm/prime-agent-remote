@@ -24,6 +24,13 @@ export interface StoredPushSubscription {
   /** The gateway session that most recently claimed this endpoint. */
   sessionId: string;
   createdAt: string;
+  /**
+   * Whether this device also asked to be told when an agent finishes its turn,
+   * not only when one needs an answer. Per device and off unless asked for:
+   * turn-end fires far more often than attention ever does, and it is a
+   * different appetite for interruption rather than a different agent.
+   */
+  turnEnd?: boolean;
 }
 
 const storedSubscriptionSchema = z.object({
@@ -32,6 +39,12 @@ const storedSubscriptionSchema = z.object({
   auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   sessionId: z.string().min(1).max(256),
   createdAt: z.string().min(1).max(64),
+  /* Optional, and that is load-bearing rather than lax. Every record written
+     before this field existed lacks it, `.strict()` rejects what it does not
+     know, and an unreadable store "falls back to empty rather than failing
+     startup" — so requiring it would have silently unsubscribed every device
+     already paired, on upgrade, with no error anywhere. */
+  turnEnd: z.boolean().optional(),
 }).strict();
 
 const storeFileSchema = z.object({

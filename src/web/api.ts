@@ -374,12 +374,17 @@ export interface PushSubscriptionBody {
 export function subscribeToPush(
   csrfToken: string,
   subscription: PushSubscriptionBody,
+  turnEnd: boolean,
   requestId: string = crypto.randomUUID(),
   options?: ApiRequestOptions,
 ): Promise<PushAccepted> {
+  // `turnEnd` is required rather than optional on purpose: the gateway writes
+  // whatever arrives, so a caller that forgot it would silently switch the
+  // preference off. Making it a parameter means the compiler asks.
   return mutate<PushAccepted>("/api/v1/push/subscribe", csrfToken, {
     requestId,
     subscription,
+    turnEnd,
   }, options, pushAcceptedSchema);
 }
 

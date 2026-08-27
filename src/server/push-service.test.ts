@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebPushConfig } from "./config.js";
-import { buildAttentionPushPayload } from "./push-payload.js";
+import { buildAttentionPushPayload, buildTurnEndPushPayload } from "./push-payload.js";
 import { PushService, type PushSender } from "./push-service.js";
 import { PushSubscriptionStore, type StoredPushSubscription } from "./push-store.js";
 import type { AttentionRequest } from "../protocol.js";
@@ -27,9 +27,10 @@ const attention: AttentionRequest = {
 let root: string;
 let store: PushSubscriptionStore;
 
-function subscription(endpoint: string): StoredPushSubscription {
+function subscription(endpoint: string, turnEnd?: boolean): StoredPushSubscription {
   return {
     endpoint,
+    ...(turnEnd === undefined ? {} : { turnEnd }),
     p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU",
     auth: "3v0fHqQhH3xQ1r6mB3dOsg",
     sessionId: "session-a",
@@ -63,6 +64,28 @@ describe("PushService", () => {
       body: "Waiting on your answer",
       badge: 1,
     });
+  });
+
+  /* The opt-in, enforced where it matters. A turn ends far more often than a
+     question gets asked, so a device that asked only to be told about questions
+     must not start being told about endings — and the store is the only place
+     that knows which is which. */
+  it("sends a finished turn only to the devices that asked for one", async () => {
+    await store.upsert(subscription("https://push.example.test/opted-in", true));
+    await store.upsert(subscription("https://push.example.test/opted-out", false));
+    await store.upsert(subscription("https://push.example.test/never-asked"));
+    const send = vi.fn<PushSender>(async () => ({ statusCode: 201 }));
+    const service = new PushService(store, config, send);
+
+    await service.notify(buildTurnEndPushPayload("agent-1", "release-planning", "complete", 0), "turnEnd");
+    expect(send.mock.calls.map((call) => (call[0] as StoredPushSubscription).endpoint))
+      .toEqual(["https://push.example.test/opted-in"]);
+
+    // An attention request still reaches everyone: that is the notification
+    // they all asked for by turning notifications on at all.
+    send.mockClear();
+    await service.notify(buildAttentionPushPayload(attention, "release-planning", 1));
+    expect(send).toHaveBeenCalledTimes(3);
   });
 
   // A push service reporting the endpoint gone is the only automatic way a

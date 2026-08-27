@@ -44,6 +44,31 @@ describe("PushSubscriptionStore", () => {
     expect(store.list()).toEqual([]);
   });
 
+  /* The upgrade path, and it is the dangerous one. Every record written before
+     `turnEnd` existed lacks the field; the record schema is `.strict()`, and an
+     unreadable store falls back to EMPTY rather than failing loudly. So a
+     required field here would have silently unsubscribed every already-paired
+     device on upgrade, with no error anywhere and no way to notice except that
+     notifications quietly stopped. */
+  it("reads a record written before turn-end notifications existed", async () => {
+    await mkdir(path.dirname(storePath), { recursive: true });
+    const legacy = {
+      endpoint: "https://push.example.test/device",
+      p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU",
+      auth: "3v0fHqQhH3xQ1r6mB3dOsg",
+      sessionId: "session-1",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    };
+    await writeFile(storePath, JSON.stringify({ version: 1, subscriptions: [legacy] }), "utf8");
+
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    expect(store.list()).toHaveLength(1);
+    // Absent means no, which is the safe reading: an existing device did not
+    // ask to be told about finished turns.
+    expect(store.list()[0]?.turnEnd).toBeUndefined();
+  });
+
   it("persists a subscription and reads it back in a fresh process", async () => {
     const store = new PushSubscriptionStore(storePath);
     await store.load();

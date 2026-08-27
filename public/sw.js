@@ -104,9 +104,11 @@ async function showAttention(payload) {
     body: boundedText(payload?.body, NOTIFICATION_FALLBACK_BODY),
     icon: "/prime-mark-192.png",
     badge: "/prime-mark-192.png",
-    // One notification per session: a second request from the same agent
-    // replaces the first rather than stacking up on the lock screen.
-    tag: agentId ? `attention:${agentId}` : "attention",
+    /* One notification per session PER KIND. A second request from the same
+       agent replaces the first rather than stacking up — but a finished turn
+       must never replace a banner asking for an answer, which is the more
+       urgent of the two and the one that would be silently lost. */
+    tag: `${typeof payload?.kind === "string" ? payload.kind : "attention"}:${agentId ?? ""}`,
     renotify: true,
     data: { agentId },
   });

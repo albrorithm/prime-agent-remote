@@ -46,8 +46,9 @@ import {
   MAX_IMAGE_REQUEST_BASE64_CHARS,
   validateImageAttachments,
 } from "./image-attachments.js";
-import { buildAttentionPushPayload } from "./push-payload.js";
+import { buildAttentionPushPayload, buildTurnEndPushPayload } from "./push-payload.js";
 import { PushService } from "./push-service.js";
+import { TurnEndNotifier } from "./turn-end-notifier.js";
 import { DeviceStore } from "./device-store.js";
 import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
@@ -57,6 +58,13 @@ import {
 } from "./websocket-frames.js";
 
 export const MUTATION_WINDOW_MS = 60_000;
+/* How often the turn-end notifier reads the catalog. It only has to be well
+   inside the quiet period it is measuring, not precise. */
+const TURN_END_POLL_MS = 5_000;
+/* Attention requests end by being answered, by timing out, or by being
+   cancelled, and only the first passes through this file. Bounded so the other
+   two cannot accumulate. */
+const MAX_TRACKED_ATTENTION_OWNERS = 256;
 export const MAX_MUTATIONS_PER_SESSION = 120;
 export const MAX_TRACKED_MUTATION_SESSIONS = 4_096;
 /** How long a shutdown waits for sockets to answer its close before cutting them. */
@@ -119,6 +127,33 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   const pushService = deps.pushService
     ?? (config.webPush ? new PushService(pushStore, config.webPush) : null);
 
+  /* Turn-end notifications, for the devices that asked for them.
+     `TurnEndNotifier` reads the catalog rather than the hub for the same reason
+     attention does: the hub only publishes while a client is attached, which is
+     the opposite of when a notification is worth sending. See that file for why
+     a finished turn is not simply a working→idle transition. */
+  const turnEnd = pushService
+    ? new TurnEndNotifier({
+      catalog: () => backend.catalog(),
+      notify: ({ agentId, outcome }) => {
+        const agents = backend.catalog().agents;
+        void pushService.notify(buildTurnEndPushPayload(
+          agentId,
+          agents.find((agent) => agent.id === agentId)?.notificationLabel,
+          outcome,
+          attentionAgentCount(agents),
+        ), "turnEnd");
+      },
+    })
+    : null;
+  const turnEndTimer = turnEnd ? setInterval(() => turnEnd.tick(), TURN_END_POLL_MS) : null;
+  turnEndTimer?.unref?.();
+
+  /* Which agent each outstanding question belongs to. Answering one resumes
+     that agent's turn, and the resolve route is given only the attention's own
+     id — the catalog carries no attention ids to look it up by. */
+  const attentionOwners = new Map<string, string>();
+
   // Push fires only on an authoritative attention request — a real
   // AttentionRequest the daemon raised and is waiting on. Never on
   // `needsInput`, which the protocol documents as an advisory guess and never
@@ -127,6 +162,15 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   if (pushService) {
     backend.onAttentionAdded?.((attention) => {
       const agents = backend.catalog().agents;
+      attentionOwners.set(attention.id, attention.agentId);
+      // Unbounded growth is the only risk here, and answering is not the only
+      // way a request ends — one can time out or be cancelled. Keeping the map
+      // to the requests the catalog still knows about bounds it by the same
+      // limit the backend already enforces on pending attention.
+      if (attentionOwners.size > MAX_TRACKED_ATTENTION_OWNERS) {
+        const oldest = attentionOwners.keys().next().value;
+        if (oldest !== undefined) attentionOwners.delete(oldest);
+      }
       // `notificationLabel`, never `name`: a display name may be the first user
       // message or the daemon's recap, and neither is allowed on a lock screen.
       const payload = buildAttentionPushPayload(
@@ -134,6 +178,10 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         agents.find((agent) => agent.id === attention.agentId)?.notificationLabel,
         attentionAgentCount(agents),
       );
+      // This agent's news has been told, and told more specifically than
+      // "finished" ever could. A turn-end behind it would be about the same
+      // moment.
+      turnEnd?.disarm(attention.agentId);
       void pushService.notify(payload);
     });
   }
@@ -449,6 +497,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         mutationBinding(`message:${agentId}`, parsed.data),
         () => backend.sendMessage({ agentId, ...parsed.data, images }),
       );
+      // Somebody asked this agent for work, so its next quiet is a finished
+      // turn rather than a session that was already idle.
+      turnEnd?.arm(agentId);
       json(res, 202, result);
       return true;
     }
@@ -571,6 +622,10 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
               auth: request.subscription.keys.auth,
               sessionId: session.id,
               createdAt: new Date().toISOString(),
+              // Sent on every subscribe, including the one the app makes on
+              // each launch to re-claim its record. A subscribe that omitted it
+              // would quietly switch the preference off again.
+              turnEnd: request.turnEnd === true,
             });
           } else {
             // Unsubscribing an endpoint this gateway never had is the goal
@@ -595,6 +650,13 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         mutationBinding(`attention:${attentionId}`, parsed.data),
         () => backend.resolveAttention({ attentionId, ...parsed.data }),
       );
+      // Answering resumes the turn; without this the resumed turn ends silently
+      // because the attention push disarmed it on the way in.
+      const owner = attentionOwners.get(attentionId);
+      if (owner) {
+        turnEnd?.arm(owner);
+        attentionOwners.delete(attentionId);
+      }
       json(res, 202, result);
       return true;
     }
@@ -896,6 +958,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
   }
 
   async function shutdown(): Promise<void> {
+    if (turnEndTimer) clearInterval(turnEndTimer);
     hub.close();
     await backend.close();
     for (const client of wss.clients) client.close(1001, "Server shutdown");

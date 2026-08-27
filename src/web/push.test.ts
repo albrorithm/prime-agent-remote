@@ -144,7 +144,7 @@ describe("enablePush", () => {
         ready: new Promise(() => {}),
       };
 
-    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).rejects.toThrow(/service worker/i);
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf", false)).rejects.toThrow(/service worker/i);
     // A prompt cannot be shown twice, so not asking is the whole point.
     expect(requestPermission).not.toHaveBeenCalled();
     expect(pushManager.subscribe).not.toHaveBeenCalled();
@@ -153,7 +153,7 @@ describe("enablePush", () => {
   it("subscribes with the gateway's key and registers the endpoint", async () => {
     installBrowser({ requestPermission: vi.fn(async () => "granted" as NotificationPermission) });
 
-    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).resolves.toBe("on");
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf", false)).resolves.toBe("on");
     expect(pushManager.subscribe).toHaveBeenCalledWith({
       userVisibleOnly: true,
       applicationServerKey: expect.any(Uint8Array),
@@ -161,12 +161,12 @@ describe("enablePush", () => {
     expect(apiMock.subscribeToPush).toHaveBeenCalledWith("csrf", {
       endpoint: "https://push.example.test/device",
       keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },
-    });
+    }, false);
   });
 
   it("reports a refused prompt without touching the gateway", async () => {
     installBrowser({ requestPermission: vi.fn(async () => "denied" as NotificationPermission) });
-    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).resolves.toBe("denied");
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf", false)).resolves.toBe("denied");
     expect(apiMock.subscribeToPush).not.toHaveBeenCalled();
   });
 
@@ -177,7 +177,7 @@ describe("enablePush", () => {
     pushManager.getSubscription.mockResolvedValue(stale);
     installBrowser({ requestPermission: vi.fn(async () => "granted" as NotificationPermission) });
 
-    await enablePush(APPLICATION_SERVER_KEY, "csrf");
+    await enablePush(APPLICATION_SERVER_KEY, "csrf", false);
     expect(stale.unsubscribe).toHaveBeenCalled();
     expect(pushManager.subscribe).toHaveBeenCalled();
   });
@@ -189,7 +189,7 @@ describe("enablePush", () => {
     apiMock.subscribeToPush.mockRejectedValue(new Error("gateway said no"));
     installBrowser({ requestPermission: vi.fn(async () => "granted" as NotificationPermission) });
 
-    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).rejects.toThrow("gateway said no");
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf", false)).rejects.toThrow("gateway said no");
     expect(created.unsubscribe).toHaveBeenCalled();
   });
 
@@ -198,7 +198,7 @@ describe("enablePush", () => {
     pushManager.subscribe.mockResolvedValue(partial);
     installBrowser({ requestPermission: vi.fn(async () => "granted" as NotificationPermission) });
 
-    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf")).rejects.toThrow("incomplete push subscription");
+    await expect(enablePush(APPLICATION_SERVER_KEY, "csrf", false)).rejects.toThrow("incomplete push subscription");
     expect(apiMock.subscribeToPush).not.toHaveBeenCalled();
     expect(partial.unsubscribe).toHaveBeenCalled();
   });
@@ -250,27 +250,27 @@ describe("reclaimPushSubscription", () => {
     pushManager.getSubscription.mockResolvedValue(fakeSubscription());
     installBrowser({ permission: "granted" });
 
-    await reclaimPushSubscription({ enabled: true }, "new-session-csrf");
+    await reclaimPushSubscription({ enabled: true }, "new-session-csrf", false);
     expect(apiMock.subscribeToPush).toHaveBeenCalledWith("new-session-csrf", {
       endpoint: "https://push.example.test/device",
       keys: { p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU", auth: "3v0fHqQhH3xQ1r6mB3dOsg" },
-    });
+    }, false);
   });
 
   // It runs on every launch, so it must never turn into a prompt or a
   // subscription this device did not already have.
   it("asks for nothing when there is nothing to re-claim", async () => {
     installBrowser({ permission: "granted" });
-    await reclaimPushSubscription({ enabled: true }, "csrf");
+    await reclaimPushSubscription({ enabled: true }, "csrf", false);
 
     pushManager.getSubscription.mockResolvedValue(fakeSubscription());
     installBrowser({ permission: "default" });
-    await reclaimPushSubscription({ enabled: true }, "csrf");
-    await reclaimPushSubscription({ enabled: false }, "csrf");
-    await reclaimPushSubscription(null, "csrf");
+    await reclaimPushSubscription({ enabled: true }, "csrf", false);
+    await reclaimPushSubscription({ enabled: false }, "csrf", false);
+    await reclaimPushSubscription(null, "csrf", false);
 
     installBrowser({ permission: "granted" });
-    await reclaimPushSubscription({ enabled: true }, "");
+    await reclaimPushSubscription({ enabled: true }, "", false);
 
     expect(apiMock.subscribeToPush).not.toHaveBeenCalled();
     expect(pushManager.subscribe).not.toHaveBeenCalled();

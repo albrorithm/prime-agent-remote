@@ -80,7 +80,7 @@ function requestBody(subscription: PushSubscription): api.PushSubscriptionBody |
  * either ignored or auto-denied, and a denial is permanent as far as this page
  * is concerned.
  */
-export async function enablePush(applicationServerKey: string, csrfToken: string): Promise<PushState> {
+export async function enablePush(applicationServerKey: string, csrfToken: string, turnEnd: boolean): Promise<PushState> {
   if (!pushSupported()) return "unsupported";
   /* Checked before the prompt, not after. `serviceWorker.ready` never rejects —
      with nothing registered it simply never settles, so asking first spent the
@@ -111,7 +111,7 @@ export async function enablePush(applicationServerKey: string, csrfToken: string
     throw new Error("The browser returned an incomplete push subscription");
   }
   try {
-    await api.subscribeToPush(csrfToken, body);
+    await api.subscribeToPush(csrfToken, body, turnEnd);
   } catch (error) {
     // Do not leave the browser holding a subscription the gateway never
     // recorded: it would keep the permission with nothing behind it.
@@ -153,12 +153,13 @@ export async function revokePushLocally(): Promise<void> {
 export async function reclaimPushSubscription(
   available: { enabled: boolean } | null,
   csrfToken: string,
+  turnEnd: boolean,
 ): Promise<void> {
   if (!available?.enabled || !csrfToken || pushPermission() !== "granted") return;
   const subscription = await currentPushSubscription();
   const body = subscription && requestBody(subscription);
   if (!body) return;
-  await api.subscribeToPush(csrfToken, body);
+  await api.subscribeToPush(csrfToken, body, turnEnd);
 }
 
 /**

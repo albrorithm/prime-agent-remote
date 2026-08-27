@@ -23,6 +23,17 @@ export interface Settings {
   timestamps: boolean;
   turnsCollapsed: boolean;
   enterSends: boolean;
+  /**
+   * Wake this device when an agent finishes its turn, not only when one needs
+   * an answer. Off by default: a turn ends far more often than a question gets
+   * asked, and a phone that buzzes for everything gets ignored for everything.
+   *
+   * Client state, but not only client state — the gateway decides who to send
+   * to, so this is carried on the push subscription. It has to be sent on every
+   * subscribe, including the silent one the app makes each launch to re-claim
+   * its record, or enabling it would last exactly until the next launch.
+   */
+  turnEndNotifications: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -36,6 +47,7 @@ export const DEFAULT_SETTINGS: Settings = {
   timestamps: true,
   turnsCollapsed: true,
   enterSends: true,
+  turnEndNotifications: false,
 };
 
 function pickString<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -72,6 +84,7 @@ export function normalizeSettings(value: unknown): Settings {
     timestamps: pickBoolean(stored.timestamps, DEFAULT_SETTINGS.timestamps),
     turnsCollapsed: pickBoolean(stored.turnsCollapsed, DEFAULT_SETTINGS.turnsCollapsed),
     enterSends: pickBoolean(stored.enterSends, DEFAULT_SETTINGS.enterSends),
+    turnEndNotifications: pickBoolean(stored.turnEndNotifications, DEFAULT_SETTINGS.turnEndNotifications),
   };
 }
 

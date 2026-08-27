@@ -225,6 +225,7 @@ function DevicesGroup() {
 
 function NotificationsGroup() {
   const { csrfToken, push } = useGateway();
+  const { settings, setSetting } = useSettings();
   const [state, setState] = useState<PushState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -247,13 +248,32 @@ function NotificationsGroup() {
     setBusy(true);
     setError(null);
     try {
-      if (turnOn) setState(await enablePush(push?.publicKey ?? "", csrfToken));
+      if (turnOn) setState(await enablePush(push?.publicKey ?? "", csrfToken, settings.turnEndNotifications));
       else {
         await disablePush(csrfToken);
         await refresh();
       }
     } catch (caught) {
       setError(humanizeError(caught, turnOn ? "Could not turn on notifications" : "Could not turn off notifications"));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* The preference lives on the push subscription, because the gateway is what
+     decides who to send to. So changing it means telling the gateway, not just
+     writing it down — and the local value is only stored once that succeeds,
+     or the panel would show a setting the server does not have. */
+  async function setTurnEnd(value: boolean) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await enablePush(push?.publicKey ?? "", csrfToken, value));
+      setSetting("turnEndNotifications", value);
+    } catch (caught) {
+      setError(humanizeError(caught, "Could not change what you are notified about"));
       await refresh();
     } finally {
       setBusy(false);
@@ -282,6 +302,18 @@ function NotificationsGroup() {
             {on ? <BellOff aria-hidden="true" /> : <Bell aria-hidden="true" />} {copy.action}
           </button>
         </div>
+      )}
+      {/* Only while notifications are actually on: the choice is about which
+          ones arrive, and offering it to someone who gets none is offering a
+          setting with nothing behind it. */}
+      {on && (
+        <Toggle
+          id="turn-end-notifications"
+          label="Also when a turn finishes"
+          hint="Announced once, after the session has stayed quiet — a late subagent delays it rather than adding a second."
+          checked={settings.turnEndNotifications}
+          onChange={(value) => void setTurnEnd(value)}
+        />
       )}
       {error && <p className="settings-hint settings-error" role="alert">{error}</p>}
     </section>

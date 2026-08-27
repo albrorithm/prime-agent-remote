@@ -103,6 +103,13 @@ Notes an operator needs:
   turn notifications on again.
 - Notifications name the session and the kind of attention it needs. They never
   contain prompt or transcript text.
+- Settings → Notifications also offers "Also when a turn finishes", off by
+  default and per device. Prime Agent does not end a turn cleanly — the root
+  finishes and straggling subagents wake the session again for seconds at a
+  time — so a turn counts as over only once the session has been continuously
+  idle, and any return to work restarts that clock. One notification per turn:
+  see `src/server/turn-end-notifier.ts` for why a straggler postpones rather
+  than repeats.
 - Signing out revokes that session's subscriptions. Letting a session expire
   deliberately does not, so notifications keep working overnight.
 

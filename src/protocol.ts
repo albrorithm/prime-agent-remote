@@ -813,6 +813,12 @@ export type PushSubscriptionInput = z.infer<typeof pushSubscriptionSchema>;
 export const pushSubscribeRequestSchema = z.object({
   requestId: z.string().uuid(),
   subscription: pushSubscriptionSchema,
+  /**
+   * Also wake this device when an agent finishes its turn, not only when one
+   * needs an answer. Per device, and absent means no: turn-end fires far more
+   * often, and wanting one is not wanting the other.
+   */
+  turnEnd: z.boolean().optional(),
 }).strict();
 
 export const pushUnsubscribeRequestSchema = z.object({

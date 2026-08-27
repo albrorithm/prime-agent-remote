@@ -28,6 +28,7 @@ import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../pro
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
 import { deviceLabel } from "./device-label";
+import { loadSettings } from "./settings";
 import { useAppBadge } from "./hooks/useAppBadge";
 import { reclaimPushSubscription, revokePushLocally } from "./push";
 import type { PreparedImage } from "./image-attachments";
@@ -822,7 +823,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         pushClaimedFor.current = value.csrfToken;
         // Best-effort and silent: a device that cannot re-claim its
         // subscription still works, it just keeps its old session binding.
-        void reclaimPushSubscription(value.push, value.csrfToken).catch(() => {});
+        /* Read straight from storage rather than through the settings context:
+           this runs inside the connection callback, and a stale closure over a
+           React value here would re-subscribe with whatever the preference was
+           when the socket opened — silently switching it back. */
+        void reclaimPushSubscription(value.push, value.csrfToken, loadSettings().turnEndNotifications)
+          .catch(() => {});
       }
       // A working session means a later 401 (a restart, an expiry) is allowed
       // its own resume attempt.

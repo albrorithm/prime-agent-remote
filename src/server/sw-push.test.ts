@@ -84,7 +84,7 @@ describe("service worker push handling", () => {
       "release-planning",
       expect.objectContaining({
         body: "Waiting on your decision",
-        tag: "attention:agent-7",
+        tag: "dialog:agent-7",
         data: { agentId: "agent-7" },
       }),
     );
@@ -125,7 +125,7 @@ describe("service worker push handling", () => {
       await worker.dispatch("push", event);
       expect(worker.self.registration.showNotification).toHaveBeenCalledWith(
         "Prime Agent",
-        expect.objectContaining({ body: "A session needs your attention", tag: "attention" }),
+        expect.objectContaining({ body: "A session needs your attention", tag: "attention:" }),
       );
     }
   });

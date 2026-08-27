@@ -41,7 +41,12 @@ export interface AttentionPushPayload {
   title: string;
   /** What kind of attention, and nothing about its subject. */
   body: string;
-  kind: AttentionKind;
+  /**
+   * The three attention kinds, plus the two ways a turn can end. The service
+   * worker tags its notification by this, so a finished turn never replaces a
+   * banner asking for an answer.
+   */
+  kind: AttentionKind | "complete" | "failed";
   agentId: string;
   attentionId: string;
   badge: number;
@@ -53,6 +58,39 @@ function agentTitle(agentName: string | undefined): string {
   return trimmed.length > MAX_PUSH_AGENT_NAME_CHARS
     ? `${trimmed.slice(0, MAX_PUSH_AGENT_NAME_CHARS - 1)}…`
     : trimmed;
+}
+
+/**
+ * What a finished turn is allowed to say.
+ *
+ * The same rule as everything else here: which session, and what kind of event.
+ * "Finished" and "stopped with an error" are status words the gateway chose,
+ * not anything the agent wrote, so nothing the model produced reaches a lock
+ * screen through this either.
+ */
+const TURN_END_REASONS = {
+  complete: "Finished and waiting on you",
+  failed: "Stopped with an error",
+} as const;
+
+export function buildTurnEndPushPayload(
+  agentId: string,
+  agentName: string | undefined,
+  outcome: keyof typeof TURN_END_REASONS,
+  badge: number,
+): AttentionPushPayload {
+  return {
+    version: PUSH_PAYLOAD_VERSION,
+    title: agentTitle(agentName),
+    body: TURN_END_REASONS[outcome],
+    kind: outcome,
+    agentId,
+    /* No attention request exists for a finished turn, so this carries the
+       agent's id: it is what `notificationclick` routes on, and an empty string
+       would open the app to nothing in particular. */
+    attentionId: agentId,
+    badge: Number.isSafeInteger(badge) && badge > 0 ? badge : 0,
+  };
 }
 
 export function buildAttentionPushPayload(

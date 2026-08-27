@@ -63,9 +63,17 @@ export class PushService {
     this.send = sender ?? webPushSender(config);
   }
 
-  async notify(payload: AttentionPushPayload): Promise<void> {
+  /**
+   * `audience` is not a filter for convenience — it is the opt-in.
+   *
+   * An attention request goes to every device that asked to be woken at all. A
+   * finished turn goes only to the devices that asked for that specifically,
+   * because it fires far more often and wanting one is not wanting the other.
+   */
+  async notify(payload: AttentionPushPayload, audience: "all" | "turnEnd" = "all"): Promise<void> {
     const body = JSON.stringify(payload);
-    const targets = [...this.store.list()];
+    const targets = [...this.store.list()]
+      .filter((subscription) => audience === "all" || subscription.turnEnd === true);
     await Promise.all(targets.map((subscription) => this.sendOne(subscription, body)));
   }
 

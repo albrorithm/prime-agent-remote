@@ -205,7 +205,7 @@ describe("SettingsPanel notifications", () => {
     expect(pushMock.enablePush).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: /Turn on notifications/ }));
-    expect(pushMock.enablePush).toHaveBeenCalledWith("application-server-key", "csrf");
+    expect(pushMock.enablePush).toHaveBeenCalledWith("application-server-key", "csrf", false);
     expect(await screen.findByText("On for this device")).toBeInTheDocument();
   });
 
