@@ -166,7 +166,7 @@ describe("viewport geometry", () => {
     install(env);
     expect(env.properties.get("--viewport-height")).toBe("800px");
     expect(env.properties.get("--viewport-top")).toBe("0px");
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
   });
 
   // The launch bug: a layout viewport taller than the screen leaves a shell at
@@ -178,35 +178,112 @@ describe("viewport geometry", () => {
     install(env);
     expect(env.properties.get("--viewport-height")).toBe("800px");
     // No editable is focused, so a stale layout viewport must not read as a keyboard.
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
   });
 
-  it("shrinks the shell to sit on the keyboard and drops the composer inset", () => {
+  /* The shell is deliberately NOT resized while the keyboard is up, and a page
+     iOS has scrolled is deliberately NOT put back. iOS lifts the composer clear
+     of the keyboard by scrolling, the absolutely positioned shell travels with
+     it, and the header scrolls away — one motion. Holding the shell still
+     against that scroll is what turned it into two, which is the jump.
+     --keyboard-height is still published, because the composer's inset is about
+     the strip being covered, not about where the page is. */
+  it("leaves the shell alone while the keyboard is up, and never scrolls it back", () => {
     const env = geometryEnvironment();
     const { scroll } = install(env);
     env.documentTarget.activeElement = focusedComposer;
     env.viewport.height = 500;
+    env.windowTarget.scrollY = 465;
     env.viewport.emit("resize");
     env.work.drain();
-    expect(env.properties.get("--viewport-height")).toBe("500px");
-    expect(env.properties.get("--viewport-top")).toBe("0px");
-    expect(env.properties.get("--composer-safe-bottom")).toBe("0px");
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+    expect(env.properties.get("--keyboard-height")).toBe("300px");
     expect(scroll).not.toHaveBeenCalled();
   });
 
-  // A page WebKit left displaced is still compensated — but only once the
-  // offset has held still. The height does not wait for it.
+  // A page a launch or a resume left displaced is still compensated — but only
+  // once the offset has held still. The height does not wait for it. Nothing is
+  // focused here: that is what makes this a displaced page rather than a lift.
   it("absorbs a page shift once it has settled", () => {
     const env = geometryEnvironment();
     install(env);
-    env.documentTarget.activeElement = focusedComposer;
     env.viewport.height = 500;
     env.viewport.offsetTop = 300;
     env.viewport.emit("resize");
     env.work.drain();
     expect(env.properties.get("--viewport-top")).toBe("300px");
     expect(env.properties.get("--viewport-height")).toBe("500px");
-    expect(env.properties.get("--composer-safe-bottom")).toBe("0px");
+    expect(env.properties.has("--keyboard-height")).toBe(false);
+  });
+
+  /* The reported bug, and the reason duration alone cannot decide this. iOS runs
+     the keyboard's height and the scroll that lifted the focused field as two
+     independent animations. Let the height settle first and the page can stay
+     lifted well past OFFSET_SETTLE_MS with no further events — the offset is
+     real every time it is read, and believing it pushes every fixed layer down
+     until the relax arrives and snaps it back. On the phone that is the header
+     visibly detaching from the top of the screen and then jumping into place. */
+  it("never compensates a page lift while the keyboard is up, however long it lasts", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.viewport.offsetTop = 150;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("0px");
+
+    // Long past the settle window, still lifted, still nothing to compensate.
+    for (let round = 0; round < 4; round += 1) {
+      env.viewport.emit("resize");
+      env.work.drain();
+      expect(env.properties.get("--viewport-top")).toBe("0px");
+    }
+
+    // And the relax, when it finally lands, changes nothing — there is no
+    // committed offset left to snap back from.
+    env.viewport.offsetTop = 0;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("0px");
+  });
+
+  /* The gate is "a keyboard is being tracked", which a focused editable turns on
+     even with no viewport shrink at all — an iPad with a hardware keyboard. The
+     shell is sized to the visual viewport there too, so there is still no hidden
+     field for iOS to scroll to and still nothing to compensate. */
+  it("holds the origin for a lift with a field focused and no keyboard at all", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.offsetTop = 200;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("0px");
+    expect(env.properties.has("--keyboard-height")).toBe(false);
+
+    // ...and it is not sticky: focus leaving hands a genuinely displaced page
+    // straight back to the settle logic.
+    env.documentTarget.activeElement = null;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("200px");
+  });
+
+  // The same lift with focus already gone but the keyboard still up: it is the
+  // keyboard, not the focus, that rules the offset out.
+  it("holds the origin for a lift under a keyboard that has lost focus", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.viewport.emit("resize");
+    env.work.drain();
+    env.documentTarget.activeElement = null;
+    env.viewport.offsetTop = 150;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("0px");
   });
 
   // The regression this guards: iOS scrolls the page to lift the focused field
@@ -228,8 +305,8 @@ describe("viewport geometry", () => {
     env.work.drain();
     seen.push(env.properties.get("--viewport-top"));
     expect(seen).toEqual(["0px", "0px", "0px", "0px", "0px", "0px"]);
-    // ...while the height it is animating toward is applied the whole way down.
-    expect(env.properties.get("--viewport-height")).toBe("500px");
+    // ...and the height is left alone throughout, along with everything else.
+    expect(env.properties.get("--viewport-height")).toBe("800px");
   });
 
   // Coming back to rest is the one offset change that is applied at once:
@@ -247,6 +324,19 @@ describe("viewport geometry", () => {
     env.viewport.emit("resize");
     env.work.drainFrames();
     expect(env.properties.get("--viewport-top")).toBe("0px");
+  });
+
+  // ...and it must not fire when there is nothing to undo, or every scroll
+  // event becomes a scrollTo that provokes the next one.
+  it("does not touch the scroll position when the page is already at the origin", () => {
+    const env = geometryEnvironment();
+    const scroll = vi.fn();
+    install(env, scroll);
+    scroll.mockClear();
+
+    env.windowTarget.emit("scroll");
+    env.work.drain();
+    expect(scroll).not.toHaveBeenCalled();
   });
 
   it("still puts a real document scroll back to the origin", () => {
@@ -275,7 +365,7 @@ describe("viewport geometry", () => {
     env.viewport.height = 500;
     env.viewport.emit("resize");
     env.work.drain();
-    expect(env.properties.get("--composer-safe-bottom")).toBe("0px");
+    expect(env.properties.get("--keyboard-height")).toBe("300px");
 
     env.documentTarget.activeElement = null;
     env.viewport.height = 800;
@@ -283,7 +373,7 @@ describe("viewport geometry", () => {
     env.viewport.emit("resize");
     env.work.drain();
     expect(env.properties.get("--viewport-height")).toBe("800px");
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
   });
 
   // A keyboard dismissed by dragging leaves focus on the textarea. The height
@@ -298,7 +388,7 @@ describe("viewport geometry", () => {
     env.viewport.height = 800;
     env.viewport.emit("resize");
     env.work.drain();
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
   });
 
   // An iPad floating keyboard does not resize the visual viewport at all, so
@@ -310,21 +400,109 @@ describe("viewport geometry", () => {
     env.viewport.emit("resize");
     env.work.drain();
     expect(env.properties.get("--viewport-height")).toBe("800px");
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
   });
 
-  // A hardware keyboard's accessory bar shrinks the viewport by ~55px. The
-  // shell follows it, but that is not tall enough to spend the home-indicator
-  // inset on.
-  it("follows a short accessory bar without dropping the composer inset", () => {
+  // A hardware keyboard's accessory bar shrinks the viewport by ~55px, and the
+  // shell follows it. It used to be held below the threshold and so left the
+  // composer's inset alone; now it spends it, which is the truer answer — 55px
+  // of bar covers the home-indicator strip just as a keyboard does, and there
+  // is as little left to clear either way.
+  it("spends the inset against a short accessory bar too", () => {
     const env = geometryEnvironment();
     install(env);
     env.documentTarget.activeElement = focusedComposer;
     env.viewport.height = 745;
     env.viewport.emit("resize");
     env.work.drain();
-    expect(env.properties.get("--viewport-height")).toBe("745px");
-    expect(env.properties.has("--composer-safe-bottom")).toBe(false);
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+    expect(env.properties.get("--keyboard-height")).toBe("55px");
+  });
+
+  /* The bug this replaced: the inset was switched off whole the first frame the
+     keyboard measured over 80px, so the composer lost 19px of
+     height in one step partway up. What has to be true instead is that the
+     published height never skips the range the inset is spent over — every
+     frame of a rising keyboard is reported, from the first one. */
+  it("reports the keyboard from its first frame, without a threshold to jump", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    const seen: Array<string | undefined> = [];
+    for (const keyboard of [4, 12, 21, 30, 44, 88, 180, 300]) {
+      env.viewport.height = 800 - keyboard;
+      env.viewport.emit("resize");
+      env.work.drainFrames();
+      seen.push(env.properties.get("--keyboard-height"));
+    }
+    expect(seen).toEqual(["4px", "12px", "21px", "30px", "44px", "88px", "180px", "300px"]);
+  });
+
+  // A stale layout viewport at launch is the case the focus gate is carrying
+  // now that height no longer decides entry: nothing is focused, so a viewport
+  // reported 300px short must still not read as a keyboard.
+  it("does not read an unfocused shrunken viewport as a keyboard at any height", () => {
+    const env = geometryEnvironment();
+    install(env);
+    for (const keyboard of [40, 120, 300]) {
+      env.viewport.height = 800 - keyboard;
+      env.viewport.emit("resize");
+      env.work.drain();
+      expect(env.properties.has("--keyboard-height")).toBe(false);
+    }
+  });
+
+  // Focus can move to a button with the keyboard still up — the send control,
+  // the options menu. The keyboard is still there and the inset stays spent.
+  it("keeps reporting the keyboard when focus leaves the field for a button", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.viewport.emit("resize");
+    env.work.drain();
+    env.documentTarget.activeElement = { matches: () => false };
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--keyboard-height")).toBe("300px");
+  });
+
+  /* The same move, but over an accessory bar rather than a full keyboard. A
+     height gate at 80px released here, putting the inset back under a bar that
+     is still covering the strip — and, on a falling keyboard, snapping it back
+     whole at 80px on the way down. Believing a keyboard until the viewport is
+     its full height again is what makes both continuous. */
+  it("keeps the inset spent under an accessory bar after focus moves away", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 745;
+    env.viewport.emit("resize");
+    env.work.drain();
+    env.documentTarget.activeElement = { matches: () => false };
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--keyboard-height")).toBe("55px");
+  });
+
+  // A keyboard falling away with focus already gone still has to report every
+  // height on the way down, for the same reason it does on the way up.
+  it("reports a blurred keyboard all the way down, not down to a threshold", () => {
+    const env = geometryEnvironment();
+    install(env);
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.viewport.emit("resize");
+    env.work.drain();
+    env.documentTarget.activeElement = null;
+    const seen: Array<string | undefined> = [];
+    for (const keyboard of [220, 120, 79, 40, 18, 6, 0]) {
+      env.viewport.height = 800 - keyboard;
+      env.viewport.emit("resize");
+      env.work.drainFrames();
+      seen.push(env.properties.get("--keyboard-height"));
+    }
+    expect(seen).toEqual(["220px", "120px", "79px", "40px", "18px", "6px", undefined]);
   });
 
   // Pinch-zoom shrinks the visual viewport exactly as a keyboard does. Tracking

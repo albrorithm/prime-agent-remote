@@ -71,30 +71,43 @@ real hardware.
 
 ## The screen is not the page
 
-Every full-screen fixed layer — the shell, the drawers, the scrims, the image
-viewer — is sized and placed against the **visual** viewport, not the layout
-viewport, through two custom properties that `useViewportGeometry` writes on
-`<html>`:
+Every full-screen layer — the shell, the drawers, the scrims, the image viewer
+— is sized and placed against the **visual** viewport, not the layout viewport,
+through two custom properties that `useViewportGeometry` writes on `<html>`:
 
 | | |
 |---|---|
 | `--viewport-top` | where the visible part of the page starts |
 | `--viewport-height` | how much of it can be seen |
 
-`position: fixed` resolves against the layout viewport, and on iOS WebKit the
-two are not the same rectangle. Just after an installed launch the layout
-viewport is sometimes reported taller than the screen, and a layer at
-`inset: 0` then hangs off the display — which is why the top bar or the
-composer could be missing on first open. And iOS uses
-`interactive-widget: resizes-visual`, so the layout viewport does **not**
-shrink when the keyboard opens: WebKit scrolls the whole page up to lift the
-focused field clear of it, carrying the header and, on iPad, the drawers with
-it.
+This is a **launch** fix and only a launch fix. Just after an installed launch
+the layout viewport is sometimes reported taller than the screen, and a layer
+at `inset: 0` then hangs off the display — which is why the top bar or the
+composer could be missing on first open.
 
-Sizing to the visible rectangle answers both. The shell ends exactly where the
-keyboard begins, so the composer comes to rest on top of it and nothing else
-has to move; the transcript is the shell's one flexible row, so it is what
-gives up the height, and it re-pins to its latest message when it does.
+## The keyboard is not ours to manage
+
+When the keyboard opens, `useViewportGeometry` stops publishing entirely — no
+height, no offset, no scroll correction — until it closes again.
+
+iOS does not shrink the layout viewport for a keyboard. It scrolls the page to
+lift the focused field clear, and it is entitled to. Earlier versions of this
+app fought that scroll every way there is: re-sizing the shell to the visible
+rectangle, compensating `visualViewport.offsetTop`, clamping `scrollY` back to
+zero inside the scroll event. All of it made the reported bug — the whole app
+lurching as the keyboard arrives and snapping back — because the app moved
+where iOS put it and was then yanked back. Two motions where the platform made
+one. Traced on an iPhone, `window.scrollY` reached 465 for a single frame and
+was back to zero four milliseconds later because this app put it there.
+
+So the page scrolls, the header scrolls away with it, and it stays gone until
+the keyboard does. That is what chatgpt.com does on the same phone, and why it
+has no jump to fix. `body` and `.app-shell` are `position: absolute` so they
+travel with that scroll; iOS also suspends `position: fixed` while a keyboard
+is up, so fixed would fail twice over.
+
+**If you are about to make the shell hold still while the keyboard opens: that
+is the bug. It has been tried.**
 
 The rules that follow from this:
 
@@ -103,15 +116,19 @@ The rules that follow from this:
   from the top edge adds `var(--viewport-top, 0px)` to its offset.
 - Every use site carries its own fallback, so a tree where the hook has not run
   keeps its previous layout. Do not give these properties a `:root` default.
-- Anything that must fit on screen measures against `--viewport-height`, not
-  `dvh`. With the keyboard up, `dvh` is still the whole screen.
+- Anything that must fit on screen at launch measures against
+  `--viewport-height`, not `dvh`. With the keyboard up neither is the visible
+  area, and neither should be — see above.
 - `env(keyboard-inset-*)` and the VirtualKeyboard API are Chromium-only, and no
   shipping Safari announces `interactive-widget`. `window.visualViewport` is
   the only signal available here.
 
 `.ui-harness/scripts/keyboard-probe.mjs` opens a scripted keyboard against a
 real shell in WebKit and Chromium and checks what moved. Run it after touching
-any of this.
+any of this — but know its limit: it changes the numbers a scripted viewport
+reports and cannot scroll the page the way iOS does. It can prove the shell is
+left alone; it cannot tell you where the composer ends up. That answer needs a
+real device, and six rounds of this bug were spent learning it.
 
 ## House rules that apply to any change here
 

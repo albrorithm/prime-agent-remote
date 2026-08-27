@@ -79,11 +79,22 @@ describe("PWA assets", () => {
 
     expect(html).toContain('name="viewport" content="width=device-width, initial-scale=1"');
     expect(html).not.toContain("viewport-fit=cover");
-    expect(appShell).toContain("position: fixed");
+    /* Absolute rather than fixed, deliberately and load-bearingly: iOS suspends
+       `position: fixed` while the keyboard is up, which dragged the whole shell
+       down for a beat on every focus. See the comment on `body` in styles.css.
+       `inset: 0` on both still makes this the screen. */
+    expect(appShell).toContain("position: absolute");
     expect(appShell).toContain("inset: 0");
+    expect(body).toContain("position: absolute");
+    expect(body).toContain("inset: 0");
     expect(appShell).not.toMatch(/100(?:s|d|l)?vh/);
     expect(body).not.toMatch(/100(?:s|d|l)?vh/);
-    expect(styles).toContain(":root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }");
+    // No viewport-fit=cover above means env(safe-area-inset-bottom) is 0 in an
+    // installed iOS PWA, so this 28px literal is the whole home-indicator
+    // clearance — and --composer-safe-bottom is what is left of it once the
+    // keyboard has covered part of the strip.
+    expect(styles).toContain(":root { --composer-rest-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }");
+    expect(styles).toContain("--composer-safe-bottom: max(0px, calc(var(--composer-rest-bottom) - var(--keyboard-height, 0px)));");
     expect(styles).toContain("padding: 9px 10px max(9px, var(--composer-safe-bottom))");
   });
 

@@ -1,48 +1,56 @@
 import { useEffect } from "react";
 
-/* The app is a fixed shell: a header, a scrolling transcript and a composer,
-   pinned to the screen with nothing behind them to scroll. On iOS WebKit —
-   the engine this ships against — that arrangement has two failure modes, and
-   both come from the same place: `position: fixed` resolves against the LAYOUT
-   viewport, while what the user can actually see is the VISUAL viewport, and
-   the two are not the same rectangle.
+/* The app is a shell that fills the screen: a header, a scrolling transcript
+   and a composer. This hook exists for one job — LAUNCH GEOMETRY — and for one
+   deliberate non-job, the keyboard. The non-job is the more important half, and
+   is why this file is much smaller than it used to be.
 
-   1. Launch. In an installed PWA the layout viewport is occasionally reported
-      taller than the screen for the first frames after launch or resume. A
-      shell at `inset: 0` then draws taller than the display, and whichever end
-      falls outside — the header or the composer — is simply not on screen.
+   THE JOB. In an installed PWA the layout viewport is occasionally reported
+   taller than the screen for the first frames after a launch or a resume. A
+   shell at `inset: 0` then draws taller than the display, and whichever end
+   falls outside — the header or the composer — is simply not on screen. So the
+   shell is sized and placed against the VISUAL viewport instead:
+   `--viewport-height` is what can be seen, `--viewport-top` is where the seen
+   part begins. Every use site carries its own fallback, so a tree where this
+   has not run keeps the layout it had.
 
-   2. The keyboard. iOS uses `interactive-widget: resizes-visual` (the default,
-      and still the only behaviour available here: WebKit trunk parses
-      `interactive-widget` and enables it on Apple platforms, but no shipping
-      Safari release announces it, and `env(keyboard-inset-*)` and the
-      VirtualKeyboard API are Chromium-only). So the layout viewport does NOT
-      shrink when the keyboard opens; WebKit instead scrolls the whole page up
-      to drag the focused field out from under it. That is what pushes the
-      header off the top, and on iPad it takes the drawers with it, because the
-      drawers are part of the same page.
+   THE NON-JOB. When the keyboard opens, this hook does nothing at all. Not the
+   height, not the offset, not the scroll position.
 
-   The fix for both is one rule: size and place the fixed layers against the
-   VISUAL viewport rather than the layout viewport. `--viewport-height` is what
-   can be seen, `--viewport-top` is where the seen part begins. The shell then
-   ends exactly where the keyboard begins, so the composer rests on top of it
-   and nothing else has to move — the header stays, the drawers stay, and only
-   the transcript, which is the shell's one flexible row, gives up the height.
+   iOS does not shrink the layout viewport for a keyboard — `interactive-widget`
+   is Chromium-only, as are `env(keyboard-inset-*)` and the VirtualKeyboard API,
+   and no shipping Safari announces any of them. What it does instead is scroll
+   the page to lift the focused field clear. Every previous version of this file
+   tried to hold the shell still against that scroll: re-sizing it to the
+   visible rectangle, compensating `visualViewport.offsetTop`, clamping
+   `scrollY` back to zero in the scroll event itself. None of it worked, and it
+   could not have: the app moved where iOS put it and was then yanked back, and
+   the yank is what the reader sees. Two motions where the platform made one.
 
-   Deliberately NOT gated on display-mode or width. The keyboard behaviour is
-   the same on an iPad in the browser as in an installed phone PWA, and it was
-   precisely the wide layout — where the drawers are grid columns rather than
-   overlays — that made the page-scrolling approach look most wrong. */
+   Traced on an iPhone, `window.scrollY` reached 465 for a single frame as the
+   composer came up from y~812 into a 409-tall visible window, and was back to 0
+   four milliseconds later because this file put it there.
+
+   So now the page scrolls, the header scrolls away with it, and it stays gone
+   until the keyboard does. That is what chatgpt.com does on the same phone,
+   which is why it has no jump to fix. `.app-shell` is absolutely positioned so
+   that it travels with that scroll; a fixed shell would not, and the composer
+   would stay under the keyboard.
+
+   One thing IS still published with a keyboard up: `--keyboard-height`, because
+   the composer's clearance over the home indicator is about that strip being
+   covered and has nothing to do with where the page is.
+
+   A cost worth stating: .ui-harness cannot check any of this. Its scripted
+   viewport changes the numbers a page reads; it cannot scroll the page the way
+   iOS does. Where the composer ends up is now the platform's answer to give,
+   and only a real device can ask. */
 
 const VIEWPORT_TOP_PROPERTY = "--viewport-top";
 const VIEWPORT_HEIGHT_PROPERTY = "--viewport-height";
-const COMPOSER_SAFE_BOTTOM_PROPERTY = "--composer-safe-bottom";
+const KEYBOARD_HEIGHT_PROPERTY = "--keyboard-height";
 const EDITABLE_SELECTOR = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
 
-/* Below this a "shrunken" viewport is an accessory bar, a rounding artefact or
-   a mid-launch misreport, not a keyboard worth taking the composer's bottom
-   inset away for. */
-const KEYBOARD_HEIGHT_THRESHOLD = 80;
 /* Pinch-zoom shrinks the visual viewport exactly as a keyboard does. Tracking
    it would shrink the app under the reader's magnifier, so above this scale we
    hand the layout back to CSS and stop measuring. */
@@ -51,21 +59,11 @@ const MAX_TRACKED_SCALE = 1.01;
    the launch geometry wrong for a beat, so a measurement is re-taken over the
    next few hundred milliseconds rather than trusted the first time. */
 const SETTLE_DELAYS_MS = [0, 60, 180, 400, 700];
-/* How long an offset has to persist before it is believed.
-
-   The height and the offset need opposite treatment, and this is why. iOS does
-   not hand over the keyboard geometry in one step: it scrolls the page to lift
-   the focused field clear, then relaxes that scroll back to nothing as the
-   keyboard finishes arriving — and the visualViewport events reporting it land
-   a frame or more behind the compositor that already moved. Following that
-   offset live applies each stale value one beat late, which walks the whole
-   shell DOWN the screen and back again over the course of the animation. The
-   header visibly dips.
-
-   So the offset is only believed once it has stopped moving. Anything shorter
-   than a keyboard transition is a frame of an animation, not a displaced page.
-   Zero is the exception and is always applied at once: coming back to rest can
-   never be wrong, and must never be late. */
+/* How long an offset has to persist before it is believed. Only ever consulted
+   with no keyboard in play — measure() returns before this when one is up — so
+   what it guards is a launch or a resume that came back displaced, against the
+   visualViewport events for it landing a frame or more behind the compositor
+   that already moved. */
 const OFFSET_SETTLE_MS = 350;
 
 type ScheduledHandle = unknown;
@@ -128,19 +126,23 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
   let settleFrame: FramedHandle;
   let publishedTop: number | null = null;
   let publishedHeight: number | null = null;
-  let keyboardOpen = false;
+  let publishedKeyboard: number | null = null;
+  let trackingKeyboard = false;
   /* When the current non-zero offset was first seen, or null while the page is
      at rest. Age, not value, is what decides whether it gets applied. */
   let offsetPendingSince: number | null = null;
 
+  const focusedEditable = () => documentTarget.activeElement?.matches?.(EDITABLE_SELECTOR) === true;
+
   const clearPublished = () => {
     publishedTop = null;
     publishedHeight = null;
-    keyboardOpen = false;
+    publishedKeyboard = null;
+    trackingKeyboard = false;
     offsetPendingSince = null;
     documentElement.style.removeProperty(VIEWPORT_TOP_PROPERTY);
     documentElement.style.removeProperty(VIEWPORT_HEIGHT_PROPERTY);
-    documentElement.style.removeProperty(COMPOSER_SAFE_BOTTOM_PROPERTY);
+    documentElement.style.removeProperty(KEYBOARD_HEIGHT_PROPERTY);
   };
 
   /* The height is applied the moment it is read: it is what stands the composer
@@ -159,15 +161,36 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
 
   /* The composer's bottom inset clears the home indicator. While the keyboard
      covers that strip there is nothing to clear, and keeping the inset would
-     float the composer above the keyboard on a band of empty chrome. Requiring
-     a focused editable is what separates a real keyboard from a launch-time
-     misreport of the layout viewport. */
-  const publishComposerInset = (keyboard: number) => {
-    const focusedEditable = documentTarget.activeElement?.matches?.(EDITABLE_SELECTOR) === true;
-    const tall = keyboard >= KEYBOARD_HEIGHT_THRESHOLD;
-    keyboardOpen = tall && (focusedEditable || keyboardOpen);
-    if (keyboardOpen) documentElement.style.setProperty(COMPOSER_SAFE_BOTTOM_PROPERTY, "0px");
-    else documentElement.style.removeProperty(COMPOSER_SAFE_BOTTOM_PROPERTY);
+     float the composer above the keyboard on a band of empty chrome.
+
+     What is published is the keyboard's HEIGHT, and styles.css subtracts it
+     from the inset, so the inset drains as the keyboard rises instead of being
+     switched off. That is the whole difference: this used to set the inset to 0
+     on the first frame the keyboard measured over 80px, which cut 19px out of
+     the composer in one step while it was still on its way up — a visible jolt,
+     measurable in .ui-harness/scripts/keyboard-animation-probe.mjs.
+
+     Which means entry cannot be decided by height any more. This used to need a
+     height over 80px, and by the time a keyboard is 80px tall it has already
+     covered the whole inset, so a gate there drains it in one step whatever the
+     value published. A focused editable is the signal instead, and it is the
+     better one: it is what separates a real keyboard from a launch-time
+     misreport of the layout viewport — which is the only thing the height gate
+     was really carrying — and unlike a height it is already true before the
+     first frame of the animation.
+
+     Focus can leave for a button with the keyboard still up, so once believed a
+     keyboard is believed until the viewport is its full height again. Not until
+     it is merely short: 80px of viewport is a hardware keyboard's accessory bar
+     covering the home-indicator strip just as a keyboard does, and releasing
+     there would put the inset back underneath it. */
+  const publishKeyboardHeight = (keyboard: number) => {
+    trackingKeyboard = focusedEditable() || (trackingKeyboard && keyboard > 0);
+    const height = trackingKeyboard ? keyboard : 0;
+    if (publishedKeyboard === height) return;
+    publishedKeyboard = height;
+    if (height > 0) documentElement.style.setProperty(KEYBOARD_HEIGHT_PROPERTY, `${height}px`);
+    else documentElement.style.removeProperty(KEYBOARD_HEIGHT_PROPERTY);
   };
 
   const measure = () => {
@@ -176,25 +199,62 @@ export function installViewportGeometry(options: ViewportGeometryOptions = {}): 
       clearPublished();
       return;
     }
-    publishHeight(geometry.height);
-    publishComposerInset(geometry.keyboard);
+    publishKeyboardHeight(geometry.keyboard);
 
+    /* WITH A KEYBOARD UP, DO NOTHING. Not the height, not the offset, not the
+       scroll correction below. This is the whole strategy and it is the
+       opposite of what this file used to do.
+
+       iOS brings a focused field out from under the keyboard by scrolling the
+       page, and it is entitled to: traced on an iPhone, window.scrollY hit 465
+       for a single frame as the composer came up from y~812 into a 409-tall
+       visible window. Every version of this hook so far tried to hold the shell
+       still against that scroll — by re-sizing it, by compensating the offset,
+       by clamping scrollY back to zero. What that produced was not stillness.
+       It was the app moving where iOS put it and then being yanked back, and
+       the yank is the jump. Two motions where the platform only made one.
+
+       So the app scrolls with the page and the header scrolls away with it,
+       which is exactly what chatgpt.com does on the same phone, and why it has
+       no jump to fix. `.app-shell` is absolutely positioned, so it travels with
+       that scroll rather than fighting it.
+
+       What is still published while the keyboard is up is --keyboard-height,
+       above, because the composer's home-indicator inset is about the keyboard
+       covering the strip and has nothing to do with where the page is. */
+    if (trackingKeyboard) return;
+
+    publishHeight(geometry.height);
+
+    /* Everything from here down is the launch-and-resume path only; a keyboard
+       has already returned above.
+
+       An offset is believed only once it has stopped moving. A launch or a
+       resume can leave the page genuinely displaced and that is worth
+       compensating, but it does not arrive in frames — anything that is still
+       changing is an animation, and applying each stale value one beat late
+       walks the whole shell down the screen and back. Zero is the exception and
+       is applied at once: coming back to rest can never be wrong, and must
+       never be late. */
     if (geometry.top === 0) {
       offsetPendingSince = null;
       publishTop(0);
     } else {
       if (offsetPendingSince === null) offsetPendingSince = now();
-      /* Until it has held still for OFFSET_SETTLE_MS this is a frame of the
-         keyboard transition, so whatever is already published stays. Only a
-         page that is genuinely left displaced gets compensated. */
+      /* Until it has held still for OFFSET_SETTLE_MS this is a frame of some
+         transition, so whatever is already published stays. Only a page that is
+         genuinely left displaced gets compensated. */
       if (now() - offsetPendingSince >= OFFSET_SETTLE_MS) publishTop(geometry.top);
       else if (publishedTop === null) publishTop(0);
     }
 
-    /* A real document scroll — the launch and resume case. This deliberately
-       does NOT fire on a non-zero visual-viewport offset: that offset is the
-       visual viewport moving inside the layout viewport, which scrollTo cannot
-       undo, so calling it there only fights WebKit mid-animation. */
+    /* A launch or a resume that comes back displaced. Unreachable with a
+       keyboard up, by the early return above — that scroll is iOS's to make.
+
+       This deliberately does NOT fire on a non-zero visual-viewport offset:
+       that offset is the visual viewport moving inside the layout viewport,
+       which scrollTo cannot undo, so calling it there only fights WebKit
+       mid-animation. */
     if (windowTarget.scrollY > 0) scroll(0, 0);
   };
 

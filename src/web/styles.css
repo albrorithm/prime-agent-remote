@@ -88,10 +88,22 @@
      inside it, so this has to grow with --text-scale like the type does.
      3.375rem is exactly 54px at scale 1. */
   --header-height: 3.375rem;
-  /* The composer's clearance over the home indicator. useViewportGeometry
-     pins this to 0 while the keyboard covers that strip, because there is
-     nothing left to clear and the gap would read as the composer floating. */
-  --composer-safe-bottom: max(9px, env(safe-area-inset-bottom, 0px));
+  /* The composer's clearance over the home indicator, at rest. index.html sets
+     no viewport-fit=cover, so env(safe-area-inset-bottom) reports 0 in an
+     installed iOS PWA and the 28px literal in the standalone block below is
+     what actually does the work; the env() is for anywhere that does inset. */
+  --composer-rest-bottom: max(9px, env(safe-area-inset-bottom, 0px));
+  /* What is left of that clearance right now. The keyboard covers the strip
+     from the bottom up, so every pixel it has risen is a pixel with nothing
+     left to clear, and the inset is spent against it continuously.
+     Spending it gradually is the point: this used to be flipped straight to 0
+     the first frame the keyboard passed a threshold, which took 19px out of
+     the composer in a single step about an eighth of the way up. Draining it
+     costs the same 19px over the keyboard's first 19px of travel instead, so
+     there is no step for the eye to catch.
+     useViewportGeometry publishes --keyboard-height; wherever it has not run
+     this is exactly --composer-rest-bottom, which is what it was before. */
+  --composer-safe-bottom: max(0px, calc(var(--composer-rest-bottom) - var(--keyboard-height, 0px)));
   /* --viewport-top and --viewport-height are NOT declared here on purpose.
      useViewportGeometry publishes them on <html> from window.visualViewport,
      and every use site carries its own fallback, so a tree where the hook has
@@ -189,7 +201,18 @@ html, body, #root { width: 100%; min-width: 0; max-width: 100%; min-height: 100%
    text-size-adjust is pinned because iOS otherwise inflates text on top of our
    scale, which would compound the two. */
 html { height: 100%; font-size: calc(100% * var(--text-scale)); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-body { position: fixed; inset: 0; background: var(--bg); color: var(--text); }
+/* ABSOLUTE, not fixed, and this is the one line the keyboard turns on.
+   iOS does not honour `position: fixed` while an input is focused and the
+   software keyboard is up — fixed boxes lay out as though they were static for
+   the duration, which is a documented WebKit behaviour of very long standing
+   (bugs.webkit.org 153224). On this app that showed as the whole shell being
+   dragged down for ~85ms as the keyboard arrived and snapping back after, and
+   it is not something better numbers can fix: no matter how early the shell was
+   given its height, the scheme positioning it was the thing being ignored.
+   An absolutely positioned box resolves against an ancestor rather than the
+   viewport, so it is not part of that bargain. html is `min-height: 100%` with
+   `overflow: hidden` above, which makes this box the screen either way. */
+body { position: absolute; inset: 0; background: var(--bg); color: var(--text); }
 button, input, textarea { color: inherit; font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .42; }
@@ -202,7 +225,11 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 @keyframes blink { 50% { opacity: .25; } }
 
 .app-shell {
-  position: fixed;
+  /* Absolute for the reason given on `body` above: this is the box the composer
+     lives in, so it is the one that must not stop being positioned the moment
+     the keyboard opens. Its containing block is `body`, which is itself
+     absolute at inset 0, so at rest this is the same rectangle `fixed` gave. */
+  position: absolute;
   inset: 0;
   display: grid;
   grid-template: minmax(0, 1fr) / minmax(0, 1fr);
@@ -692,13 +719,16 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .splash img { width: 54px; height: 54px; border-radius: 14px; filter: grayscale(1); }
 
 /* === The visible rectangle ===
-   Every full-screen fixed layer is sized and placed against the VISUAL
-   viewport rather than the layout viewport. `position: fixed` resolves against
-   the layout viewport, and on iOS WebKit the two part company in the two ways
-   this app cares about: the layout viewport is briefly reported taller than
-   the screen just after an installed launch, and it does not shrink when the
-   keyboard opens — WebKit scrolls the page instead, which is what used to
-   carry the header and the drawers off the top of the screen.
+   Every full-screen layer is sized and placed against the VISUAL viewport
+   rather than the layout viewport, because on iOS the layout viewport is
+   briefly reported taller than the screen just after an installed launch and a
+   layer at `inset: 0` then draws off the bottom of the display.
+
+   That is a LAUNCH fix and only a launch fix. It is deliberately not a keyboard
+   fix: useViewportGeometry stops publishing these the moment a keyboard is up,
+   so the page scrolls the way iOS wants and the header scrolls away with it.
+   Read that file's header before making these track anything else — holding
+   the shell still against that scroll is the bug, not the remedy.
 
    Placed here, after every layer it names, so it wins over their own `inset`
    and `height` declarations; the >=1100px block below re-states the drawers
@@ -717,7 +747,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 
 @media (max-width: 720px) and (display-mode: fullscreen),
   (max-width: 720px) and (display-mode: standalone) {
-  :root { --composer-safe-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }
+  :root { --composer-rest-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }
 }
 
 @media (min-width: 721px) {
