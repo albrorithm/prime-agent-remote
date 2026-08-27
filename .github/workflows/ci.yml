@@ -7,11 +7,23 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      # Both versions always report. Cancelling the other run on the first
+      # failure is how you learn that something broke without learning which
+      # versions it broke on, which is the only interesting part.
+      fail-fast: false
+      matrix:
+        # The floor package.json declares, and the version development
+        # actually happens on. Testing one without the other is how a global
+        # `sessionStorage` that exists on 26 and not on 22 kept a red suite
+        # looking green locally for five days.
+        node-version: ['22', '26']
+    name: build (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node-version }}
           cache: 'npm'
       - run: npm ci
       - run: npm run typecheck
