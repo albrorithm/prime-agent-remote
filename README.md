@@ -140,7 +140,8 @@ session.
 - Catalog-driven slash commands, with clearly marked experimental execution.
 - Dialog and question attention cards.
 - Starting, renaming, stopping and deleting sessions from the phone.
-- Optional web push, off until you configure it.
+- Web push that configures itself — the gateway mints its own keys on first
+  start; each device opts in from Settings.
 - Installable as a home-screen app.
 
 The browser never reaches the daemon socket directly. There is no terminal, no
