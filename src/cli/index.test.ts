@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DeviceStore } from "../server/device-store.js";
+import { applyRevocation, connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
 
 /* Every npm `bin` is a symlink, so this is the ordinary case, not an edge one:
    installed under its own name the CLI used to print nothing and exit 0 for
@@ -207,5 +211,55 @@ describe("readCliCheck", () => {
 
   it("does not read a non-ENOENT failure as absence", () => {
     expect(readCliCheck({ error: Object.assign(new Error("EACCES"), { code: "EACCES" }) })).toBe("silent");
+  });
+});
+
+describe("applyRevocation", () => {
+  let storePath: string;
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "cli-revoke-"));
+    storePath = join(directory, "devices.json");
+  });
+
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  async function pair(...names: string[]) {
+    const store = new DeviceStore(storePath);
+    await store.load();
+    const issued = [];
+    for (const name of names) issued.push(await store.issue(name));
+    return issued;
+  }
+
+  async function remaining() {
+    const store = new DeviceStore(storePath);
+    await store.load();
+    return store.list().map((device) => device.name);
+  }
+
+  it("removes one device and leaves the others paired", async () => {
+    const [phone] = await pair("iPhone", "iPad");
+    expect(await applyRevocation(storePath, phone.device.id)).toEqual({ kind: "revoked", id: phone.device.id });
+    expect(await remaining()).toEqual(["iPad"]);
+  });
+
+  it("reports an id that is not there rather than claiming a revocation", async () => {
+    await pair("iPhone");
+    expect(await applyRevocation(storePath, "not-a-device")).toEqual({ kind: "unknown", id: "not-a-device" });
+    expect(await remaining()).toEqual(["iPhone"]);
+  });
+
+  it("counts what `all` actually removed", async () => {
+    await pair("iPhone", "iPad", "Android");
+    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 3 });
+    expect(await remaining()).toEqual([]);
+  });
+
+  it("says zero rather than failing when there is nothing paired", async () => {
+    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 0 });
   });
 });

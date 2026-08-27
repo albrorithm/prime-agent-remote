@@ -160,3 +160,36 @@ describe("DeviceStore.load", () => {
     expect(store.list()).toHaveLength(0);
   });
 });
+
+/* Why `prime-agent-mobile devices --revoke` stops the gateway before writing.
+   A store instance is a full in-memory copy that overwrites the file on every
+   persist, so two live instances do not merge — the last writer wins with
+   whatever it happened to be holding. The CLI revoking behind a running gateway
+   hit exactly this: the removal reached the file, and the gateway's next
+   sighting of any device put the removed one back. If DeviceStore ever
+   reconciles against the file instead, this test is the one that should change,
+   and the CLI can stop restarting the gateway. */
+describe("two writers on one store file", () => {
+  it("lets a second instance resurrect a device the first removed", async () => {
+    const gateway = new DeviceStore(filePath);
+    await gateway.load();
+    const doomed = await gateway.issue("Old Phone");
+    const other = await gateway.issue("Other Phone");
+
+    // The CLI: its own instance, loaded from disk, removing one device.
+    const cli = new DeviceStore(filePath);
+    await cli.load();
+    expect(await cli.revoke(doomed.device.id)).toBe(true);
+    expect(JSON.parse(await readFile(filePath, "utf8")).devices).toHaveLength(1);
+
+    // The gateway, which never reloaded, records any sighting and writes back
+    // the list it still holds.
+    expect(await gateway.verify(other.token)).not.toBeNull();
+
+    const onDisk = JSON.parse(await readFile(filePath, "utf8")).devices;
+    expect(onDisk).toHaveLength(2);
+    expect(onDisk.some((device: { id: string }) => device.id === doomed.device.id)).toBe(true);
+    // And it still verifies, because the in-memory copy never lost it.
+    expect(await gateway.verify(doomed.token)).not.toBeNull();
+  });
+});

@@ -6,7 +6,7 @@ import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { loadConfig } from "../server/config.js";
+import { type GatewayConfig, loadConfig } from "../server/config.js";
 import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
 import { resolvePrimeModule } from "../server/prime-module.js";
@@ -505,37 +505,33 @@ async function token(options: Options): Promise<number> {
   return 0;
 }
 
+export type RevocationOutcome =
+  | { kind: "revoked"; id: string }
+  | { kind: "revoked-all"; count: number }
+  | { kind: "unknown"; id: string };
+
+/** Applies a revocation to the store on disk. The caller owns the printing. */
+export async function applyRevocation(storePath: string, revoke: string): Promise<RevocationOutcome> {
+  const store = new DeviceStore(storePath);
+  await store.load();
+  if (revoke === "all") return { kind: "revoked-all", count: await store.revokeAll() };
+  if (await store.revoke(revoke)) return { kind: "revoked", id: revoke };
+  return { kind: "unknown", id: revoke };
+}
+
 /**
  * Paired devices, from the machine rather than the phone.
  *
  * Settings → Paired devices does this too, and does it better. This exists for
- * the case that one cannot serve: no device you still hold can sign in. Reading
- * and revoking here go straight to the store, so a gateway need not be running.
- *
- * A revoke against a running gateway takes effect on its next restart — the
- * gateway holds the device list in memory and the sessions it already issued
- * are its own. That is a real caveat and the output says so rather than
- * implying an immediacy the web UI has and this does not.
+ * the case that one cannot serve: no device you still hold can sign in.
  */
 async function devices(options: Options): Promise<number> {
   const config = loadConfig(baseEnv(options));
+
+  if (options.revoke) return revokeDevices(config, options.revoke);
+
   const store = new DeviceStore(config.deviceStorePath);
   await store.load();
-
-  if (options.revoke) {
-    if (options.revoke === "all") {
-      const count = await store.revokeAll();
-      line(`Revoked ${count} device${count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
-    } else if (await store.revoke(options.revoke)) {
-      line(`Revoked ${options.revoke}.`);
-    } else {
-      line(`No device with id ${options.revoke}.`);
-      return 1;
-    }
-    line("Restart the gateway to cut off any session it has already issued.");
-    return 0;
-  }
-
   const paired = store.list();
   if (!paired.length) {
     line("No paired devices. Open the address on a phone and enter the setup token.");
@@ -548,6 +544,72 @@ async function devices(options: Options): Promise<number> {
   line();
   line("Revoke one with --revoke <id>, or all of them with --revoke all.");
   return 0;
+}
+
+/**
+ * Revokes, and makes the revocation true of the running gateway as well as of
+ * the file.
+ *
+ * Writing to the device store while a gateway is up revokes nothing. The
+ * gateway loads the store once at startup (`gateway.ts`) and blind-writes its
+ * in-memory copy on every sighting, so the removed device goes on exchanging
+ * its credential for new sessions, and the next `verify()` persists the stale
+ * list and puts the record back in the file. This read as a delay for a while —
+ * "takes effect on the next restart" — and was really a revocation that undid
+ * itself, in the one path documented for a phone you no longer have.
+ *
+ * So the gateway is stopped around the write rather than after it. After it
+ * still loses: a resume landing between the write and the stop resurrects the
+ * record, and the restart then loads it back. Stopped first, there is no
+ * process to race.
+ *
+ * `rebuild` makes the same trade for the same reason. The cost is that every
+ * other device's sessions end too, which their device credentials silently
+ * restore — that is what those credentials are for.
+ */
+async function revokeDevices(config: GatewayConfig, revoke: string): Promise<number> {
+  const before = await resolveStatus(config.gatewayStatePath);
+  const running = before.running && before.state ? before.state : null;
+
+  if (running) {
+    line(`Stopping the gateway at ${running.url}, so the revocation cannot be undone under it.`);
+    if (await stop({ demo: running.backend === "demo" }) !== 0) {
+      line();
+      line("Nothing was revoked. A gateway still holding the store would have put the device back.");
+      return 1;
+    }
+    line();
+  }
+
+  const outcome = await applyRevocation(config.deviceStorePath, revoke);
+  if (outcome.kind === "revoked-all") {
+    line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
+  } else if (outcome.kind === "revoked") {
+    line(`Revoked ${outcome.id}.`);
+  } else {
+    line(`No device with id ${outcome.id}.`);
+  }
+
+  if (!running) return outcome.kind === "unknown" ? 1 : 0;
+
+  line();
+  line("Starting it again...");
+  line();
+  const restarted = await start({
+    command: "start",
+    mode: running.mode as ExposureMode,
+    port: running.port,
+    demo: running.backend === "demo",
+    foreground: false,
+    rotate: false,
+  });
+  if (restarted !== 0) {
+    line();
+    line("The revocation is applied, but the gateway did not come back up.");
+    line("Start it again with `prime-agent-mobile start`.");
+    return restarted;
+  }
+  return outcome.kind === "unknown" ? 1 : 0;
 }
 
 /** The name `/webui` shells out to, and the name npm installs this under. */

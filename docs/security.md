@@ -69,11 +69,16 @@ maximum age, which is the ceiling browsers enforce anyway.
   not affect the others.
 - Devices are listed and revoked from Settings → Paired devices in the app, or
   from `prime-agent-mobile devices [--revoke <id|all>]` at the machine. The CLI
-  writes straight to the store and needs no running gateway, which is what makes
-  it the answer when no device you still hold can sign in; the trade is that a
-  running gateway holds its device list in memory and keeps sessions it has
-  already issued, so a CLI revoke takes full effect on its next restart. The
-  in-app route has no such gap.
+  reads and writes the store directly and needs no running gateway, which is
+  what makes it the answer when no device you still hold can sign in. Because a
+  running gateway holds the device list in memory and rewrites the file from
+  that copy, a revoke written underneath it would neither take effect nor
+  survive; so the CLI stops the gateway, applies the revocation, and starts it
+  again on the same address. Every device's sessions end with that restart, and
+  every device except the revoked one restores itself from its credential
+  without the setup token. If the gateway cannot be stopped, nothing is revoked
+  and the command says so rather than reporting a revocation it did not manage
+  to make true.
 
 ### Sessions
 
