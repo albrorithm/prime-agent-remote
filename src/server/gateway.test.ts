@@ -1382,6 +1382,19 @@ describe("device management routes", () => {
     expect(await fetch(`${t.baseUrl}/api/v1/bootstrap`, {
       headers: { Origin: ORIGIN, Cookie: client.cookie },
     }).then((res) => res.status)).toBe(401);
+
+    /* The join the browser then walks into. `SettingsPanel` calls `signOut()`
+       on `self: true`, which POSTs a logout for a session this revoke has
+       already destroyed. `gateway-store.tsx` swallows exactly one status there
+       — 401 — and falls through to clearing local state; anything else shows
+       "Sign out failed" on a revoke that worked. So the status matters, and it
+       is this side of the wire that decides it. */
+    const logout = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: "{}",
+    });
+    expect(logout.status).toBe(401);
   });
 
   it("refuses an unknown device rather than reporting a revoke that did nothing", async () => {

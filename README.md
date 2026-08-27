@@ -57,6 +57,7 @@ prime-agent-mobile start      Start it in the background
 prime-agent-mobile status     Where is it, and is it up
 prime-agent-mobile stop       Stop it
 prime-agent-mobile token      Print the setup token (--rotate to replace it)
+prime-agent-mobile devices    List paired devices (--revoke <id|all> to cut one off)
 prime-agent-mobile rebuild    Rebuild the UI and make it live
 prime-agent-mobile install-command   Add /webui to Prime Agent
 ```
