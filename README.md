@@ -23,20 +23,15 @@ curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 Then:
 
 ```bash
-git clone https://github.com/albrorithm/prime-agent-remote.git
-cd prime-agent-remote
-npm install
-npm link
+npm install -g @albrorithm/prime-agent-remote
 prime-agent-remote install-command
 ```
 
-`npm install` builds both halves on its way through — the `prepare` script runs
-the build — so there is no separate build step to remember. `npm link` puts the
-CLI on PATH. `install-command` adds `/webui` to Prime Agent, which is where
-most people will start this from; it is a separate step because writing into
-another tool's configuration is not something an `npm install` should do behind
-your back, and because `/webui` shells out to the CLI by name and cannot work
-before PATH has it.
+The published package ships `dist/` and `dist-server/` already built, so nothing
+compiles at install time and npm's install-scripts gate has nothing to skip.
+`install-command` adds `/webui` to Prime Agent, which is where most people will
+start this from — a separate step because writing into another tool's
+configuration is not something an install should do behind your back.
 
 Then, from a Prime Agent session:
 
@@ -49,19 +44,34 @@ your Prime Agent build, notices whether Tailscale is running, mints a setup
 token the first time and reuses it afterwards, and prints the address to open
 along with the token.
 
+### From a checkout
+
+For development, or to run your own edits:
+
+```bash
+git clone https://github.com/albrorithm/prime-agent-remote.git
+cd prime-agent-remote
+npm install
+npm link
+prime-agent-remote install-command
+```
+
+`npm install` builds both halves on its way through — the `prepare` script runs
+the build — so there is no separate build step to remember. `npm link` puts the
+CLI on PATH, which `/webui` needs because it shells out to the command by name.
+
 If you would rather not link anything globally, `./dist-server/cli/index.js
-start` runs the same launcher straight out of the checkout. `/webui` will not
-be available.
+start` runs the same launcher straight out of the checkout. `/webui` will not be
+available.
 
-### Installing without a checkout
-
-`npm install -g git+https://github.com/albrorithm/prime-agent-remote.git`
-works, with one catch: npm 11 gates a git dependency's `prepare` script behind
-explicit approval and skips it silently otherwise, which leaves the CLI unbuilt
-with no error. If `prime-agent-remote help` comes back empty right after
-installing that way, that is why; approve the script and reinstall.
-`install-command` checks for this and says so rather than reporting a `/webui`
-that cannot run.
+Installing straight from GitHub — `npm install -g
+git+https://github.com/albrorithm/prime-agent-remote.git` — also works, with one
+catch: npm 11 gates a git dependency's `prepare` script behind explicit approval
+and skips it silently otherwise, which leaves the CLI unbuilt with no error. If
+`prime-agent-remote help` comes back empty right after installing that way, that
+is why; approve the script and reinstall. `install-command` checks for this and
+says so rather than reporting a `/webui` that cannot run. None of this applies to
+the published package above, which needs no build step at all.
 
 ```
 prime-agent-remote start      Start it in the background
