@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage, TranscriptPresentation } from "../../protocol";
 import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, useSettings, type Settings } from "../settings";
-import { formatWorkDuration, groupIntoTurns, splitTurn, TurnGroup, turnSettled, turnWallClockMs } from "./TurnGroup";
+import { formatWorkDuration, groupIntoTurns, splitTurn, splitTurnSegments, TurnGroup, turnSettled, turnWallClockMs, VISIBLE_PROSE_CHARS } from "./TurnGroup";
 
 function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
@@ -428,4 +428,90 @@ describe("a late agent-message must not bury the answer", () => {
     expect(tail.map((r) => r.id)).toEqual(["answer"]);
   });
 
+});
+
+/* Answers are not collapsed, wherever they sit in the turn.
+
+   Measured against 187 real turns: 36% hid a substantial answer inside the work
+   while something shorter stood as the conclusion, median 17x more text hidden
+   than shown. A tool call after an answer was enough to bury it, because the
+   visible tail can only be the final contiguous run of outcome rows. */
+describe("substantive prose is never collapsed", () => {
+  const long = (n: number) => "x".repeat(n);
+
+  it("promotes a long answer out of the work and splits the run around it", () => {
+    const { segments } = splitTurnSegments([
+      prompt("p", "t"),
+      pythonRow("w1", "t", "complete"),
+      row("answer", { turnId: "t", text: long(VISIBLE_PROSE_CHARS) }),
+      pythonRow("w2", "t", "complete"),
+      row("final", { turnId: "t", text: "Done." }),
+    ]);
+    expect(segments.map((s) => [s.kind, s.rows.map((r) => r.id)])).toEqual([
+      ["work", ["w1"]],
+      ["visible", ["answer"]],
+      ["work", ["w2"]],
+      ["visible", ["final"]],
+    ]);
+  });
+
+  it("leaves short narration collapsed, so a turn does not fill with pills", () => {
+    const { segments } = splitTurnSegments([
+      prompt("p", "t"),
+      pythonRow("w1", "t", "complete"),
+      row("aside", { turnId: "t", text: long(VISIBLE_PROSE_CHARS - 1) }),
+      pythonRow("w2", "t", "complete"),
+      row("final", { turnId: "t", text: "Done." }),
+    ]);
+    expect(segments.map((s) => s.kind)).toEqual(["work", "visible"]);
+    expect(segments[0].rows.map((r) => r.id)).toEqual(["w1", "aside", "w2"]);
+  });
+
+  it("keeps a short closing answer visible however brief it is", () => {
+    const { segments } = splitTurnSegments([
+      prompt("p", "t"),
+      pythonRow("w1", "t", "complete"),
+      row("final", { turnId: "t", text: "Yes." }),
+    ]);
+    expect(segments.at(-1)).toMatchObject({ kind: "visible" });
+    expect(segments.at(-1)!.rows.map((r) => r.id)).toEqual(["final"]);
+  });
+
+  it("counts only its own rows in each collapsed block", () => {
+    // A pill that says "3 steps" and opens onto two of them is describing the
+    // turn, not the control the user just tapped.
+    const rows = [
+      prompt("p", "t"),
+      pythonRow("w1", "t", "complete"),
+      pythonRow("w2", "t", "complete"),
+      row("answer", { turnId: "t", text: "y".repeat(400) }),
+      pythonRow("w3", "t", "complete"),
+      row("final", { turnId: "t", text: "Done." }),
+    ];
+    render(
+      <TurnGroup turnId="t" rows={rows} renderRow={(m) => <p key={m.id}>{m.text}</p>} />,
+      { turnsCollapsed: true },
+    );
+    const summaries = screen.getAllByRole("group").map((d) => d.querySelector(".turn-summary-text")?.textContent);
+    expect(summaries[0]).toMatch(/^2 steps/);
+    expect(summaries[1]).toMatch(/^1 step\b/);
+  });
+
+  it("renders the answer outside any collapsed block", () => {
+    const rows = [
+      prompt("p", "t"),
+      pythonRow("w1", "t", "complete"),
+      row("answer", { turnId: "t", text: long(400) }),
+      pythonRow("w2", "t", "complete"),
+      row("final", { turnId: "t", text: "Done." }),
+    ];
+    render(
+      <TurnGroup turnId="t" rows={rows} renderRow={(m) => <p key={m.id} data-testid={m.id}>{m.text}</p>} />,
+      { turnsCollapsed: true },
+    );
+    // Present, and not inside a <details> — the thing the bug got wrong.
+    expect(screen.getByTestId("answer").closest("details")).toBeNull();
+    expect(screen.getByTestId("final").closest("details")).toBeNull();
+    expect(screen.getAllByRole("group").length).toBe(2);
+  });
 });

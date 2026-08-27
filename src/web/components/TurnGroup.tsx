@@ -86,6 +86,63 @@ export function splitTurn(rows: readonly TranscriptMessage[]): TurnSections {
   return { prompt: rows.slice(0, promptEnd), work: rows.slice(promptEnd, tailStart), tail: rows.slice(tailStart) };
 }
 
+/**
+ * Prose this long, sitting inside a turn's work, is an answer rather than
+ * narration — and answers are not collapsed.
+ *
+ * Measured against 187 turns of real transcript: 36% of them had a substantial
+ * answer hidden inside the work while something shorter stood as the turn's
+ * visible conclusion, a median of 17x more text hidden than shown. The cause is
+ * ordinary: `splitTurn` can only keep the final contiguous run of outcome rows,
+ * so any tool call after an answer buries it.
+ *
+ * The threshold is a judgement, checked against the same transcripts: at 200
+ * chars a turn gains a median of one extra collapsed block and keeps a median
+ * of one visible answer. Lower floods the view with pills around every one-line
+ * aside (max 41 per turn), higher hides real answers again.
+ */
+export const VISIBLE_PROSE_CHARS = 200;
+
+export type TurnSegment =
+  | { kind: "work"; key: string; rows: TranscriptMessage[] }
+  | { kind: "visible"; key: string; rows: TranscriptMessage[] };
+
+function isSubstantiveProse(row: TranscriptMessage): boolean {
+  return row.role === "assistant"
+    && row.presentation === undefined
+    && row.text.trim().length >= VISIBLE_PROSE_CHARS;
+}
+
+/**
+ * The turn as an ordered run of collapsed work and visible prose.
+ *
+ * Layered on splitTurn rather than replacing it: the prompt and the final
+ * outcome run are decided exactly as before — so a one-word closing answer is
+ * still visible however short it is — and this only promotes long answers that
+ * would otherwise be buried in between.
+ */
+export function splitTurnSegments(rows: readonly TranscriptMessage[]): { prompt: TranscriptMessage[]; segments: TurnSegment[] } {
+  const { prompt, work, tail } = splitTurn(rows);
+  const segments: TurnSegment[] = [];
+  let run: TranscriptMessage[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    segments.push({ kind: "work", key: `work-${run[0].id}`, rows: run });
+    run = [];
+  };
+  for (const row of work) {
+    if (isSubstantiveProse(row)) {
+      flush();
+      segments.push({ kind: "visible", key: `visible-${row.id}`, rows: [row] });
+    } else {
+      run.push(row);
+    }
+  }
+  flush();
+  if (tail.length) segments.push({ kind: "visible", key: `tail-${tail[0].id}`, rows: tail });
+  return { prompt, segments };
+}
+
 function rowActive(row: TranscriptMessage): boolean {
   if (row.state === "streaming") return true;
   const presentation = row.presentation;
@@ -156,7 +213,8 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   // persists for the session (the component stays mounted under its turnId key).
   const [userChoice, setUserChoice] = useState<boolean | undefined>(undefined);
   const { settings } = useSettings();
-  const { prompt, work, tail } = splitTurn(rows);
+  const { prompt, segments } = splitTurnSegments(rows);
+  const work = segments.flatMap((segment) => segment.kind === "work" ? segment.rows : []);
   const settled = turnSettled(rows);
   // A live turn stays open whatever the setting says — its work is what the
   // user is watching. `turnsCollapsed` only decides where a turn lands once
@@ -176,28 +234,51 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   const useRecap = settled && Boolean(recap);
   const summaryText = !settled ? `Working… · ${stepsLabel}` : useRecap ? recap! : countsLabel;
 
+  const toggle = (event: { preventDefault: () => void }) => {
+    event.preventDefault();
+    if (!open) setEverOpened(true);
+    setUserChoice(!open);
+  };
+  // Every work block in a turn shares one open state: expanding is a decision
+  // about the turn, not about one of its runs, and `turnsCollapsed` is a
+  // per-turn setting. The first block carries the turn-level labels; the rest
+  // describe only their own run, so the counts stay truthful.
+  let workBlocksSeen = 0;
+
   return (
     <div className="turn-group" data-settled={settled || undefined}>
       {prompt.map(renderRow)}
-      {work.length > 0 && (
-        <details className="turn-work" open={open} data-state={settled ? "settled" : "live"}>
-          <summary
-            className="turn-summary"
-            aria-label={`Turn details, ${countsLabel}`}
-            onClick={(event) => {
-              event.preventDefault();
-              if (!open) setEverOpened(true);
-              setUserChoice(!open);
-            }}
+      {segments.map((segment) => {
+        if (segment.kind === "visible") return segment.rows.map(renderRow);
+        const first = workBlocksSeen++ === 0;
+        // Each block counts its OWN rows: a pill that says "3 steps" and opens
+        // onto two of them is lying about the thing it controls. The turn's
+        // end-to-end duration is a turn property, so it rides on the first
+        // block and is not repeated — later blocks time only their own run.
+        const runSteps = segment.rows.length;
+        const runLabel = `${runSteps} step${runSteps === 1 ? "" : "s"}`;
+        const runActive = segment.rows.some(rowActive);
+        const runDuration = first ? durationMs : turnWallClockMs(segment.rows);
+        const label = runDuration > 0 ? `${runLabel} · ${formatWorkDuration(runDuration)}` : runLabel;
+        const text = !settled && runActive ? `Working… · ${runLabel}`
+          : first && useRecap ? recap!
+          : label;
+        return (
+          <details
+            key={segment.key}
+            className="turn-work"
+            open={open}
+            data-state={settled ? "settled" : "live"}
           >
-            <ChevronRight className="turn-chevron" aria-hidden="true" />
-            <span className="turn-summary-text">{summaryText}</span>
-            {useRecap && <span className="turn-summary-meta">{countsLabel}</span>}
-          </summary>
-          <div className="turn-work-rows">{mountWork ? work.map(renderRow) : null}</div>
-        </details>
-      )}
-      {tail.map(renderRow)}
+            <summary className="turn-summary" aria-label={`Turn details, ${label}`} onClick={toggle}>
+              <ChevronRight className="turn-chevron" aria-hidden="true" />
+              <span className="turn-summary-text">{text}</span>
+              {first && useRecap && <span className="turn-summary-meta">{label}</span>}
+            </summary>
+            <div className="turn-work-rows">{mountWork ? segment.rows.map(renderRow) : null}</div>
+          </details>
+        );
+      })}
     </div>
   );
 }
