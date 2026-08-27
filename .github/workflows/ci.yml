@@ -16,3 +16,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # End to end against the built artifacts. It caught nothing for a day
+      # because it only ran when someone remembered to run it.
+      - run: npm run smoke
