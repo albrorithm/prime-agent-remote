@@ -12,7 +12,10 @@ Demo mode is the default and never executes local tools.
 ## Production
 
 1. Run `npm run build`.
-2. Set a random `PRIME_WEB_PAIRING_TOKEN` with at least 32 characters. Production startup rejects a missing or shorter token.
+2. `PRIME_WEB_PAIRING_TOKEN` is optional: leave it unset and the gateway mints a
+   32-byte token itself on first run, persisted at mode `0600`. Set one only to
+   override that, and make it at least 32 characters — production rejects a
+   shorter one.
 3. Set exact `PRIME_WEB_ALLOWED_ORIGINS`.
 4. Keep `PRIME_WEB_HOST=127.0.0.1`.
 5. Set `PRIME_WEB_SECURE_COOKIE=true` behind HTTPS.
@@ -28,7 +31,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_HOST` | `127.0.0.1` | Gateway bind address |
 | `PRIME_WEB_PORT` | `8787` | Gateway port |
 | `PRIME_WEB_ALLOWED_ORIGINS` | local development origins | Exact comma-separated browser origins |
-| `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override; a configured one must be 32 or more characters in production |
+| `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override for a directly-run gateway (`npm start`); a configured one must be 32 or more characters in production. The `prime-agent-mobile` CLI ignores this variable and always reads or mints its own token file instead — see `docs/security.md` |
 | `PRIME_WEB_SECURE_COOKIE` | true in production | Add the cookie `Secure` attribute; accepts only `true`, `false`, `1`, or `0` |
 | `PRIME_WEB_BACKEND` | `demo` | `demo` or `prime`; other values fail startup |
 | `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |
@@ -40,6 +43,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_PAIRING_TOKEN_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/pairing-token` (or under `~/.config`) | Absolute path to the token the gateway mints for itself when none is configured |
 | `PRIME_WEB_DEVICE_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/devices.json` (or under `~/.config`) | Absolute path to the paired-device credential file |
 | `PRIME_WEB_PUSH_STORE` | `$XDG_CONFIG_HOME/prime-agent-web/push-subscriptions.json` (or under `~/.config`) | Absolute path to the push subscription file |
+| `PRIME_WEB_STATE_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/gateway.json` (or under `~/.config`) | Absolute path to where the CLI launcher records a running gateway (pid, url, mode, backend) so `status`, `stop`, and `rebuild` can find it |
 
 The three VAPID variables are all-or-nothing: set all three or none. A partial
 configuration fails startup rather than leaving the app offering a notification

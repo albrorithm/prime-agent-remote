@@ -52,8 +52,12 @@ maximum age, which is the ceiling browsers enforce anyway.
   deliberately unauthenticated — the cookie is the credential — validates
   `Origin`, and shares the setup token's rate limit, because guessing a bearer
   credential deserves the same ceiling as guessing the token.
-- Sign-out revokes the credential and clears both cookies. Session expiry
-  deliberately does not, which is exactly what lets a phone survive a restart.
+- Sign-out revokes the credential, clears both cookies, and ends every other
+  session running from that device too, sockets included — a second tab, or a
+  session opened before the sign-out, does not survive it. Each of those
+  sessions' own push subscriptions is revoked as well, so the wake capability
+  dies with them. Session expiry deliberately revokes nothing, which is
+  exactly what lets a phone survive a restart.
 - A credential that no longer verifies has its cookie cleared, so a browser
   stops presenting something that can never work again.
 - Records are bounded in count and per-field size, written mode `0600` through
@@ -72,11 +76,27 @@ The browser receives:
 - a separate CSRF token returned inside authenticated JSON.
 
 The setup token is never stored by the browser application. Production no
-longer requires the token to be configured: an unset one is minted at 32 random
-bytes and persisted at mode `0600` in the gateway's own configuration
-directory, which is stronger than a human-chosen value and keeps a long-lived
-secret out of the process environment. A token that *is* configured must still
-be at least 32 characters, and production refuses a shorter one. Sessions expire in memory after the configured TTL, and an explicit sign-out invalidates the session immediately and clears the cookie with the same attributes it was set with. A WebSocket is bound to the session used during its upgrade and is closed when that session expires or is signed out, including a second tab sharing the session.
+longer requires the token to be configured: an unset one is minted at 32
+random bytes and persisted at mode `0600` in the gateway's own configuration
+directory, which is stronger than a human-chosen value. Where that token ends
+up depends on how the gateway is started. Run directly (`npm start`, the
+`docs/deployment.md` production path), the process reads or mints the file
+into its own in-memory config and never puts the token in its environment.
+Run through the CLI (`prime-agent-mobile start`, the normal path — see the
+README) it does: the launcher reads or mints the same file itself, then passes
+the value to the spawned gateway process as `PRIME_WEB_PAIRING_TOKEN`, so under
+the CLI the token is present in the running gateway's environment for the life
+of the process — readable by the same local user, or root, through `ps` or
+`/proc/<pid>/environ` on Linux, or equivalent process inspection on macOS, but
+not by another unprivileged account. A token that *is* configured must still
+be at least 32 characters in production, though under the CLI an operator-set
+`PRIME_WEB_PAIRING_TOKEN` is not what takes effect — the CLI always reads or
+mints its own token file regardless of the environment, and only that value
+reaches the gateway. Sessions expire in memory after the configured TTL, and
+an explicit sign-out invalidates the session immediately and clears the cookie
+with the same attributes it was set with. A WebSocket is bound to the session
+used during its upgrade and is closed when that session expires or is signed
+out, including a second tab sharing the session.
 
 ## Push notifications
 
@@ -99,12 +119,16 @@ A push subscription is a long-lived capability to wake a device, and it delibera
 - CSP, frame denial, no-referrer, and content-type protections.
 - One MiB default HTTP request limit. Image-message requests have a separate bounded limit sized for three validated images.
 - WebSocket limits of 128 KiB per inbound message, 16 MiB per serialized outbound frame, and 32 MiB of aggregate buffered output.
-- Sliding-window rate limits: 5 pairing attempts per remote address per minute (failed attempts consume the budget, and over-limit attempts are answered like a wrong token) and 120 mutations per session per minute (`429` with `Retry-After`). Each limiter tracks at most 4,096 keys and refuses new keys at capacity.
+- Sliding-window rate limits: 5 pairing attempts per remote address per minute (failed attempts consume the budget, and over-limit attempts are answered like a wrong token), 30 resume attempts per verified device per minute, and 120 mutations per session per minute (`429` with `Retry-After`). Each limiter tracks at most 4,096 keys and refuses new keys at capacity. A resume is charged to its device's own budget only once its credential verifies; an unverified resume attempt — a guess — is charged to the address budget instead, the same one pairing uses, so guessing a device token costs exactly what guessing the pairing token costs. That address budget is a single shared bucket behind a reverse proxy that terminates every connection from the same address — `tailscale serve` does this, presenting every client as `127.0.0.1` — so pairing a new device, or a resume attempt that fails verification, can exhaust it for the whole house; more than five of either in a minute will see the next one rejected until the window rolls over. Legitimate reconnects by already-paired devices are unaffected, since each has its own per-device budget.
 - Text rendering for transcript content; no raw HTML injection.
 
 ## Tailscale
 
 Tailscale provides encrypted transport and tailnet membership. It is not treated as the only application security layer. The gateway should stay on loopback behind `tailscale serve`.
+
+## LAN mode
+
+`--lan` binds every interface, so the setup token — not encryption — is what stops an arbitrary device on the network from pairing. Without a certificate the device already trusts, LAN mode runs over plain HTTP, and everything that authenticates a request crosses that wire in the clear: the pairing token used to pair a new device, the session cookie of one already paired, and the 400-day device credential minted for it. That is on top of the secure-context features plain HTTP outside `localhost` already loses (installability, notifications, the app badge). A bystander who can observe LAN traffic can copy any of those three credentials off the wire; treat LAN mode as a same-trust-network convenience, not a substitute for `--tailscale`.
 
 ## Caching
 
