@@ -51,6 +51,25 @@ const SNAPSHOT_CAP = 24;
 const ERROR_TTL_MS = 6000;
 export const SOCKET_PING_INTERVAL_MS = 25_000;
 export const SOCKET_PONG_TIMEOUT_MS = 10_000;
+/**
+ * The deadline for the ping sent the moment the app comes back to the front.
+ *
+ * A phone that has been asleep hands back a socket reporting OPEN that is
+ * already dead: nothing closed it, because nothing tried to use it. The steady
+ * ping loop finds that out eventually — a ping interval plus a pong timeout
+ * later, most of a minute — and until it does, the transcript on screen is
+ * stale and looks live. That is the most common interaction there is: unlock
+ * the phone, read what the agent did. So the wake path asks at once, and asks
+ * on a much shorter deadline, because a socket that is really there answers in
+ * milliseconds over any link worth keeping.
+ */
+export const SOCKET_PROBE_TIMEOUT_MS = 3_000;
+/**
+ * Two wakes this close together are one wake. iOS backgrounds the page for its
+ * own surfaces — the photo picker, the share sheet — and hands it straight
+ * back, which is a visibility change the user never made.
+ */
+const PROBE_COALESCE_MS = 1_000;
 /** One retry, then believe it. See the stream_gone handler. */
 const STREAM_GONE_RETRY_LIMIT = 1;
 
@@ -442,6 +461,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const manuallyClosed = useRef(false);
   const errorTimer = useRef<number | null>(null);
   const socketGeneration = useRef(0);
+  // Set by the live socket, so the wake handler can ping without reaching into
+  // `connect`'s closure for the pong timer that ping arms.
+  const probeRef = useRef<(() => void) | null>(null);
+  const lastProbeAt = useRef(0);
   const initializationGeneration = useRef(0);
   const sessionGeneration = useRef(0);
   const lifecycleAbort = useRef<AbortController | null>(null);
@@ -611,6 +634,21 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     let pingTimer: number | null = null;
     let pongTimer: number | null = null;
     const isCurrent = () => generation === socketGeneration.current && socketRef.current === socket;
+    /* One ping, and a deadline for its pong. The steady interval below passes
+       the ordinary timeout and the wake probe passes a much shorter one, but
+       both end the same way: silence past the deadline closes the socket, and
+       the close handler already there is what reconnects. The probe adds a
+       trigger, not a second recovery path. */
+    const ping = (timeoutMs: number) => {
+      if (!isCurrent() || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: "ping", version: PROTOCOL_VERSION }));
+      if (pongTimer != null) window.clearTimeout(pongTimer);
+      pongTimer = window.setTimeout(() => {
+        pongTimer = null;
+        if (isCurrent()) socket.close();
+      }, timeoutMs);
+    };
+    const probe = () => ping(SOCKET_PROBE_TIMEOUT_MS);
     const clearWatchdog = () => {
       if (openTimer != null) window.clearTimeout(openTimer);
       if (pingTimer != null) window.clearInterval(pingTimer);
@@ -618,6 +656,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       openTimer = null;
       pingTimer = null;
       pongTimer = null;
+      // Only if this socket is still the one publishing it: a newer socket has
+      // already replaced the reference, and clearing it would silence the wake
+      // probe for the connection that is actually live.
+      if (probeRef.current === probe) probeRef.current = null;
     };
 
     socket.addEventListener("open", () => {
@@ -627,15 +669,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       retryCount.current = 0;
       updateSocketPhase();
       for (const streamId of subscriptions.current) attach(streamId);
-      pingTimer = window.setInterval(() => {
-        if (!isCurrent() || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ type: "ping", version: PROTOCOL_VERSION }));
-        if (pongTimer != null) window.clearTimeout(pongTimer);
-        pongTimer = window.setTimeout(() => {
-          pongTimer = null;
-          if (isCurrent()) socket.close();
-        }, SOCKET_PONG_TIMEOUT_MS);
-      }, SOCKET_PING_INTERVAL_MS);
+      probeRef.current = probe;
+      pingTimer = window.setInterval(() => ping(SOCKET_PONG_TIMEOUT_MS), SOCKET_PING_INTERVAL_MS);
     });
     socket.addEventListener("message", (message) => {
       if (!isCurrent()) return;
@@ -901,11 +936,33 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       retryCount.current = 0;
       void initialize();
     };
-    const recoverWhenVisible = () => {
-      if (document.visibilityState === "visible"
-        && (stateRef.current.connection === "offline" || socketRef.current?.readyState !== WebSocket.OPEN)) {
+    /* `readyState` is the browser's opinion, not the network's. A socket that
+       survived a sleep has to prove it is still there, so ask — and re-attach
+       every stream from its cursor, which is what collects whatever happened
+       while the phone was away. The gateway settles any live subscription
+       before adding another, so re-attaching an attached stream is a catch-up
+       rather than a second delivery. */
+    const wake = () => {
+      if (stateRef.current.authRequired || socketRetryBlocked.current) return;
+      if (socketRef.current?.readyState !== WebSocket.OPEN) {
         recover();
+        return;
       }
+      const now = Date.now();
+      if (now - lastProbeAt.current < PROBE_COALESCE_MS) return;
+      lastProbeAt.current = now;
+      probeRef.current?.();
+      for (const streamId of subscriptions.current) attach(streamId);
+    };
+    const recoverWhenVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // An already-offline connection has nothing to probe; it needs the
+      // bootstrap, which is what surfaces an expired session as a 401.
+      if (stateRef.current.connection === "offline") {
+        recover();
+        return;
+      }
+      wake();
     };
     window.addEventListener("online", recover);
     document.addEventListener("visibilitychange", recoverWhenVisible);
@@ -913,7 +970,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recoverWhenVisible);
     };
-  }, [initialize]);
+  }, [attach, initialize]);
 
   const pair = useCallback(
     async (token: string) => {

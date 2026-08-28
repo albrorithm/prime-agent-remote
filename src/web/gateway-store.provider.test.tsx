@@ -74,6 +74,7 @@ import {
   SOCKET_OPEN_TIMEOUT_MS,
   SOCKET_PING_INTERVAL_MS,
   SOCKET_PONG_TIMEOUT_MS,
+  SOCKET_PROBE_TIMEOUT_MS,
   useGateway,
 } from "./gateway-store";
 
@@ -1141,5 +1142,122 @@ describe("GatewayProvider recovery and state ownership", () => {
     }));
 
     expect(result.current.connection).toBe("replaying");
+  });
+});
+
+/* The phone was asleep, and the socket it comes back with reports OPEN whether
+   or not anything is still listening on the other end. Nothing in the browser
+   distinguishes those two, so the app has to ask. */
+describe("GatewayProvider wake probe", () => {
+  function wake(visibility: "visible" | "hidden" = "visible") {
+    Object.defineProperty(document, "visibilityState", { value: visibility, configurable: true });
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+  }
+
+  function frames(socket: { sent: string[] }) {
+    return socket.sent.map((value) => JSON.parse(value) as { type: string; streamId?: string });
+  }
+
+  it("pings and re-attaches every stream when the app comes back to the front", async () => {
+    vi.useFakeTimers();
+    renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent.length = 0;
+
+    wake();
+
+    expect(frames(socket)).toContainEqual({ type: "ping", version: 1 });
+    // Re-attaching is how the transcript catches up on whatever arrived while
+    // the phone was away: the cursor rides along and the gateway replays.
+    expect(frames(socket)).toContainEqual(expect.objectContaining({ type: "attach", streamId: "catalog" }));
+
+    act(() => socket.message({ type: "pong", version: 1 }));
+    act(() => { vi.advanceTimersByTime(SOCKET_PROBE_TIMEOUT_MS); });
+    expect(socket.readyState).toBe(MockWebSocket.OPEN);
+  });
+
+  /* The bug this exists for: before the probe, a socket that came back dead
+     but OPEN was found out by the steady ping loop, up to an interval plus a
+     pong timeout later. Half a minute of a stale transcript that looks live. */
+  it("closes a woken socket that never answers, long before the steady ping would", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+
+    wake();
+    act(() => { vi.advanceTimersByTime(SOCKET_PROBE_TIMEOUT_MS); });
+
+    expect(SOCKET_PROBE_TIMEOUT_MS).toBeLessThan(SOCKET_PING_INTERVAL_MS + SOCKET_PONG_TIMEOUT_MS);
+    expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+    expect(result.current.connection).toBe("offline");
+  });
+
+  // iOS backgrounds the page for its own photo picker and share sheet and
+  // hands it straight back. That is not a wake the user made.
+  it("treats rapid hide/show cycles as one wake", async () => {
+    vi.useFakeTimers();
+    renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent.length = 0;
+
+    wake();
+    wake("hidden");
+    wake();
+
+    expect(frames(socket).filter((frame) => frame.type === "ping")).toHaveLength(1);
+  });
+
+  it("probes nothing while the page is hidden", async () => {
+    vi.useFakeTimers();
+    renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    socket.sent.length = 0;
+
+    wake("hidden");
+
+    expect(frames(socket)).toHaveLength(0);
+  });
+
+  // A socket that is already gone needs the bootstrap, not a ping: the
+  // bootstrap is what surfaces an expired session as a 401 and routes to
+  // pairing instead of retrying a connection that will never authenticate.
+  it("still runs the bootstrap when the socket is not open", async () => {
+    vi.useFakeTimers();
+    renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    const bootstraps = apiMock.bootstrap.mock.calls.length;
+    act(() => socket.close());
+
+    wake();
+    await act(async () => { await Promise.resolve(); });
+
+    expect(apiMock.bootstrap.mock.calls.length).toBeGreaterThan(bootstraps);
+  });
+
+  it("does not reconnect on wake once the session is gone", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await act(async () => { await Promise.resolve(); });
+    act(() => MockWebSocket.instances[0].open());
+    act(() => apiMock.unauthorized?.());
+    expect(result.current.authRequired).toBe(true);
+    const bootstraps = apiMock.bootstrap.mock.calls.length;
+    const sockets = MockWebSocket.instances.length;
+
+    wake();
+    await act(async () => { await Promise.resolve(); });
+
+    expect(apiMock.bootstrap.mock.calls.length).toBe(bootstraps);
+    expect(MockWebSocket.instances).toHaveLength(sockets);
   });
 });
