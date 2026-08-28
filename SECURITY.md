@@ -1,6 +1,6 @@
 # Security
 
-This project is an authenticated HTTPS gateway that fronts a local coding agent with real local capabilities. If you have found something wrong with how it protects that boundary, we want to hear about it privately.
+This project is an authenticated HTTPS gateway in front of a local coding agent with real local capabilities. If you have found a problem with how it protects that boundary, please report it privately.
 
 ## Scope
 
@@ -20,7 +20,7 @@ Out of scope:
 
 ## How to report
 
-Please use GitHub private vulnerability reporting on [github.com/albrorithm/prime-agent-remote](https://github.com/albrorithm/prime-agent-remote/security/advisories/new) instead of opening a public issue.
+Use GitHub private vulnerability reporting at [github.com/albrorithm/prime-agent-remote](https://github.com/albrorithm/prime-agent-remote/security/advisories/new) rather than opening a public issue.
 
 Include:
 

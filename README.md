@@ -1,20 +1,20 @@
 # Prime Agent Remote
 
 A remote interface for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
-It keeps the daemon on your machine and puts a small authenticated gateway in
-front of it, so another device can drive an agent without exposing a terminal.
+The daemon stays on your machine; a small authenticated gateway sits in front
+of it, so another device can drive an agent without exposing a terminal.
 
-Designed for phones. It installs to the home screen and opens its session
-drawer with a swipe. Desktop browsers work, and the layout adapts by turning
-that drawer into a permanent sidebar, but that path is untested.
+It is built for phones: it installs to the home screen and opens its session
+drawer with a swipe. Desktop browsers are supported (the drawer becomes a
+permanent sidebar), but desktop is not what this is designed for or regularly
+tested against.
 
 It is an independent client. This project is not affiliated with, endorsed by,
 or sponsored by Prime Intellect.
 
 ## Install and start
 
-Prime Agent itself must be installed first. It is not on npm, so use its own
-installer:
+Install Prime Agent first. It is not on npm, so use its own installer:
 
 ```bash
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
@@ -27,11 +27,11 @@ npm install -g @albrorithm/prime-agent-remote
 prime-agent-remote install-command
 ```
 
-The published package ships `dist/` and `dist-server/` already built, so nothing
+The published package ships `dist/` and `dist-server/` prebuilt, so nothing
 compiles at install time and npm's install-scripts gate has nothing to skip.
-`install-command` adds `/webui` to Prime Agent, which is where most people will
-start this from. It stays a separate step because writing into another tool's
-configuration is not something an install should do behind your back.
+`install-command` adds the `/webui` command to Prime Agent. It is a separate
+step because it writes into Prime Agent's own configuration directory, which
+an install should not do without asking.
 
 Then, from a Prime Agent session:
 
@@ -40,8 +40,8 @@ Then, from a Prime Agent session:
 ```
 
 or from a terminal, `prime-agent-remote start`. Either way the launcher finds
-your Prime Agent build, notices whether Tailscale is running, mints a setup
-token the first time and reuses it afterwards, and prints the address to open
+your Prime Agent build, checks whether Tailscale is running, generates a setup
+token on first run and reuses it afterwards, and prints the address to open
 along with the token.
 
 ### From a checkout
@@ -56,13 +56,13 @@ npm link
 prime-agent-remote install-command
 ```
 
-`npm install` builds both halves on its way through, via the `prepare` script,
-so there is no separate build step to remember. `npm link` puts the
-CLI on PATH, which `/webui` needs because it shells out to the command by name.
+`npm install` builds both the UI and the server via the `prepare` script, so
+there is no separate build step. `npm link` puts the CLI on PATH, which
+`/webui` needs because it shells out to the command by name.
 
 If you would rather not link anything globally, `./dist-server/cli/index.js
-start` runs the same launcher straight out of the checkout. `/webui` will not be
-available.
+start` runs the same launcher straight out of the checkout, but `/webui` will
+not be available.
 
 Installing straight from GitHub also works, with one catch:
 
@@ -70,59 +70,74 @@ Installing straight from GitHub also works, with one catch:
 npm install -g git+https://github.com/albrorithm/prime-agent-remote.git
 ```
 
-npm 11 gates a git dependency's `prepare` script behind explicit approval and
-skips it silently otherwise, which leaves the CLI unbuilt with no error. If
-`prime-agent-remote help` comes back empty right after installing that way, that
-is why. Approve the script and reinstall. `install-command` checks for this and
-says so rather than reporting a `/webui` that cannot run. None of it applies to
-the published package above, which needs no build step at all.
+npm 11 only runs a git dependency's `prepare` script with explicit approval,
+and skips it silently otherwise, which leaves the CLI unbuilt with no error.
+If `prime-agent-remote help` prints nothing right after installing this way,
+that is what happened: approve the script and reinstall. `install-command`
+checks for this case and reports it instead of installing a `/webui` that
+cannot run. None of this applies to the published package above, which needs
+no build step.
 
 ```
 prime-agent-remote start      Start it in the background
-prime-agent-remote status     Where is it, and is it up
+prime-agent-remote status     Show the address and whether it is running
 prime-agent-remote stop       Stop it
 prime-agent-remote token      Print the setup token (--rotate to replace it)
-prime-agent-remote devices    List paired devices (--revoke <id|all> to cut one off)
+prime-agent-remote devices    List paired devices (--revoke <id|all> to remove one)
 prime-agent-remote rebuild    Rebuild the UI and make it live
 prime-agent-remote install-command   Add /webui to Prime Agent
 ```
 
 ### How it is reachable
 
-One choice, made once:
+The gateway binds one of three ways, chosen when you start it:
 
 - `--tailscale`: the default when Tailscale is running. The gateway stays on
-  loopback and Tailscale terminates HTTPS. Reachable from your phone anywhere,
-  and a secure context, without installing a certificate. Publish it once with
-  `tailscale serve --bg http://127.0.0.1:8787`.
+  loopback and Tailscale terminates HTTPS, so the app is reachable from your
+  phone anywhere, in a secure context, without installing a certificate.
+  Publish it once with `tailscale serve --bg http://127.0.0.1:8787`.
 - `--loopback`: this machine only. A phone cannot reach it.
 - `--lan`: **experimental**. Binds every interface, so every device on your
-  network can reach it and the setup token is what stops them. Without a
-  certificate the device already trusts, plain HTTP outside `localhost` is not
-  a secure context: no installable app, no service worker, no notifications and
-  no app badge. It also means every credential that authenticates a request (the
-  setup token, a paired session's cookie, and the 400-day device credential)
-  crosses the network in the clear, so a bystander who can observe LAN traffic
-  can copy any of them off the wire.
+  network can reach it and only the setup token stops them. Without a
+  certificate the device already trusts, plain HTTP outside `localhost` is
+  not a secure context: no installable app, no service worker, no
+  notifications, no app badge. Every credential that authenticates a request
+  (the setup token, a paired session's cookie, and the 400-day device
+  credential) also crosses the network unencrypted, so anyone who can observe
+  LAN traffic can copy them off the wire.
 
 ## Pairing
 
 Open the address on your phone and enter the setup token once. The browser is
-issued a device credential of its own, so it stays paired across gateway
-restarts and never needs the token again. Signing out revokes that device,
-clears both cookies, and ends every other session running from that device
-too, sockets included. Session expiry deliberately revokes nothing, which is
-what lets a phone survive a restart.
+issued its own device credential, so it stays paired across gateway restarts
+and never needs the token again. Signing out revokes that device, clears both
+cookies, and ends every other session running from that device, sockets
+included. Session expiry revokes nothing, by design, so a phone stays paired
+across a gateway restart.
 
 Only a hash of the credential is stored, so the file on disk does not let
-anyone become a paired device.
+anyone impersonate a paired device.
+
+## Installing as a PWA
+
+The full experience is the installed PWA: on iOS, notifications and the app
+badge only work once the app has been added to the Home Screen and is opened
+from there. In Safari, open the gateway address, then Share → Add to Home
+Screen. Use the Tailscale HTTPS address, since being a secure context is what
+makes the app installable at all. Chrome on Android offers the install on its
+own.
+
+The installed app may ask for the setup token again, because iOS can give it
+storage separate from Safari's. If it does, that is expected rather than a
+failed pairing, and the token is the same one you already used
+(`prime-agent-remote token` prints it again).
 
 ## From inside Prime Agent
 
 `/webui` is installed by `prime-agent-remote install-command` (see above). It
 copies `extensions/webui.ts` into `~/.prime/agent/extensions/`, so the command
-exists in every session rather than only inside this checkout. Being a copy,
-it needs re-running after that file changes.
+exists in every session rather than only inside this checkout. Because it is a
+copy, it needs re-running after that file changes.
 
 ```
 /webui [status|start|stop|token|help]
@@ -139,34 +154,37 @@ session.
   ancestry navigation.
 - Transcript streaming, live goal progress, and stop/send composer controls.
 - Markdown-lite rendering with copyable code blocks, including while streaming.
-- In-transcript search, quick replies, and per-agent drafts that survive reloads.
+- In-transcript search, quick replies, and per-agent drafts that survive
+  reloads.
 - Image attachments for image-capable models, resized client-side.
 - Catalog-driven slash commands, with clearly marked experimental execution.
 - Dialog and question attention cards.
 - Starting, renaming, stopping and deleting sessions from the phone.
-- Web push that configures itself. The gateway mints its own keys on first
+- Self-configuring web push: the gateway generates its own keys on first
   start, and each device opts in from Settings.
-- Installable as a home-screen app.
+- Installable as a PWA.
 
 The browser never reaches the daemon socket directly. There is no terminal, no
-arbitrary shell, and no arbitrary file reading. The only filesystem surface is a
-read-only directory-name browser for choosing a working directory.
-[`docs/security.md`](docs/security.md) states the boundary in full.
+arbitrary shell, and no arbitrary file reading. The only filesystem surface is
+a read-only directory-name browser for choosing a working directory.
+[`docs/security.md`](docs/security.md) describes the boundary in full.
 
 ## Demo mode
 
 `prime-agent-remote start --demo` runs against a safe fake backend that never
-touches a real agent. Useful for looking at the interface.
+touches a real agent. Useful for looking at the interface without a running
+agent, and for development.
 
-It also keeps its own pairing token, paired devices, and gateway state in a
+Demo mode keeps its own pairing token, paired devices, and gateway state in a
 separate `prime-agent-web-demo` config directory, so a demo run never shares
 credentials with a real one or evicts a real device from the paired-device
 store. Pass `--demo` to `status`, `stop`, and `rebuild` too when you mean the
-demo instance. Without it they look at your real one.
+demo instance; without it they operate on the real one.
 
 ## Documentation
 
-- [Security model](docs/security.md): the trust boundary, stated deliberately.
+- [Security model](docs/security.md): what the gateway does and does not
+  defend against.
 - [Deployment](docs/deployment.md): environment variables and production notes.
 - [Changing the web UI](docs/modifying-the-ui.md): for agents and quick edits.
 - [Protocol](docs/protocol.md): the wire contract.

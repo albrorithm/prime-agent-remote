@@ -1,13 +1,13 @@
 # Gateway protocol
 
-The browser protocol is intentionally separate from the local Prime Agent daemon protocol.
+The browser protocol is kept separate from the local Prime Agent daemon protocol on purpose.
 
-This document aims to be the exhaustive contract, but `src/protocol.ts` is the
-authority if the two ever disagree: it is the one module both the gateway and
-the web app import, so a shape drifting out of sync there breaks the build
-rather than quietly going stale in prose. If you are implementing against this
-API, check the Zod schemas there for anything this document is ambiguous
-about.
+This document tries to be the exhaustive contract, but if the two ever
+disagree, `src/protocol.ts` is the authority: it is the one module both the
+gateway and the web app import, so a shape that drifts out of sync there
+breaks the build instead of quietly going stale in prose. If you are
+implementing against this API, check the Zod schemas there for anything this
+document leaves ambiguous.
 
 ## Streams
 
@@ -80,8 +80,8 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 ### Authentication
 
 - `POST /api/v1/auth/pair` — `{ token, deviceName? }`. Origin-checked; not session-authenticated, since there is no session yet. Success: `200 { paired: true, csrfToken }`, plus a session cookie and a device credential cookie. Shares the pairing rate limit described in `docs/security.md`.
-- `POST /api/v1/auth/resume` — no body; the device credential cookie is the credential presented. Origin-checked, deliberately unauthenticated otherwise. Success: `200 { paired: true, csrfToken }` plus a new session cookie. Shares the same rate limit as pairing.
-- `POST /api/v1/auth/logout` — authenticated, Origin- and CSRF-checked, but deliberately exempt from the mutation rate limit and request-ID deduplication (see `docs/security.md`). Success: `200 { signedOut: true }`; closes the caller's open WebSocket connections and clears both cookies.
+- `POST /api/v1/auth/resume` — no body; the device credential cookie is the credential presented. Origin-checked; otherwise unauthenticated by design. Success: `200 { paired: true, csrfToken }` plus a new session cookie. Shares the same rate limit as pairing.
+- `POST /api/v1/auth/logout` — authenticated, Origin- and CSRF-checked, but exempt by design from the mutation rate limit and request-ID deduplication (see `docs/security.md`). Success: `200 { signedOut: true }`; closes the caller's open WebSocket connections and clears both cookies.
 
 ### Bootstrap
 

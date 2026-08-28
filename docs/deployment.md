@@ -12,9 +12,9 @@ Demo mode is the default and never executes local tools.
 ## Production
 
 1. Run `npm run build`.
-2. `PRIME_WEB_PAIRING_TOKEN` is optional: leave it unset and the gateway mints a
-   32-byte token itself on first run, persisted at mode `0600`. Set one only to
-   override that, and make it at least 32 characters — production rejects a
+2. `PRIME_WEB_PAIRING_TOKEN` is optional: leave it unset and the gateway mints
+   a 32-byte token itself on first run, persisted at mode `0600`. Set one only
+   to override that, and make it at least 32 characters — production rejects a
    shorter one.
 3. Set exact `PRIME_WEB_ALLOWED_ORIGINS`.
 4. Keep `PRIME_WEB_HOST=127.0.0.1`.
@@ -47,9 +47,10 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_STATE_FILE` | `$XDG_CONFIG_HOME/prime-agent-web/gateway.json` (or under `~/.config`) | Absolute path to where the CLI launcher records a running gateway (pid, url, mode, backend) so `status`, `stop`, and `rebuild` can find it |
 
 The two VAPID key variables are all-or-nothing: set both or neither. A partial
-configuration fails startup rather than leaving the app offering a notification
-switch that cannot work. `PRIME_WEB_VAPID_SUBJECT` is independent — it is the
-one part worth setting by hand when the keys are generated for you.
+configuration fails startup rather than leaving the app offering a
+notification switch that cannot work. `PRIME_WEB_VAPID_SUBJECT` is independent
+of the pair, and it is the one part worth setting by hand when the keys are
+generated for you.
 
 Do not put real credentials in committed dotenv files.
 
@@ -57,34 +58,32 @@ Do not put real credentials in committed dotenv files.
 
 Push and the app-icon badge are one feature, and the gateway configures itself
 for it. On first start it mints a VAPID keypair, writes it to
-`$XDG_CONFIG_HOME/prime-agent-web/vapid-keys.json` at mode `0600`, and reuses it
-on every start after that — the same arrangement as the pairing token, and for
-the same reason: a file the gateway owns beats a long-lived secret in the
-process environment, where any `ps` can read it.
+`$XDG_CONFIG_HOME/prime-agent-web/vapid-keys.json` at mode `0600`, and reuses
+it on every start after that — the same arrangement as the pairing token, and
+for the same reason: a file the gateway owns is safer than a long-lived secret
+in the process environment, which any `ps` can read.
 
-This used to require running a generator by hand and pinning three environment
-variables, which meant push shipped switched off for anyone who did not already
-know what VAPID is.
-
-So there is one step:
+Earlier versions required running a generator by hand and pinning three
+environment variables, which meant push shipped switched off for anyone who
+did not already know what VAPID is. Now there is one step:
 
 1. Open the app, go to Settings → Notifications, and press *Turn on
    notifications*. Permission is requested from that button only; the browser
-   ignores or auto-denies a prompt raised any other way, and a denial cannot be
-   re-prompted from the page.
+   ignores or auto-denies a prompt raised any other way, and a denial cannot
+   be re-prompted from the page.
 
-To use a keypair of your own instead — one shared between two installs, or kept
-somewhere else — generate it with `node scripts/generate-vapid.mjs
+To use a keypair of your own instead — one shared between two installs, or
+kept somewhere else — generate it with `node scripts/generate-vapid.mjs
 mailto:you@example.com` and set `PRIME_WEB_VAPID_PUBLIC_KEY` and
-`PRIME_WEB_VAPID_PRIVATE_KEY`. Explicit keys win and nothing is minted. Keep the
-private key out of the repository.
+`PRIME_WEB_VAPID_PRIVATE_KEY`. Explicit keys take precedence and nothing is
+minted. Keep the private key out of the repository.
 
 Deleting `vapid-keys.json` is not data loss but an identity change: existing
-subscriptions are bound to the key that created them, so each device turns
-notifications on again. The app already unsubscribes and re-subscribes for this
-case, so a stale subscription does not sit there failing quietly.
+subscriptions are bound to the key that created them, so each device has to
+turn notifications on again. The app already unsubscribes and re-subscribes
+for this case, so a stale subscription does not sit there failing quietly.
 
-Notes an operator needs:
+Operator notes:
 
 - On iOS the app must be installed to the Home Screen and opened from there.
   Notification permission and `setAppBadge` do nothing in Safari tabs, and the
@@ -93,35 +92,37 @@ Notes an operator needs:
   work over plain HTTP outside `localhost`.
 - The service worker registers in production builds only, so notifications
   cannot be exercised under `npm run dev`. Use `npm run build && npm start`.
-  Turning them on there now fails with a message rather than hanging, which is
-  what it used to do.
-- Nor can they be exercised against `PRIME_WEB_BACKEND=demo`. `onAttentionAdded`
-  is optional on the backend interface and only the Prime backend implements it,
-  so a demo gateway accepts and stores a subscription and can never send to it —
-  silently, with no error anywhere. Push needs `backend=prime`.
+  Turning them on under the dev server fails with a message; older versions
+  hung instead.
+- Nor can they be exercised against `PRIME_WEB_BACKEND=demo`.
+  `onAttentionAdded` is optional on the backend interface and only the Prime
+  backend implements it, so a demo gateway accepts and stores a subscription
+  and can never send to it — silently, with no error anywhere. Push needs
+  `backend=prime`.
 - Rotating the keypair invalidates every existing subscription. Devices must
   turn notifications on again.
-- Notifications name the session and the kind of attention it needs. They never
-  contain prompt or transcript text.
+- Notifications name the session and the kind of attention it needs. They
+  never contain prompt or transcript text.
 - Settings → Notifications also offers "Also when a turn finishes", off by
   default and per device. Prime Agent does not end a turn cleanly — the root
   finishes and straggling subagents wake the session again for seconds at a
   time — so a turn counts as over only once the session has been continuously
-  idle, and any return to work restarts that clock. One notification per turn:
-  see `src/server/turn-end-notifier.ts` for why a straggler postpones rather
-  than repeats.
+  idle, and any return to work restarts that clock. One notification per
+  turn: see `src/server/turn-end-notifier.ts` for why a straggler postpones
+  rather than repeats.
 - Signing out revokes that session's subscriptions. Letting a session expire
-  deliberately does not, so notifications keep working overnight.
+  intentionally does not, so notifications keep working overnight.
 
 ## Install-time theming
 
 `public/manifest.webmanifest` pins `theme_color` and `background_color` to
 `#000000`. Both are read once when the app is installed and cannot be changed
-at runtime, so a single value has to serve both themes. Black is deliberate:
-the product's identity is dark, and a black launch flash ahead of the light
-theme is less jarring than a white one ahead of the dark theme.
+at runtime, so a single value has to serve both themes. Black is a deliberate
+choice: the product's identity is dark, and a black launch flash ahead of the
+light theme is less jarring than a white one ahead of the dark theme.
 
 The consequence is that a viewer whose OS is set to Light Appearance sees a
-black splash before the app paints its light ground. The `<meta name="theme-color">`
-in `index.html` has no such limit — `public/theme-init.js` corrects it before
-first paint and `applySettings` keeps it on the active theme.
+black splash before the app paints its light ground. The
+`<meta name="theme-color">` in `index.html` has no such limit —
+`public/theme-init.js` corrects it before first paint and `applySettings`
+keeps it on the active theme.
