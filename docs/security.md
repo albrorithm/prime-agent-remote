@@ -93,6 +93,29 @@ The browser receives:
 - `Secure` when configured for HTTPS;
 - a separate CSRF token returned inside authenticated JSON.
 
+### The setup token in a pairing link
+
+`start` prints the setup token twice: once as text, and once inside a QR code
+that encodes the gateway's address with the token in the URL **fragment**
+(`https://host.tailnet.ts.net/#pair=<token>`). A fragment is never sent to a
+server, so the token stays out of request lines, access logs, and `Referer`
+headers, and it reaches the gateway only in the body of the same
+`POST /api/v1/auth/pair` a typed token uses — same route, same 5-per-minute
+rate limit, same session and device credential in return. Nothing about what
+the browser can reach changes.
+
+What a link does change is where the token can come to rest. The app reads the
+fragment during its first render and removes it with `history.replaceState`
+before it makes any request, and it does the same for a link that arrives at an
+already-open app, but by then the URL has already been through that phone: the
+browser's history, its address-bar suggestions, and any screenshot of the
+screen. **A pairing link is exactly as sensitive as the token inside it**, and
+it stays valid until the token is rotated (`prime-agent-remote token
+--rotate`), because it *is* the token. A link is spent at most once per app
+launch whatever its outcome, so a stale one cannot repeatedly consume the
+shared pairing budget, and a fragment that is not shaped like a token is not
+spent at all.
+
 The setup token is never stored by the browser application. Production no
 longer requires the token to be configured: an unset one is minted at 32
 random bytes and persisted at mode `0600` in the gateway's own configuration

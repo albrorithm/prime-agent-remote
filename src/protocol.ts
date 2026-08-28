@@ -1030,3 +1030,45 @@ export interface ProblemDetails {
   status: number;
   detail?: string;
 }
+
+/**
+ * A pairing link: the gateway's address with the setup token in the fragment.
+ *
+ * The fragment rather than the query string, because a fragment is never sent
+ * to a server. The token stays out of request lines, access logs and `Referer`
+ * headers, and the app strips it from the visible URL before it makes any
+ * request at all. What it cannot stay out of is that phone's own history, so a
+ * pairing link is exactly as sensitive as the token inside it.
+ *
+ * Both sides need this shape — the CLI writes the link into a QR code and the
+ * web app reads it back — which is what puts it here.
+ */
+export const PAIRING_FRAGMENT_KEY = "pair";
+
+/** Matches the tokens `pairing-token.ts` mints: base64url, and long. */
+const PAIRING_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,}$/u;
+
+export function buildPairingUrl(baseUrl: string, token: string): string {
+  const url = new URL(baseUrl);
+  url.hash = `${PAIRING_FRAGMENT_KEY}=${encodeURIComponent(token)}`;
+  return url.toString();
+}
+
+/**
+ * The token a pairing link carries, or null for a fragment that carries
+ * anything else.
+ *
+ * Shape is checked before the token is spent rather than after, because a
+ * pairing attempt costs one of five per minute for the whole address — behind
+ * `tailscale serve` every device in the house shares that budget — and a
+ * fragment left over from something else should not be able to spend it.
+ */
+export function readPairingFragment(hash: string): string | null {
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!fragment) return null;
+  // Exactly one, not the first of several: a fragment naming two tokens is
+  // ambiguous, and guessing which was meant spends an attempt to find out.
+  const tokens = new URLSearchParams(fragment).getAll(PAIRING_FRAGMENT_KEY);
+  if (tokens.length !== 1) return null;
+  return PAIRING_TOKEN_PATTERN.test(tokens[0]) ? tokens[0] : null;
+}

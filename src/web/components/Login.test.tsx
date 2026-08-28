@@ -3,12 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Login } from "./Login";
 
-const gatewayMock = vi.hoisted(() => ({ pair: vi.fn(), hadSession: false }));
+const gatewayMock = vi.hoisted(() => ({ pair: vi.fn(), hadSession: false, linkError: null as string | null }));
 vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock }));
 
 beforeEach(() => {
   gatewayMock.pair = vi.fn();
   gatewayMock.hadSession = false;
+  gatewayMock.linkError = null;
 });
 
 describe("Login", () => {
@@ -86,5 +87,28 @@ describe("Login", () => {
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Pairing failed");
+  });
+});
+
+/* A pairing link that failed leaves the user on this screen with no idea why,
+   unless this screen says so: it is the whole app at that point, and the error
+   banner is not part of it. */
+describe("Login after a pairing link failed", () => {
+  it("says what went wrong with the link", () => {
+    gatewayMock.linkError = "Pairing failed";
+    render(<Login />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Pairing failed");
+  });
+
+  it("hands the message over to the user's own attempt", async () => {
+    gatewayMock.linkError = "Pairing failed";
+    gatewayMock.pair.mockRejectedValue(new Error("Wrong token"));
+    const user = userEvent.setup();
+    render(<Login />);
+
+    await user.type(screen.getByLabelText("Pairing token"), "another-token");
+    await user.click(screen.getByRole("button", { name: "Pair device" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Wrong token"));
   });
 });

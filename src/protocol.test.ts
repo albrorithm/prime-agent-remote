@@ -3,7 +3,9 @@ import {
   sessionNameSchema,
   agentSnapshotSchema,
   attentionAgentCount,
+  buildPairingUrl,
   cellOutputSchema,
+  readPairingFragment,
   sessionDashboardSchema,
   type AgentSummary,
 } from "./protocol.js";
@@ -213,5 +215,46 @@ describe("sessionNameSchema", () => {
     for (const value of ["", "   ", "x".repeat(201), "two\nlines", "carriage\rreturn", "line\u2028sep", "para\u2029sep", "null\u0000byte"]) {
       expect(sessionNameSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
     }
+  });
+});
+
+const TOKEN = "9hIe-0eiCAcRa4iGOGWCrqOMD5DQ_fwD1e7jND4MO9I";
+
+describe("pairing links", () => {
+  it("puts the token in the fragment, where no request can carry it", () => {
+    const url = buildPairingUrl("https://host.tailnet.ts.net", TOKEN);
+    expect(url).toBe(`https://host.tailnet.ts.net/#pair=${TOKEN}`);
+    // Nothing before the # says anything about a token.
+    expect(new URL(url).search).toBe("");
+  });
+
+  it("round-trips through the fragment it writes", () => {
+    const url = new URL(buildPairingUrl("http://machine.local:8787", TOKEN));
+    expect(readPairingFragment(url.hash)).toBe(TOKEN);
+  });
+
+  it("reads a fragment with or without its hash", () => {
+    expect(readPairingFragment(`#pair=${TOKEN}`)).toBe(TOKEN);
+    expect(readPairingFragment(`pair=${TOKEN}`)).toBe(TOKEN);
+  });
+
+  /* Spending a token costs one of five pairing attempts per minute for the
+     whole address, and behind a proxy that is every device in the house. A
+     fragment left over from something else does not get to spend one. */
+  it("refuses anything that is not shaped like a token", () => {
+    expect(readPairingFragment("")).toBeNull();
+    expect(readPairingFragment("#")).toBeNull();
+    expect(readPairingFragment("#section-heading")).toBeNull();
+    expect(readPairingFragment("#agent=agent-7")).toBeNull();
+    expect(readPairingFragment("#pair=")).toBeNull();
+    expect(readPairingFragment("#pair=short")).toBeNull();
+    expect(readPairingFragment(`#pair=${"x".repeat(31)}`)).toBeNull();
+    expect(readPairingFragment(`#pair=${"x".repeat(32)}`)).toBe("x".repeat(32));
+    expect(readPairingFragment(`#pair=${TOKEN}!`)).toBeNull();
+    expect(readPairingFragment(`#pair=${TOKEN}&pair=other`)).toBeNull();
+  });
+
+  it("finds the token beside other fragment parameters", () => {
+    expect(readPairingFragment(`#state=1&pair=${TOKEN}`)).toBe(TOKEN);
   });
 });

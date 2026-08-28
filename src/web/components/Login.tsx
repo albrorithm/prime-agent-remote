@@ -4,7 +4,7 @@ import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 
 export function Login() {
-  const { pair, hadSession } = useGateway();
+  const { pair, hadSession, linkError } = useGateway();
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -46,7 +46,9 @@ export function Login() {
           onChange={(event) => setToken(event.target.value)}
           required
         />
-        {error && <p className="form-error" role="alert">{error}</p>}
+        {/* A link that failed is the reason this screen is up at all, so it
+            is shown until the user's own attempt has something to say. */}
+        {(error || linkError) && <p className="form-error" role="alert">{error || linkError}</p>}
         <button className="primary-button" disabled={busy || !token.trim()}>
           {busy && <LoaderCircle className="spin" aria-hidden="true" />}
           Pair device

@@ -111,12 +111,21 @@ The gateway binds one of three ways, chosen when you start it:
 
 ## Pairing
 
-Open the address on your phone and enter the setup token once. The browser is
-issued its own device credential, so it stays paired across gateway restarts
-and never needs the token again. Signing out revokes that device, clears both
-cookies, and ends every other session running from that device, sockets
-included. Session expiry revokes nothing, by design, so a phone stays paired
-across a gateway restart.
+`start` prints a QR code beside the address. Scan it with the phone's camera
+and the app pairs itself: the code is the address with the setup token in the
+URL fragment, which the app spends and then strips out of the URL. Typing the
+token into the pairing form does the same thing, if a camera is not to hand.
+`prime-agent-remote token --qr` prints the code again for a gateway that is
+already running.
+
+A pairing link is as sensitive as the token it carries, and lasts as long —
+until `prime-agent-remote token --rotate`. Treat it like the token.
+
+Either way the browser is then issued its own device credential, so it stays
+paired across gateway restarts and never needs the token again. Signing out
+revokes that device, clears both cookies, and ends every other session running
+from that device, sockets included. Session expiry revokes nothing, by design,
+so a phone stays paired across a gateway restart.
 
 Only a hash of the credential is stored, so the file on disk does not let
 anyone impersonate a paired device.
@@ -132,8 +141,8 @@ own.
 
 The installed app may ask for the setup token again, because iOS can give it
 storage separate from Safari's. If it does, that is expected rather than a
-failed pairing, and the token is the same one you already used
-(`prime-agent-remote token` prints it again).
+failed pairing, and the token is the same one you already used.
+`prime-agent-remote token --qr` prints it, and a code to scan, again.
 
 ## From inside Prime Agent
 

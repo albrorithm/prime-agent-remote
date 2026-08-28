@@ -6,6 +6,7 @@ import { homedir, hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { buildPairingUrl } from "../protocol.js";
 import { type GatewayConfig, loadConfig } from "../server/config.js";
 import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
@@ -13,6 +14,7 @@ import { resolvePrimeModule } from "../server/prime-module.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
 import { type ExposureMode, defaultExposureMode, resolveExposure, type Exposure } from "./exposure.js";
 import { isPrimeWebGatewayResponse } from "./gateway-identity.js";
+import { QrTooLongError, encodeQr, renderQr } from "./qr.js";
 import { clearGatewayState, isProcessAlive, resolveStatus, writeGatewayState } from "./state.js";
 import {
   type PublishOutcome,
@@ -102,7 +104,7 @@ Usage:
   prime-agent-remote start [options]     Start the gateway in the background
   prime-agent-remote status [--demo]     Say whether it is running, and where
   prime-agent-remote stop [--demo]       Stop it
-  prime-agent-remote token [--rotate] [--demo]   Print the setup token
+  prime-agent-remote token [--rotate] [--qr] [--demo]   Print the setup token
   prime-agent-remote devices [--revoke <id|all>] [--demo]  List or revoke paired devices
   prime-agent-remote rebuild [--demo]    Rebuild the UI and make it live
   prime-agent-remote install-command     Add /webui to Prime Agent
@@ -131,6 +133,8 @@ interface Options {
   rotate: boolean;
   /** Leave `tailscale serve` alone, and say what to run by hand. */
   noServe: boolean;
+  /** Print the pairing link as a scannable code. */
+  qr: boolean;
   /** A device id, or "all". Absent means list rather than revoke. */
   revoke?: string;
 }
@@ -142,6 +146,7 @@ export function parseArguments(argv: readonly string[]): Options {
     foreground: false,
     rotate: false,
     noServe: false,
+    qr: false,
   };
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -150,6 +155,7 @@ export function parseArguments(argv: readonly string[]): Options {
     } else if (argument === "--demo") options.demo = true;
     else if (argument === "--foreground") options.foreground = true;
     else if (argument === "--no-serve") options.noServe = true;
+    else if (argument === "--qr") options.qr = true;
     else if (argument === "--rotate") options.rotate = true;
     else if (argument === "--revoke") {
       const value = argv[index + 1];
@@ -296,8 +302,43 @@ function printStartupInfo(
     }
     line();
   }
+  printPairingCode(exposure.url, token, exposure.mode !== "loopback");
   for (const warning of exposure.warnings) line(`Note: ${warning}`);
   if (exposure.warnings.length > 0) line();
+}
+
+function pairingHint(exposure: Exposure): string {
+  return exposure.mode === "loopback"
+    ? "Open that address and enter the setup token."
+    : "Scan the code with the phone's camera, or open the address and type the token.";
+}
+
+/**
+ * The pairing link as a scannable code.
+ *
+ * Typing a 43-character token into a phone is the worst step in setting this
+ * up, and it is often two: iOS can give the installed app storage separate
+ * from Safari's, so the same token gets typed again. A camera does it in one.
+ *
+ * Not printed for a loopback gateway. A phone cannot open that address, and
+ * offering a code that cannot work is worse than saying nothing.
+ */
+function printPairingCode(url: string, token: string, reachable: boolean): void {
+  if (!reachable) return;
+  const link = buildPairingUrl(url, token);
+  try {
+    line("Scan this to pair a phone, or open the address and type the token:");
+    line();
+    // Colour only when a terminal will interpret it; see renderQr.
+    line(renderQr(encodeQr(link), { color: process.stdout.isTTY === true && !process.env.NO_COLOR }));
+    line();
+  } catch (error) {
+    // A tailnet name long enough to overflow the largest version this encodes
+    // is possible, and is not a reason to fail a start.
+    if (!(error instanceof QrTooLongError)) throw error;
+    line(`Pairing link: ${link}`);
+    line();
+  }
 }
 
 async function start(options: Options): Promise<number> {
@@ -390,7 +431,7 @@ async function start(options: Options): Promise<number> {
     // PRIME_WEB_PAIRING_TOKEN explicitly (above) means the child's own
     // `generatedPairingToken` is false and it never prints the token itself.
     printStartupInfo(exposure, token, port, serve);
-    line("Open that address on your phone and enter the setup token.");
+    line(pairingHint(exposure));
     line();
     const child = spawn(process.execPath, [entry], { cwd: projectRoot, env: environment, stdio: "inherit" });
     const code = await new Promise<number>((resolve) => child.on("exit", (exitCode) => resolve(exitCode ?? 0)));
@@ -445,7 +486,7 @@ async function start(options: Options): Promise<number> {
   });
 
   printStartupInfo(exposure, token, port, serve);
-  line("Open that address on your phone and enter the setup token.");
+  line(pairingHint(exposure));
   line("It stays paired across restarts. `prime-agent-remote stop` ends it.");
   return 0;
 }
@@ -534,6 +575,20 @@ async function token(options: Options): Promise<number> {
     ? await rotatePairingToken(config.pairingTokenPath)
     : await loadOrCreatePairingToken(config.pairingTokenPath);
   line(value);
+  if (options.qr) {
+    // The address is the running gateway's, not something this command can
+    // derive: it depends on the exposure mode that `start` chose.
+    const resolved = await resolveStatus(config.gatewayStatePath);
+    line();
+    if (!resolved.running || !resolved.state) {
+      line("Not running, so there is no address to pair with yet. Start it first.");
+    } else if (resolved.state.mode === "loopback") {
+      line(`Running on ${resolved.state.url}, which no other device can open.`);
+      line("Start it with --tailscale (or --lan) to pair a phone.");
+    } else {
+      printPairingCode(resolved.state.url, value, true);
+    }
+  }
   if (options.rotate) {
     line();
     line("Rotated. Devices already paired keep working; new ones need this token.");
@@ -640,6 +695,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     foreground: false,
     rotate: false,
     noServe: false,
+    qr: false,
   });
   if (restarted !== 0) {
     line();
@@ -752,6 +808,7 @@ async function rebuild(options: Pick<Options, "demo">): Promise<number> {
     foreground: false,
     rotate: false,
     noServe: false,
+    qr: false,
   });
   if (restarted !== 0) return restarted;
   line();

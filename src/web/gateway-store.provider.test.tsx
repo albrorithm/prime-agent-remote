@@ -1261,3 +1261,138 @@ describe("GatewayProvider wake probe", () => {
     expect(MockWebSocket.instances).toHaveLength(sockets);
   });
 });
+
+/* Typing a 43-character token into a phone is the worst step in setting this
+   up, and often two: iOS can give the installed app storage separate from
+   Safari's, so the same token gets typed again. A link carries it instead. */
+describe("GatewayProvider pairing links", () => {
+  const TOKEN = "9hIe-0eiCAcRa4iGOGWCrqOMD5DQ_fwD1e7jND4MO9I";
+
+  function openWithLink(fragment = `#pair=${TOKEN}`) {
+    window.history.replaceState(null, "", `/${fragment}`);
+  }
+
+  it("pairs from the link, and clears it out of the URL first", async () => {
+    openWithLink();
+    apiMock.bootstrap
+      .mockImplementationOnce(unauthorized())
+      .mockResolvedValueOnce(bootstrap([summary("agent-a")]));
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    // The token is out of the address bar from the first render, before any
+    // request has been made — not after the pairing succeeds.
+    expect(window.location.hash).toBe("");
+    await waitFor(() => expect(result.current.authRequired).toBe(false));
+    expect(apiMock.pair).toHaveBeenCalledWith(TOKEN, expect.any(String));
+  });
+
+  // The device credential is the cheaper answer and belongs first: a phone
+  // that is already paired should not spend a link at all.
+  it("prefers a working device credential over the link", async () => {
+    openWithLink();
+    apiMock.bootstrap
+      .mockImplementationOnce(unauthorized())
+      .mockResolvedValueOnce(bootstrap([summary("agent-a")]));
+    apiMock.resume.mockResolvedValueOnce({ csrfToken: "csrf-resumed" });
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.authRequired).toBe(false));
+    expect(apiMock.pair).not.toHaveBeenCalled();
+  });
+
+  it("says why a stale link failed, on the screen that comes next", async () => {
+    openWithLink();
+    apiMock.bootstrap.mockImplementation(unauthorized());
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+    apiMock.pair.mockImplementation(unauthorized("Pairing failed"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.authRequired).toBe(true));
+    expect(result.current.linkError).toBe("Pairing failed");
+  });
+
+  /* Spent once, whatever happens to it. A token that failed will fail again,
+     and retrying it on every re-initialize would burn the five-per-minute
+     pairing budget for the whole address. */
+  it("does not spend a failed link twice", async () => {
+    openWithLink();
+    apiMock.bootstrap.mockImplementation(unauthorized());
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+    apiMock.pair.mockImplementation(unauthorized("Pairing failed"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.authRequired).toBe(true));
+    const attempts = apiMock.pair.mock.calls.length;
+
+    await act(async () => { await result.current.reconnect(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(apiMock.pair.mock.calls.length).toBe(attempts);
+  });
+
+  /* The ordinary case on a phone: the app is already open on the pairing
+     screen, and the camera hands the tab a URL that differs only by its
+     fragment. The browser does not reload for that, so the read during the
+     first render never happens again — found by driving a real browser, where
+     the second visit did nothing at all. */
+  it("takes a link that arrives while the pairing screen is already up", async () => {
+    // Two 401s: one that puts the pairing screen up, and one when the link
+    // arrives and the app tries again before spending it.
+    apiMock.bootstrap
+      .mockImplementationOnce(unauthorized())
+      .mockImplementationOnce(unauthorized())
+      .mockResolvedValueOnce(bootstrap([summary("agent-a")]));
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.authRequired).toBe(true));
+
+    act(() => {
+      window.history.replaceState(null, "", `/#pair=${TOKEN}`);
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+
+    await waitFor(() => expect(apiMock.pair).toHaveBeenCalledWith(TOKEN, expect.any(String)));
+    expect(window.location.hash).toBe("");
+  });
+
+  // A link that arrives at a device that is already paired has nothing to do
+  // but get out of the URL. Holding the token for a later 401 would spend a
+  // stale secret hours after whoever scanned it walked away.
+  it("only clears a link that arrives at an already-paired device", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.authRequired).toBe(false));
+
+    act(() => {
+      window.history.replaceState(null, "", `/#pair=${TOKEN}`);
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+
+    expect(window.location.hash).toBe("");
+    expect(apiMock.pair).not.toHaveBeenCalled();
+  });
+
+  it("ignores a fragment that is not a pairing link", async () => {
+    openWithLink("#section");
+    apiMock.bootstrap.mockImplementation(unauthorized());
+    apiMock.resume.mockImplementation(unauthorized("No device credential"));
+
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.authRequired).toBe(true));
+    expect(apiMock.pair).not.toHaveBeenCalled();
+    expect(result.current.linkError).toBeNull();
+    // And a fragment that means something to someone else is left alone.
+    expect(window.location.hash).toBe("#section");
+  });
+});

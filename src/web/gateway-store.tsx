@@ -24,7 +24,7 @@ import type {
   SlashCommandCatalog,
   SlashCommandResult,
 } from "../protocol";
-import { attentionAgentCount, PROTOCOL_VERSION, serverFrameSchema } from "../protocol";
+import { attentionAgentCount, PROTOCOL_VERSION, readPairingFragment, serverFrameSchema } from "../protocol";
 import * as api from "./api";
 import { ApiError, humanizeError } from "./api";
 import { deviceLabel } from "./device-label";
@@ -174,6 +174,12 @@ interface State {
   // `auth_required` reset (unlike the rest of state) so Login can tell "you
   // were paired and your session expired" apart from a true first-time pair.
   hadSession: boolean;
+  /**
+   * Why a pairing link failed, if one did. Survives the reset that shows the
+   * pairing screen, because that screen is all there is to say it on: the
+   * error banner is not rendered there.
+   */
+  linkError: string | null;
 }
 
 /**
@@ -194,9 +200,31 @@ export function takeRequestedAgentId(): string | null {
   }
 }
 
+/**
+ * The setup token a pairing link carries, read once per app launch and removed
+ * from the URL in the same breath.
+ *
+ * Stripped before anything is sent anywhere. A fragment never reaches a server
+ * on its own, but it does sit in the address bar, in a screenshot, and in
+ * whatever the browser restores on a back navigation, and none of those are
+ * places for a credential to stay.
+ */
+export function takePairingToken(): string | null {
+  try {
+    const token = readPairingFragment(window.location.hash);
+    if (!token) return null;
+    const url = new URL(window.location.href);
+    url.hash = "";
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+    return token;
+  } catch {
+    return null;
+  }
+}
+
 type Action =
   | { type: "bootstrap"; value: BootstrapResponse; requestedAgentId?: string | null }
-  | { type: "auth_required"; signedOut?: true }
+  | { type: "auth_required"; signedOut?: true; linkError?: string }
   | { type: "connection"; value: ConnectionPhase }
   | { type: "catalog"; value: CatalogSnapshot }
   | { type: "snapshot"; value: AgentSnapshot; source?: "http" | "ws"; allowEqualRevision?: boolean }
@@ -225,6 +253,7 @@ const initialState: State = {
   error: null,
   hasReconnected: false,
   hadSession: false,
+  linkError: null,
 };
 
 function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
@@ -288,6 +317,7 @@ function reducer(state: State, action: Action): State {
         connection: "offline",
         // A deliberate sign-out is not an expiry, so Login greets it as a fresh pair.
         hadSession: action.signedOut ? false : state.hadSession,
+        linkError: action.linkError ?? null,
       };
     case "connection":
       return {
@@ -485,6 +515,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // reapply it on every reconnect. A bootstrap that never succeeds leaves this
   // `undefined`, so a later attempt can still consume it.
   const requestedAgentId = useRef<string | null | undefined>(undefined);
+  /* Read during the first render rather than in an effect, so the token is out
+     of the URL before the app has done anything at all. `undefined` means not
+     yet read; null means read, and spent or absent. */
+  const pairingLinkToken = useRef<string | null | undefined>(undefined);
+  if (pairingLinkToken.current === undefined) pairingLinkToken.current = takePairingToken();
   // The CSRF token of the session this device last claimed its push
   // subscription for. Changes exactly when the session does.
   const pushClaimedFor = useRef<string | null>(null);
@@ -580,7 +615,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  const resetForUnauthorized = useCallback((signedOut?: true) => {
+  const resetForUnauthorized = useCallback((signedOut?: true, linkError?: string) => {
     initializationGeneration.current += 1;
     sessionGeneration.current += 1;
     lifecycleAbort.current?.abort();
@@ -602,7 +637,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     socketRef.current = null;
     socketGeneration.current += 1;
     socket?.close();
-    dispatch({ type: "auth_required", ...(signedOut ? { signedOut } : {}) });
+    dispatch({
+      type: "auth_required",
+      ...(signedOut ? { signedOut } : {}),
+      ...(linkError ? { linkError } : {}),
+    });
   }, []);
 
   const connect = useCallback(() => {
@@ -888,7 +927,24 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
             void initializeRef.current();
             return;
           } catch {
-            // No usable credential. Fall through to the pairing screen.
+            // No usable credential. Fall through to the link, then the screen.
+          }
+        }
+        /* A link is spent once, whatever happens to it. A token that failed
+           will fail again, and retrying it on every re-initialize would burn
+           the five-per-minute pairing budget for the whole address — which
+           behind `tailscale serve` is every device in the house. */
+        const linkToken = pairingLinkToken.current;
+        pairingLinkToken.current = null;
+        if (linkToken) {
+          try {
+            await api.pair(linkToken, deviceLabel());
+            void initializeRef.current();
+            return;
+          } catch (pairError) {
+            // Say why on the pairing screen, which is what comes next.
+            resetForUnauthorized(undefined, humanizeError(pairError, "That pairing link did not work"));
+            return;
           }
         }
         resetForUnauthorized();
@@ -929,6 +985,27 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       socket?.close();
     };
   }, [initialize, resetForUnauthorized]);
+
+  /* A link opened while the app is already open changes only the fragment, so
+     the browser does not reload and the read during the first render never
+     happens again. That is the ordinary case on a phone: the tab is already
+     there, and the camera hands it a URL that differs by a fragment. Without
+     this the user watches the pairing form do nothing while the token sits in
+     the address bar. */
+  useEffect(() => {
+    const onHashChange = () => {
+      const token = takePairingToken();
+      if (!token) return;
+      // Already paired: the link is redundant, and stripping it is the whole
+      // job. Holding the token for some later 401 would spend a stale secret
+      // hours after the person who scanned it walked away.
+      if (!stateRef.current.authRequired) return;
+      pairingLinkToken.current = token;
+      void initializeRef.current();
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   useEffect(() => {
     const recover = () => {
