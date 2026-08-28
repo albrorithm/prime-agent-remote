@@ -41,6 +41,20 @@ describe("gateway state file", () => {
     await expect(readGatewayState(filePath)).resolves.toEqual(sample);
   });
 
+  it("remembers that this launcher published the Tailscale mapping", async () => {
+    await writeGatewayState(filePath, { ...sample, serveManaged: true });
+    await expect(readGatewayState(filePath)).resolves.toMatchObject({ serveManaged: true });
+  });
+
+  // Every state file written before the launcher published anything lacks the
+  // field, and reading one must not report the gateway as absent.
+  it("reads a state file that predates the field", async () => {
+    await writeGatewayState(filePath, sample);
+    const state = await readGatewayState(filePath);
+    expect(state).not.toBeNull();
+    expect(state?.serveManaged).toBeUndefined();
+  });
+
   it("writes 0600, since it names a port someone may reach", async () => {
     await writeGatewayState(filePath, sample);
     expect((await stat(filePath)).mode & 0o777).toBe(0o600);

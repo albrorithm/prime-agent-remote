@@ -20,6 +20,13 @@ export interface GatewayState {
   mode: string;
   backend: string;
   startedAt: string;
+  /**
+   * True when this launcher published the Tailscale Serve mapping, and so is
+   * the one allowed to take it down. Absent in states written before the
+   * launcher published anything, and absent whenever the mapping was already
+   * there — a mapping we did not create is not ours to remove.
+   */
+  serveManaged?: boolean;
 }
 
 const MAX_STATE_BYTES = 8 * 1024;

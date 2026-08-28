@@ -95,7 +95,10 @@ The gateway binds one of three ways, chosen when you start it:
 - `--tailscale`: the default when Tailscale is running. The gateway stays on
   loopback and Tailscale terminates HTTPS, so the app is reachable from your
   phone anywhere, in a secure context, without installing a certificate.
-  Publish it once with `tailscale serve --bg http://127.0.0.1:8787`.
+  `start` publishes the Tailscale Serve mapping itself and `stop` removes it
+  again, but only the mapping it created: one that was already there, or one
+  pointing somewhere else, is left alone and the command to publish it by hand
+  is printed instead. `--no-serve` never touches your Tailscale configuration.
 - `--loopback`: this machine only. A phone cannot reach it.
 - `--lan`: **experimental**. Binds every interface, so every device on your
   network can reach it and only the setup token stops them. Without a

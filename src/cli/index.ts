@@ -14,6 +14,15 @@ import { demoConfigDir, demoEnv } from "./demo-stores.js";
 import { type ExposureMode, defaultExposureMode, resolveExposure, type Exposure } from "./exposure.js";
 import { isPrimeWebGatewayResponse } from "./gateway-identity.js";
 import { clearGatewayState, isProcessAlive, resolveStatus, writeGatewayState } from "./state.js";
+import {
+  type PublishOutcome,
+  publishServe,
+  serveCommandLine,
+  serveOffArguments,
+  systemRunner,
+  tailscaleDnsName,
+  unpublishServe,
+} from "./tailscale.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +119,7 @@ Options for start:
   --port <n>      Gateway port (default 8787)
   --demo          Safe demo backend; never touches a real agent
   --foreground    Run in this terminal instead of the background
+  --no-serve      Do not publish over Tailscale; print the command instead
 `;
 
 interface Options {
@@ -119,18 +129,27 @@ interface Options {
   demo: boolean;
   foreground: boolean;
   rotate: boolean;
+  /** Leave `tailscale serve` alone, and say what to run by hand. */
+  noServe: boolean;
   /** A device id, or "all". Absent means list rather than revoke. */
   revoke?: string;
 }
 
 export function parseArguments(argv: readonly string[]): Options {
-  const options: Options = { command: argv[0] ?? "help", demo: false, foreground: false, rotate: false };
+  const options: Options = {
+    command: argv[0] ?? "help",
+    demo: false,
+    foreground: false,
+    rotate: false,
+    noServe: false,
+  };
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--tailscale" || argument === "--loopback" || argument === "--lan") {
       options.mode = argument.slice(2) as ExposureMode;
     } else if (argument === "--demo") options.demo = true;
     else if (argument === "--foreground") options.foreground = true;
+    else if (argument === "--no-serve") options.noServe = true;
     else if (argument === "--rotate") options.rotate = true;
     else if (argument === "--revoke") {
       const value = argv[index + 1];
@@ -154,21 +173,6 @@ export function parseArguments(argv: readonly string[]): Options {
 export function localHostname(raw = hostname()): string {
   const name = raw.replace(/\.$/u, "");
   return name.includes(".") ? name : `${name}.local`;
-}
-
-async function tailscaleDnsName(): Promise<string | undefined> {
-  const candidates = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
-  for (const binary of candidates) {
-    try {
-      const { stdout } = await execFileAsync(binary, ["status", "--json"], { timeout: 10_000 });
-      const status = JSON.parse(stdout) as { Self?: { DNSName?: string } };
-      const name = status.Self?.DNSName?.replace(/\.$/u, "");
-      if (name) return name;
-    } catch {
-      // Not installed here, or not running. Try the next candidate.
-    }
-  }
-  return undefined;
 }
 
 async function exists(target: string): Promise<boolean> {
@@ -269,14 +273,27 @@ function baseEnv(options: Pick<Options, "demo">): NodeJS.ProcessEnv {
   return options.demo ? demoEnv(process.env) : process.env;
 }
 
-function printStartupInfo(exposure: Exposure, token: string, port: number): void {
+/**
+ * `serve` is null when nothing tried to publish the mapping — `--no-serve`, or
+ * a mode where Serve has no part to play. It carries its own account of what
+ * happened otherwise, including the manual command when it declined to act.
+ */
+function printStartupInfo(
+  exposure: Exposure,
+  token: string,
+  port: number,
+  serve: PublishOutcome | null,
+): void {
   line();
   line(`Running at ${exposure.url}`);
   line(`Setup token: ${token}`);
   line();
   if (exposure.mode === "tailscale") {
-    line("Tailscale still needs to publish it once:");
-    line(`  tailscale serve --bg http://127.0.0.1:${port}`);
+    if (serve) for (const text of serve.message.split("\n")) line(text);
+    else {
+      line("Tailscale still needs to publish it once:");
+      line(`  ${serveCommandLine(port)}`);
+    }
     line();
   }
   for (const warning of exposure.warnings) line(`Note: ${warning}`);
@@ -358,17 +375,29 @@ async function start(options: Options): Promise<number> {
   };
   const entry = path.join(projectRoot, "dist-server", "server", "index.js");
 
+  /* Publishing is a convenience wrapped around a gateway that is already
+     correct without it, so it never decides whether the start succeeds. It can
+     also decline — see publishServe — in which case it hands back the command
+     to run by hand and printStartupInfo says so. */
+  const serve = exposure.mode === "tailscale" && !options.noServe
+    ? await publishServe(port, systemRunner())
+    : null;
+
   if (options.foreground) {
     // The background path prints the URL and token once the gateway proves
     // it is listening; this one hands the terminal straight to the child, so
     // it has to say them first — and only here can it, since passing
     // PRIME_WEB_PAIRING_TOKEN explicitly (above) means the child's own
     // `generatedPairingToken` is false and it never prints the token itself.
-    printStartupInfo(exposure, token, port);
+    printStartupInfo(exposure, token, port, serve);
     line("Open that address on your phone and enter the setup token.");
     line();
     const child = spawn(process.execPath, [entry], { cwd: projectRoot, env: environment, stdio: "inherit" });
-    return await new Promise<number>((resolve) => child.on("exit", (code) => resolve(code ?? 0)));
+    const code = await new Promise<number>((resolve) => child.on("exit", (exitCode) => resolve(exitCode ?? 0)));
+    // No state file outlives a foreground run, so `stop` will never see this
+    // mapping. Take down what this run put up, here, while we still know.
+    if (serve?.published) await unpublishServe(systemRunner());
+    return code;
   }
 
   // Detached, in its own process group, with the streams closed. The gateway
@@ -410,9 +439,12 @@ async function start(options: Options): Promise<number> {
     mode: exposure.mode,
     backend,
     startedAt: new Date().toISOString(),
+    // Recorded only when this run created it, because that is exactly when
+    // `stop` may take it down. A mapping someone else made outlives us.
+    ...(serve?.published ? { serveManaged: true } : {}),
   });
 
-  printStartupInfo(exposure, token, port);
+  printStartupInfo(exposure, token, port, serve);
   line("Open that address on your phone and enter the setup token.");
   line("It stays paired across restarts. `prime-agent-remote stop` ends it.");
   return 0;
@@ -486,6 +518,11 @@ async function stop(options: Pick<Options, "demo">): Promise<number> {
     line(`Stopped the gateway at ${resolved.state.url}.`);
   } else {
     line("It had already exited.");
+  }
+  if (resolved.state.serveManaged) {
+    line(await unpublishServe(systemRunner())
+      ? "Removed the Tailscale mapping this CLI published."
+      : `Could not remove the Tailscale mapping. Take it down with:\n  tailscale ${serveOffArguments().join(" ")}`);
   }
   await clearGatewayState(config.gatewayStatePath);
   return 0;
@@ -602,6 +639,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     demo: running.backend === "demo",
     foreground: false,
     rotate: false,
+    noServe: false,
   });
   if (restarted !== 0) {
     line();
@@ -713,6 +751,7 @@ async function rebuild(options: Pick<Options, "demo">): Promise<number> {
     demo: before.state.backend === "demo",
     foreground: false,
     rotate: false,
+    noServe: false,
   });
   if (restarted !== 0) return restarted;
   line();

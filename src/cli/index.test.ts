@@ -74,6 +74,13 @@ describe("parseArguments", () => {
     expect(parseArguments(["token", "--rotate"]).rotate).toBe(true);
   });
 
+  // Publishing over Tailscale is the default in tailscale mode, so the flag
+  // that matters is the one that declines it.
+  it("leaves Tailscale alone only when asked to", () => {
+    expect(parseArguments(["start"]).noServe).toBe(false);
+    expect(parseArguments(["start", "--no-serve"]).noServe).toBe(true);
+  });
+
   it("reads a device to revoke, and refuses a bare --revoke", () => {
     expect(parseArguments(["devices"]).revoke).toBeUndefined();
     expect(parseArguments(["devices", "--revoke", "device-7"]).revoke).toBe("device-7");
