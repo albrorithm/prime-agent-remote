@@ -184,7 +184,8 @@ demo instance; without it they operate on the real one.
 ## Documentation
 
 - [Security model](docs/security.md): what the gateway does and does not
-  defend against.
+  defend against. Written by one person and not independently reviewed; a
+  description, not a guarantee.
 - [Deployment](docs/deployment.md): environment variables and production notes.
 - [Changing the web UI](docs/modifying-the-ui.md): for agents and quick edits.
 - [Protocol](docs/protocol.md): the wire contract.

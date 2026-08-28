@@ -1,5 +1,9 @@
 # Security model
 
+This is a one-person project. The model below describes what the gateway was
+designed to defend against; it has not been independently reviewed. Treat it
+as a description, not a guarantee.
+
 ## Boundary
 
 The browser talks only to the web gateway. The gateway is the sole owner of daemon clients and attached agent connections.
