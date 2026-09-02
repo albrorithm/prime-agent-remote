@@ -1,6 +1,6 @@
 {
   "name": "@albrorithm/prime-agent-remote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A mobile-first, installable web UI for Prime Agent: an authenticated gateway that puts a phone-sized chat interface in front of your local agent daemon.",
   "license": "MIT",
   "author": "albrorithm",
