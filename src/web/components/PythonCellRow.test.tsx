@@ -79,6 +79,28 @@ describe("PythonCellRow", () => {
     expect(onToggle).toHaveBeenLastCalledWith(false);
   });
 
+  it("labels a bash() cell bash but highlights its source as python", async () => {
+    render(
+      <PythonCellRow
+        message={makeMessage({ text: "npm test" })}
+        presentation={makePresentation({
+          lang: "bash",
+          codeLang: "python",
+          preview: "npm test",
+          code: 'await bash("npm run test")',
+          stdout: "ok\n",
+          backgroundOutput: "late line from a thread\n",
+        })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "bash cell complete: npm test" }));
+    expect(screen.getByText("bash")).toBeInTheDocument();
+    expect(screen.getByText('await bash("npm run test")')).toBeInTheDocument();
+    expect(screen.getByText("stdout")).toBeInTheDocument();
+    expect(screen.getByText("background output (unattributed)")).toBeInTheDocument();
+    expect(screen.getByText("late line from a thread")).toBeInTheDocument();
+  });
+
   it("renders a failed cell with its exception headline and traceback", async () => {
     const user = userEvent.setup();
     const { container } = render(

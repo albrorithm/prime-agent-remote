@@ -102,6 +102,8 @@ interface PrimeSessionSummary {
   isBashRunning?: boolean;
   hasRunningRlmChildren?: boolean;
   workerState?: string;
+  /** Supervisor roster annotation: a queued child, or a worker gone quiet or dead. */
+  statusLabel?: string;
   taskState?: string;
   unfinishedActionCount?: number;
   lastActivityAt?: string;
@@ -225,7 +227,7 @@ interface PrimeModule {
     attach(
       client: PrimeDaemonClient,
       activeSessionId: string,
-      options: { closeClientOnDispose: boolean; supportsExtensionUi: boolean },
+      options: { closeClientOnDispose: boolean; supportsExtensionUi: boolean; directTransport: boolean },
     ): Promise<PrimeConnection>;
   };
   defaultDaemonSocketPath(): string;
@@ -282,6 +284,7 @@ const PYTHON_CODE_MAX_CHARS = 16_000;
 const PYTHON_STDOUT_MAX_CHARS = 6_000;
 const PYTHON_STDERR_MAX_CHARS = 4_000;
 const PYTHON_RESULT_MAX_CHARS = 4_000;
+const PYTHON_BACKGROUND_MAX_CHARS = 4_000;
 const PYTHON_TRACEBACK_MAX_CHARS = 6_000;
 const PYTHON_DIFF_MAX_COUNT = 10;
 const PYTHON_DIFF_SIDE_MAX_CHARS = 4_000;
@@ -499,6 +502,7 @@ function validatePrimeSummary(value: unknown): PrimeSessionSummary | undefined {
     isBashRunning: record.isBashRunning === true,
     hasRunningRlmChildren: record.hasRunningRlmChildren === true,
     workerState: boundedString(record.workerState, 40),
+    statusLabel: boundedString(record.statusLabel, 40),
     taskState: boundedString(record.taskState, 40),
     unfinishedActionCount: integer(record.unfinishedActionCount, 1_000),
     lastActivityAt: boundedString(record.lastActivityAt, 80),
@@ -727,6 +731,7 @@ function buildCellOutput(id: string, code: string, details: PrimeRecord | undefi
     ["stderr", details?.stderr],
     ["result", details?.result],
     ["traceback", traceback],
+    ["backgroundOutput", details?.backgroundOutput],
   ];
   let truncated = false;
   const cell: CellOutput = { cellId: id, truncated: false };
@@ -744,13 +749,17 @@ function buildCellOutput(id: string, code: string, details: PrimeRecord | undefi
 function pythonPresentation(
   call: PrimeRecord,
   result: PrimeRecord | undefined,
-  summary: { text: string; status: TranscriptToolStatus; meta?: string },
+  summary: { text: string; status: TranscriptToolStatus; meta?: string; lang?: "python" | "bash" },
   callId: string | undefined,
   cellSink?: CellSink,
 ): PythonPresentation {
   const args = primeRecord(call.arguments);
   const rawCode = typeof args?.code === "string" ? args.code : "";
-  const bashCell = /^(?:(?:[ \t]*\r?\n)*[ \t]*)%%bash\b/.test(rawCode);
+  // Only a legacy `%%bash` cell holds shell source. A 0.9 `bash("…")` cell is
+  // labelled bash by the summary but its code is still Python to highlight.
+  const magicCell = /^(?:(?:[ \t]*\r?\n)*[ \t]*)%%bash\b/.test(rawCode);
+  const lang = summary.lang ?? (magicCell ? "bash" : "python");
+  const codeLang = magicCell ? "bash" : "python";
   const details = primeRecord(result?.details);
   const error = primeRecord(details?.error);
   const rawTraceback = tracebackText(error);
@@ -758,6 +767,7 @@ function pythonPresentation(
   const stdout = cappedSection(details?.stdout, PYTHON_STDOUT_MAX_CHARS);
   const stderr = cappedSection(details?.stderr, PYTHON_STDERR_MAX_CHARS);
   const resultSection = cappedSection(details?.result, PYTHON_RESULT_MAX_CHARS);
+  const background = cappedSection(details?.backgroundOutput, PYTHON_BACKGROUND_MAX_CHARS);
   const traceback = cappedSection(rawTraceback, PYTHON_TRACEBACK_MAX_CHARS);
   const rawDiffs = Array.isArray(details?.diffs) ? details.diffs : [];
   const diffs = rawDiffs.slice(0, PYTHON_DIFF_MAX_COUNT).flatMap((value) => {
@@ -784,7 +794,8 @@ function pythonPresentation(
   if (id && cellSink) cellSink(buildCellOutput(id, rawCode, details, rawTraceback));
   return {
     kind: "python",
-    lang: bashCell ? "bash" : "python",
+    lang,
+    ...(codeLang !== lang ? { codeLang } : {}),
     status: summary.status,
     preview: summary.text,
     ...(summary.meta ? { meta: summary.meta } : {}),
@@ -792,6 +803,7 @@ function pythonPresentation(
     ...(stdout ? { stdout: stdout.text, ...(stdout.truncated ? { stdoutTruncated: true } : {}) } : {}),
     ...(stderr ? { stderr: stderr.text, ...(stderr.truncated ? { stderrTruncated: true } : {}) } : {}),
     ...(resultSection ? { result: resultSection.text, ...(resultSection.truncated ? { resultTruncated: true } : {}) } : {}),
+    ...(background ? { backgroundOutput: background.text, ...(background.truncated ? { backgroundOutputTruncated: true } : {}) } : {}),
     ...(ename ? {
       error: {
         ename,
@@ -1432,6 +1444,7 @@ function cellOutputBytes(cell: CellOutput): number {
     + (cell.stderr?.length ?? 0)
     + (cell.result?.length ?? 0)
     + (cell.traceback?.length ?? 0)
+    + (cell.backgroundOutput?.length ?? 0)
     + 64;
 }
 
@@ -2326,19 +2339,30 @@ export class PrimeBackend implements AgentBackend {
       summary.isStreaming || summary.isCompacting || summary.isBashRunning ||
       summary.hasRunningRlmChildren || (summary.unfinishedActionCount ?? 0) > 0,
     );
-    const working = Boolean(summary.activeSessionId) && (
+    // A queued child is an admitted subagent run whose session has not been
+    // created yet: the roster lists it as running before it has an active id.
+    const queued = summary.statusLabel === "queued" && !summary.activeSessionId;
+    const working = queued || (Boolean(summary.activeSessionId) && (
       hasActiveWork || (summary.lifecycle !== "draft" && summary.activity === "working")
-    );
+    ));
     const pending = [...this.pendingExtensions.values()].find((request) => request.publicAgentId === id);
     const attention = pending?.method === "confirm" ? "dialog" as const : pending ? "question" as const : null;
     const needsInput = Boolean(summary.activeSessionId) && summary.taskState === "needs_input";
-    const lifecycle = !summary.activeSessionId
-      ? "inactive"
-      : summary.workerState === "failed"
-        ? "failed"
-        : summary.lifecycle === "draft" || summary.workerState === "starting" || summary.workerState === "recovering"
-          ? "starting"
-          : "live";
+    /* `workerState` is the worker's own lifecycle; `statusLabel` is the
+       supervisor roster's verdict on it, set once a socket closes or goes
+       silent. Either one saying failed or recovering wins over "live". */
+    const failed = summary.workerState === "failed" || summary.statusLabel === "failed";
+    const recovering = summary.workerState === "starting" || summary.workerState === "recovering"
+      || summary.statusLabel === "recovering";
+    const lifecycle = queued
+      ? "starting"
+      : !summary.activeSessionId
+        ? "inactive"
+        : failed
+          ? "failed"
+          : summary.lifecycle === "draft" || recovering
+            ? "starting"
+            : "live";
     /* The daemon's own summarizer writes `summary` — a present-tense clause of at
        most twelve words describing what this agent is doing. It is the best title
        material available and it re-runs as the work moves on, so it is the
@@ -2438,6 +2462,14 @@ export class PrimeBackend implements AgentBackend {
       this.module.DaemonAgentConnection.attach(this.client, activeSessionId, {
         closeClientOnDispose: false,
         supportsExtensionUi: true,
+        // Prime Agent 0.9 attaches over a direct per-worker socket by default,
+        // handed out as a single-use ticket, and falls back to the supervisor.
+        // That is built for a TUI holding one session. This gateway holds every
+        // visible session on the one supervisor socket it already reconnects
+        // and probes itself, which is what upstream's own secondary watchers
+        // do; opting out keeps one socket, one reconnect path, and the trust
+        // boundary `docs/security.md` describes. Older builds ignore the flag.
+        directTransport: false,
       }),
       PRIME_ATTACH_TIMEOUT_MS,
       "Prime agent attach",

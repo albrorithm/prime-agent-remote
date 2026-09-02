@@ -794,6 +794,8 @@ describe("PrimeBackend", () => {
         activeSessionId: "private-active",
         closeClientOnDispose: false,
         supportsExtensionUi: true,
+        // One supervisor socket for every session, never a per-worker ticket.
+        directTransport: false,
       });
 
       await backend.sendMessage({
@@ -1081,6 +1083,64 @@ describe("PrimeBackend", () => {
       expect((await backend.agentSnapshot(summary.id))?.revision).toBe(snapshot!.revision + 1);
     } finally {
       fixture.adapterDelayMs = 0;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("reads the supervisor roster's own labels for queued, recovering, and failed rows", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSessions = fixture.sessions;
+    fixture.sessions = [
+      ...originalSessions,
+      // A child run the daemon admitted before its session exists: no active
+      // id yet, but the roster already lists it as running under its parent.
+      {
+        id: "queued-child-id",
+        sessionId: "queued-child-id",
+        sessionName: "Queued reviewer",
+        lifecycle: "live",
+        activity: "idle",
+        runtimeKind: "subagent",
+        rlmDepth: 1,
+        parentActiveSessionId: "private-active",
+        parentSessionId: "private-session",
+        statusLabel: "queued",
+      },
+      {
+        id: "quiet-row",
+        sessionId: "private-quiet-session",
+        activeSessionId: "private-quiet-active",
+        sessionName: "Quiet worker",
+        lifecycle: "live",
+        activity: "idle",
+        workerState: "ready",
+        statusLabel: "recovering",
+      },
+      {
+        id: "dead-row",
+        sessionId: "private-dead-session",
+        activeSessionId: "private-dead-active",
+        sessionName: "Dead worker",
+        lifecycle: "live",
+        activity: "idle",
+        workerState: "ready",
+        statusLabel: "failed",
+      },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agents = backend.catalog().agents;
+      const live = agents.find((agent) => agent.name === "Live agent");
+      const queued = agents.find((agent) => agent.name === "Queued reviewer");
+      expect(queued).toMatchObject({ lifecycle: "starting", activity: "working", parentId: live!.id, depth: 1 });
+      expect(queued?.capabilities).toMatchObject({ send: false, abort: false, resume: false });
+      expect(agents.find((agent) => agent.name === "Quiet worker")).toMatchObject({ lifecycle: "starting" });
+      expect(agents.find((agent) => agent.name === "Dead worker")).toMatchObject({ lifecycle: "failed" });
+    } finally {
+      fixture.sessions = originalSessions;
       hub.close();
       await backend.close();
     }
@@ -2302,6 +2362,43 @@ describe("PrimeBackend", () => {
     }
   });
 
+  it("labels a bash() cell bash while keeping its source highlighted as python", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.snapshot.messages = [
+      { role: "user", content: "Run the tests", timestamp: "2026-01-01T00:00:00.000Z" },
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-bash", name: "ipython", arguments: { code: 'r = await bash("npm run test")\nprint(r.stdout)' } },
+          { type: "toolCall", id: "call-magic", name: "ipython", arguments: { code: "%%bash\nnpm run lint" } },
+        ],
+        timestamp: "2026-01-01T00:00:01.000Z",
+      },
+      { role: "toolResult", toolCallId: "call-bash", content: [], details: { status: "ok", stdout: "42 passed" }, timestamp: "2026-01-01T00:00:02.000Z" },
+      { role: "toolResult", toolCallId: "call-magic", content: [], details: { status: "ok", stdout: "clean" }, timestamp: "2026-01-01T00:00:03.000Z" },
+    ];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const snapshot = await backend.agentSnapshot(backend.catalog().agents[0].id);
+      const rows = snapshot!.messages.filter((message) => message.presentation?.kind === "python");
+      expect(rows.map((row) => row.presentation)).toEqual([
+        // The REPL form: the row reads as bash, the code block is still Python.
+        expect.objectContaining({ lang: "bash", codeLang: "python", preview: "npm test", stdout: "42 passed" }),
+        // The pre-0.9 magic form, as saved transcripts still carry it: the code is shell.
+        expect.objectContaining({ lang: "bash", preview: "npm lint", stdout: "clean" }),
+      ]);
+      expect(rows[1]!.presentation).not.toHaveProperty("codeLang");
+    } finally {
+      fixture.snapshot = originalSnapshot;
+      hub.close();
+      await backend.close();
+    }
+  });
+
   it("caps python cell sections, flags truncation, and serves full output through the cell cache", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     const originalSnapshot = fixture.snapshot;
@@ -2323,6 +2420,7 @@ describe("PrimeBackend", () => {
           stdout: "s".repeat(7_000),
           stderr: "e".repeat(5_000),
           result: "r".repeat(5_000),
+          backgroundOutput: "b".repeat(5_000),
           error: { ename: "ValueError", evalue: "boom", traceback: "T".repeat(7_000) },
           diffs: Array.from({ length: 12 }, (_, index) => ({
             path: `src/file-${index}.ts`,
@@ -2353,6 +2451,7 @@ describe("PrimeBackend", () => {
         stdoutTruncated: true,
         stderrTruncated: true,
         resultTruncated: true,
+        backgroundOutputTruncated: true,
         diffsTruncated: true,
         durationMs: 2_500,
         kernelRestarted: true,
@@ -2361,6 +2460,7 @@ describe("PrimeBackend", () => {
       expect(presentation.stdout?.length).toBe(6_000);
       expect(presentation.stderr?.length).toBe(4_000);
       expect(presentation.result?.length).toBe(4_000);
+      expect(presentation.backgroundOutput?.length).toBe(4_000);
       expect(presentation.error).toMatchObject({ ename: "ValueError", evalue: "boom", tracebackTruncated: true });
       expect(presentation.error?.traceback?.length).toBe(6_000);
       expect(presentation.diffs).toHaveLength(10);
@@ -2376,6 +2476,7 @@ describe("PrimeBackend", () => {
       expect(full?.stderr?.length).toBe(5_000);
       expect(full?.result?.length).toBe(5_000);
       expect(full?.traceback?.length).toBe(7_000);
+      expect(full?.backgroundOutput?.length).toBe(5_000);
       expect(backend.cellOutput("cell_unknown")).toBeNull();
     } finally {
       fixture.snapshot = originalSnapshot;

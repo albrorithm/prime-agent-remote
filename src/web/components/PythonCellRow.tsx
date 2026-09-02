@@ -56,7 +56,7 @@ export interface PythonCellRowProps {
 }
 
 /**
- * The transcript row for one IPython cell — Prime Agent's only tool, so this
+ * The transcript row for one Python cell — Prime Agent's only tool, so this
  * is the tool-call display. Collapsed it reads like the existing tool rows
  * (glyph · label · preview · meta); expanded it shows the highlighted code and
  * one labeled section per output stream the cell actually produced.
@@ -73,11 +73,13 @@ export function PythonCellRow({ message, presentation, onToggle, fetchCell = loa
   const stderr = loaded?.stderr ?? presentation.stderr;
   const result = loaded?.result ?? presentation.result;
   const traceback = loaded?.traceback ?? presentation.error?.traceback;
+  const backgroundOutput = loaded?.backgroundOutput ?? presentation.backgroundOutput;
   const anyTruncated = Boolean(
     presentation.codeTruncated
     || presentation.stdoutTruncated
     || presentation.stderrTruncated
     || presentation.resultTruncated
+    || presentation.backgroundOutputTruncated
     || presentation.error?.tracebackTruncated
     || presentation.diffsTruncated,
   );
@@ -132,7 +134,7 @@ export function PythonCellRow({ message, presentation, onToggle, fetchCell = loa
               <RotateCcw aria-hidden="true" /> Kernel restarted during this cell — earlier variables were lost.
             </p>
           )}
-          <MemoizedCodeBlock lang={presentation.lang} code={code} streaming={streaming} />
+          <MemoizedCodeBlock lang={presentation.codeLang ?? presentation.lang} code={code} streaming={streaming} />
           {stdout ? <CellSection label="stdout" text={stdout} /> : null}
           {stderr ? <CellSection label="stderr" text={stderr} danger={status === "failed"} /> : null}
           {result ? <CellSection label="result" text={result} /> : null}
@@ -145,6 +147,7 @@ export function PythonCellRow({ message, presentation, onToggle, fetchCell = loa
               {traceback && <pre className="python-cell-output"><code>{traceback}</code></pre>}
             </section>
           )}
+          {backgroundOutput ? <CellSection label="background output (unattributed)" text={backgroundOutput} /> : null}
           {presentation.diffs?.map((diff, index) => <CellDiff key={`${diff.path}-${index}`} diff={diff} />)}
           {anyTruncated && full.phase !== "loaded" && (
             presentation.cellId ? (

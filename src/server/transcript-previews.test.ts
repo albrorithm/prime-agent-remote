@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeTranscriptPreview, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
+import { bashCallCommand, sanitizeTranscriptPreview, summarizeToolCall, thinkingRecap } from "./transcript-previews.js";
 
 function hasNoLoneSurrogate(value: string): boolean {
   return [...value].every((char) => {
@@ -28,12 +28,46 @@ describe("tool transcript previews", () => {
 
     expect(summary).toEqual({
       label: "bash",
+      lang: "bash",
       text: "npm test",
       meta: "↑ 2 ↓ 2 lines · 1.3s",
       status: "complete",
     });
     expect(JSON.stringify(summary)).not.toContain("full output");
     expect(JSON.stringify(summary)).not.toContain("line one");
+  });
+
+  it("reads a bash() call the way it read a %%bash cell", () => {
+    // Prime Agent 0.9 dropped `%%bash` for a `bash("…")` callable in the REPL.
+    const summary = summarizeToolCall(
+      { type: "toolCall", name: "ipython", arguments: { code: 'await bash("npm run test")' } },
+      { role: "toolResult", content: [], details: { status: "ok", durationMs: 900, stdout: "ok" } },
+    );
+    expect(summary).toEqual({ label: "bash", lang: "bash", text: "npm test", meta: "↑ 1 ↓ 1 lines · 900ms", status: "complete" });
+    expect(summarizeToolCall({ type: "toolCall", name: "ipython", arguments: { code: "r = bash('git status')\nprint(r.stdout)" } }))
+      .toMatchObject({ label: "bash", lang: "bash", text: "git status" });
+    expect(summarizeToolCall({ type: "toolCall", name: "ipython", arguments: { code: 'out = bash("""\nset -e\nmake build\n""")' } }))
+      .toMatchObject({ label: "bash", lang: "bash", text: "make …" });
+    // The old form still previews the same way for transcripts saved before the upgrade.
+    expect(summarizeToolCall({ type: "toolCall", name: "ipython", arguments: { code: "%%bash\ngit status" } }))
+      .toMatchObject({ label: "bash", lang: "bash", text: "git status" });
+    // Anything but a single plain literal is not a command worth guessing at.
+    expect(summarizeToolCall({ type: "toolCall", name: "ipython", arguments: { code: 'bash(f"ls {path}")' } }))
+      .toMatchObject({ label: "python", lang: "python", text: "bash(…)" });
+    expect(summarizeToolCall({ type: "toolCall", name: "ipython", arguments: { code: "print(total)" } }))
+      .toMatchObject({ label: "python", lang: "python" });
+  });
+
+  it("extracts only a plain literal bash() argument", () => {
+    expect(bashCallCommand('bash("npm test")')).toBe("npm test");
+    expect(bashCallCommand("await bash('ls -la', timeout=5)")).toBe("ls -la");
+    expect(bashCallCommand('bash("""\nmake\n""")')).toBe("\nmake\n");
+    expect(bashCallCommand('bash(r"grep \\d src")')).toBe("grep \\d src");
+    expect(bashCallCommand('bash("echo \\"hi\\"")')).toBe('echo "hi"');
+    expect(bashCallCommand('bash("a" + b)')).toBeUndefined();
+    expect(bashCallCommand("bash(cmd)")).toBeUndefined();
+    expect(bashCallCommand('bash("unterminated')).toBeUndefined();
+    expect(bashCallCommand('bash("\\x41")')).toBeUndefined();
   });
 
   it("shows a safe error name without forwarding error output", () => {

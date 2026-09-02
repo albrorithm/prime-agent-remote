@@ -108,7 +108,7 @@ The mutation routes above return `202` with a `MutationAccepted` body, `{ accept
 ### Attachments and cell output
 
 - `GET /api/v1/attachments/:id` — authenticated, content-addressed, `Cache-Control: private, no-store`. Returns raw image bytes with the attachment's own `Content-Type`.
-- `GET /api/v1/cells/:cellId` — authenticated. Returns the untruncated sections of one Python cell: `{ cellId, code?, stdout?, stderr?, result?, traceback?, truncated }`.
+- `GET /api/v1/cells/:cellId` — authenticated. Returns the untruncated sections of one Python cell: `{ cellId, code?, stdout?, stderr?, result?, traceback?, backgroundOutput?, truncated }`. `backgroundOutput` is what the kernel could not attribute to the cell (a thread, an earlier cell's leftovers); Prime Agent 0.9 reports it separately from `stdout`.
 
 ### Push
 

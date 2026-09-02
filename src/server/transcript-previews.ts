@@ -7,6 +7,8 @@ export interface ToolTranscriptSummary {
   text: string;
   meta?: string;
   status: ActivityStatus;
+  /** For ipython cells: whether the row reads as a bash or a python cell. */
+  lang?: "python" | "bash";
 }
 
 const PYTHON_IMPORT = /^\s*(?:import\s+\S|from\s+\S+\s+import\s+)/;
@@ -15,6 +17,45 @@ const PYTHON_CALL = /^\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
 const PYTHON_ASSIGNMENT_CALL = /^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^=]+)?\s*=\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
 const PYTHON_EFFECT_CALL = /^\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\.(?:write_text|write_bytes|mkdir|unlink|rename|replace|touch|append|extend|update|add|remove|discard|close|commit|execute|run)\s*\(/;
 const LOW_SIGNAL_CALL = /^\s*(?:await\s+)?(?:print|len|str|repr|int|float|list|dict|set|tuple)\s*\(/;
+/* Prime Agent 0.9 replaced `%%bash` cells with a `bash("…")` callable in the
+   Python REPL, so a shell command now arrives as a Python string literal. Saved
+   transcripts from older builds still carry `%%bash`, so both are recognised. */
+const BASH_CELL_MAGIC = /^(?:(?:[ \t]*\r?\n)*[ \t]*)%%bash\b[^\r\n]*(?:\r?\n|$)([\s\S]*)/;
+const BASH_CALL_OPENER = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:await\s+)?bash\s*\(\s*[rR]?("""|'''|"|')/;
+const PYTHON_ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", '"': '"', "'": "'", "\n": "" };
+
+/**
+ * The command inside a `bash("…")` call whose first argument is one plain
+ * string literal, or undefined when it is anything else (an f-string, a
+ * concatenation, a variable): those fall back to the ordinary Python preview
+ * rather than guess at a command.
+ */
+export function bashCallCommand(code: string): string | undefined {
+  const opener = code.match(BASH_CALL_OPENER);
+  const quote = opener?.[1];
+  if (!opener || !quote) return undefined;
+  const raw = /[rR]$/.test(opener[0].slice(0, -quote.length));
+  let value = "";
+  let index = opener[0].length;
+  while (index < code.length) {
+    const char = code[index] ?? "";
+    if (char === "\\" && index + 1 < code.length) {
+      const next = code[index + 1] ?? "";
+      if (!raw && !(next in PYTHON_ESCAPES)) return undefined;
+      value += raw ? char + next : PYTHON_ESCAPES[next] ?? "";
+      index += 2;
+      continue;
+    }
+    if (code.startsWith(quote, index)) {
+      const rest = code.slice(index + quote.length).trimStart();
+      return rest.startsWith(",") || rest.startsWith(")") ? value : undefined;
+    }
+    if (quote.length === 1 && char === "\n") return undefined;
+    value += char;
+    index += 1;
+  }
+  return undefined;
+}
 
 function asRecord(value: unknown): UnknownRecord | undefined {
   return value && typeof value === "object" ? value as UnknownRecord : undefined;
@@ -141,7 +182,7 @@ function previewBash(code: string): string {
     const body: string[] = [];
     for (let cursor = index + 1; cursor < lines.length && lines[cursor]?.trim() !== heredoc[1]; cursor += 1) body.push(lines[cursor] ?? "");
     if (/\bnode\b/.test(opener)) return `node: ${sanitizeTranscriptPreview(body.find((line) => line.trim()) ?? "", 76)}`;
-    if (/\b(?:python|python3)\b/.test(opener)) return previewPython(body.join("\n"));
+    if (/\b(?:python|python3)\b/.test(opener)) return previewPython(body.join("\n")).text;
     const write = opener.match(/\b(?:cat|tee)\b.*(?:>|\s)(\S+)\s*<<-?/);
     if (write?.[1]) return `${opener.includes("tee -a") ? "append" : "write"} ${write[1]}`;
   }
@@ -163,6 +204,7 @@ function pythonScore(line: string): number {
   const trimmed = line.trim();
   if (!trimmed || /^#/.test(trimmed) || PYTHON_IMPORT.test(line) || /^@/.test(trimmed)) return -1;
   if (PYTHON_EFFECT_CALL.test(line)) return 90;
+  if (BASH_CALL_OPENER.test(line)) return 88;
   if (/subprocess\.(?:run|check_call|check_output|Popen)\s*\(/.test(line)) return 85;
   if (PYTHON_DEFINITION.test(line)) return 50;
   if (PYTHON_ASSIGNMENT_CALL.test(line)) return 60;
@@ -192,7 +234,7 @@ function simplifyPython(line: string, lines: readonly string[]): string {
   return candidate;
 }
 
-function previewPython(code: string): string {
+function previewPython(code: string): { text: string; lang: "python" | "bash" } {
   const lines = code.split(/\r?\n/);
   let bestIndex = -1;
   let bestScore = -1;
@@ -203,7 +245,13 @@ function previewPython(code: string): string {
       bestScore = score;
     }
   });
-  return sanitizeTranscriptPreview(bestIndex >= 0 ? simplifyPython(lines[bestIndex] ?? "", lines) : "", 92);
+  if (bestIndex < 0) return { text: "", lang: "python" };
+  // A cell whose most interesting line runs a shell command reads as a bash
+  // cell, the way the daemon's own transcript labels it. The literal may span
+  // lines, so it is read from the tail of the cell rather than the one line.
+  const command = bashCallCommand(lines.slice(bestIndex).join("\n"));
+  if (command !== undefined) return { text: sanitizeTranscriptPreview(previewBash(command) || "bash", 92), lang: "bash" };
+  return { text: sanitizeTranscriptPreview(simplifyPython(lines[bestIndex] ?? "", lines), 92), lang: "python" };
 }
 
 function codeFromArguments(value: unknown): string {
@@ -218,7 +266,7 @@ function codeFromArguments(value: unknown): string {
 function outputText(result: UnknownRecord): string {
   const details = asRecord(result.details);
   if (details) {
-    const structured = [details.stdout, details.stderr, details.result].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    const structured = [details.stdout, details.stderr, details.result, details.backgroundOutput].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
     if (structured.length) return structured.join("\n");
   }
   if (!Array.isArray(result.content)) return "";
@@ -262,17 +310,22 @@ function toolMeta(input: number, result: UnknownRecord | undefined): string | un
 export function summarizeToolCall(call: UnknownRecord, result?: UnknownRecord, running = false): ToolTranscriptSummary {
   const name = typeof call.name === "string" ? call.name : "tool";
   const code = codeFromArguments(call.arguments);
-  const bashCell = name === "ipython" ? code.match(/^(?:(?:[ \t]*\r?\n)*[ \t]*)%%bash\b[^\r\n]*(?:\r?\n|$)([\s\S]*)/) : undefined;
-  const label = name === "ipython" ? (bashCell ? "bash" : "python") : sanitizeTranscriptPreview(name, 32);
-  const text = name === "ipython"
-    ? (bashCell ? previewBash(bashCell[1] ?? "") : previewPython(code))
-    : `${sanitizeTranscriptPreview(name, 48)} call`;
-  const inputCode = bashCell?.[1] ?? code;
+  if (name !== "ipython") {
+    return {
+      label: sanitizeTranscriptPreview(name, 32),
+      text: `${sanitizeTranscriptPreview(name, 48)} call`,
+      meta: toolMeta(lineCount(code), result),
+      status: resultStatus(result, running),
+    };
+  }
+  const bashCell = code.match(BASH_CELL_MAGIC);
+  const preview = bashCell ? { text: previewBash(bashCell[1] ?? ""), lang: "bash" as const } : previewPython(code);
   return {
-    label,
-    text: text || (running ? "waiting for code" : "no preview"),
-    meta: toolMeta(lineCount(inputCode), result),
+    label: preview.lang,
+    text: preview.text || (running ? "waiting for code" : "no preview"),
+    meta: toolMeta(lineCount(bashCell?.[1] ?? code), result),
     status: resultStatus(result, running),
+    lang: preview.lang,
   };
 }
 

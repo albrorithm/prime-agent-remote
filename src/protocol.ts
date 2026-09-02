@@ -175,7 +175,10 @@ export type TranscriptPresentation =
   | { kind: "tool"; label: string; status: TranscriptToolStatus; meta?: string }
   | {
       kind: "python";
+      /** The row label: what the cell did. A `bash("…")` call is labelled bash even though its source is Python. */
       lang: "python" | "bash";
+      /** Highlighting language for `code` when it differs from `lang`; defaults to `lang`. */
+      codeLang?: "python" | "bash";
       status: TranscriptToolStatus;
       preview: string;
       meta?: string;
@@ -187,6 +190,9 @@ export type TranscriptPresentation =
       stderrTruncated?: boolean;
       result?: string;
       resultTruncated?: boolean;
+      /** Output the kernel could not attribute to this cell (threads, earlier cells' leftovers). */
+      backgroundOutput?: string;
+      backgroundOutputTruncated?: boolean;
       error?: PythonCellError;
       diffs?: PythonCellDiff[];
       diffsTruncated?: boolean;
@@ -483,6 +489,7 @@ const transcriptPresentationSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("python"),
     lang: z.enum(["python", "bash"]),
+    codeLang: z.enum(["python", "bash"]).optional(),
     status: transcriptToolStatusSchema,
     preview: z.string(),
     meta: z.string().optional(),
@@ -494,6 +501,8 @@ const transcriptPresentationSchema = z.discriminatedUnion("kind", [
     stderrTruncated: z.boolean().optional(),
     result: z.string().optional(),
     resultTruncated: z.boolean().optional(),
+    backgroundOutput: z.string().optional(),
+    backgroundOutputTruncated: z.boolean().optional(),
     error: pythonCellErrorSchema.optional(),
     diffs: z.array(pythonCellDiffSchema).optional(),
     diffsTruncated: z.boolean().optional(),
@@ -575,6 +584,7 @@ export const cellOutputSchema = z.object({
   stderr: z.string().optional(),
   result: z.string().optional(),
   traceback: z.string().optional(),
+  backgroundOutput: z.string().optional(),
   truncated: z.boolean(),
 });
 

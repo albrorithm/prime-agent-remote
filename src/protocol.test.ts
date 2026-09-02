@@ -52,6 +52,9 @@ describe("transcript presentation schemas", () => {
         stdout: "out",
         stderr: "err",
         result: "None",
+        backgroundOutput: "late thread output",
+        backgroundOutputTruncated: true,
+        codeLang: "python",
         error: { ename: "ValueError", evalue: "boom", traceback: "Traceback…", tracebackTruncated: true },
         diffs: [{ path: "src/a.ts", oldStr: "a", newStr: "b", startLine: 3, truncated: true }],
         diffsTruncated: true,
@@ -140,6 +143,7 @@ describe("cell output schema", () => {
       cellId: "cell_abc",
       code: "print('hi')",
       stdout: "hi\n",
+      backgroundOutput: "from a thread\n",
       truncated: false,
     }).success).toBe(true);
     expect(cellOutputSchema.safeParse({ cellId: "", truncated: false }).success).toBe(false);

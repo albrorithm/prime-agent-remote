@@ -6,7 +6,7 @@ as a description, not a guarantee.
 
 ## Boundary
 
-The browser talks only to the web gateway. The gateway is the sole owner of daemon clients and attached agent connections.
+The browser talks only to the web gateway. The gateway is the sole owner of daemon clients and attached agent connections. It attaches every session over its one supervisor socket and opts out of the per-worker direct transport Prime Agent 0.9 hands out on attach, so there is one daemon socket to reason about, not one per session.
 
 The gateway currently permits these live operations:
 
