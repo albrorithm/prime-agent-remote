@@ -100,6 +100,12 @@ export interface Gateway {
   hub: EventHub;
   auth: AuthService;
   pushStore: PushSubscriptionStore;
+  /**
+   * Null unless push is configured. Exposed for the same reason `pushStore` is:
+   * whether a route arms a turn is a property of that route, and there is no
+   * other way to observe it from outside without driving a whole push delivery.
+   */
+  turnEnd: TurnEndNotifier | null;
   shutdown(): Promise<void>;
 }
 
@@ -514,6 +520,15 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         mutationBinding(`command:${agentId}`, parsed.data),
         () => backend.executeSlashCommand({ agentId, ...parsed.data }),
       );
+      // A session or experimental command prompts the agent exactly as a
+      // message does, so its next quiet is a finished turn — and without this,
+      // /compact, /refine and /goal ran and finished in silence on a locked
+      // phone, which is the one case the notifier exists for. Only these two
+      // kinds: the direct commands read or change a setting without starting a
+      // turn, and arming there would push "finished" for a settings read.
+      if (result.result.kind === "session_accepted" || result.result.kind === "experimental_accepted") {
+        turnEnd?.arm(agentId);
+      }
       json(res, 202, result);
       return true;
     }
@@ -989,5 +1004,5 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     for (const client of wss.clients) client.terminate();
   }
 
-  return { requestListener, upgradeListener, backend, hub, auth, pushStore, shutdown };
+  return { requestListener, upgradeListener, backend, hub, auth, pushStore, turnEnd, shutdown };
 }

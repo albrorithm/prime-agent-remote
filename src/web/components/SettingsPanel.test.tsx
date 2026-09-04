@@ -19,6 +19,7 @@ const pushMock = vi.hoisted(() => ({
   readPushState: vi.fn(),
   enablePush: vi.fn(),
   disablePush: vi.fn(),
+  updatePushPreference: vi.fn(),
 }));
 vi.mock("../push", () => pushMock);
 
@@ -63,6 +64,7 @@ beforeEach(() => {
   pushMock.readPushState.mockReset().mockResolvedValue("off");
   pushMock.enablePush.mockReset().mockResolvedValue("on");
   pushMock.disablePush.mockReset().mockResolvedValue(undefined);
+  pushMock.updatePushPreference.mockReset().mockResolvedValue("on");
   apiMock.listDevices.mockReset().mockResolvedValue({ devices: [] });
   apiMock.revokeDevice.mockReset().mockResolvedValue({ revoked: true, self: false });
 });
@@ -247,6 +249,25 @@ describe("SettingsPanel notifications", () => {
 
     expect(await screen.findByText(/add Prime Agent to the Home Screen/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /notifications/i })).not.toBeInTheDocument();
+  });
+
+  /* A preference is not an enable. Routing the turn-end toggle through
+     `enablePush` unsubscribed and re-minted the browser's subscription every
+     flip: a re-subscribe that failed or was throttled left the device with no
+     notifications at all — from a switch about *what* it is notified of — and
+     each flip orphaned the previous endpoint in the gateway's store, so enough
+     toggling pushed other phones' records past its bound and stopped waking
+     them, silently. */
+  it("changes the turn-end preference without re-minting the subscription", async () => {
+    const user = userEvent.setup();
+    pushMock.readPushState.mockResolvedValue("on");
+    renderPanel();
+
+    await user.click(await screen.findByRole("checkbox", { name: /Also when a turn finishes/ }));
+
+    expect(pushMock.updatePushPreference).toHaveBeenCalledWith("csrf", true);
+    expect(pushMock.enablePush).not.toHaveBeenCalled();
+    expect(pushMock.disablePush).not.toHaveBeenCalled();
   });
 
   it("surfaces a failure to turn notifications on", async () => {

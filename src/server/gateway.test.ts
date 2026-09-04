@@ -941,6 +941,50 @@ describe("gateway API routes", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  /* A session command prompts the agent exactly as a message does, so its next
+     quiet is a finished turn. Nothing armed the notifier on this route, so
+     /compact, /refine and /goal ran and finished in silence on a locked phone —
+     the one case turn-end notifications exist for — recovered only by the 90s
+     self-arm, which short commands never reach. The direct commands read or
+     change a setting without starting a turn and must stay unarmed, or the
+     phone gets "turn complete" for a settings query. */
+  it("arms the turn-end notifier for commands that prompt the agent, and only those", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.send)?.id;
+    if (!agentId) throw new Error("No sendable demo agent");
+    const notifier = t.gateway.turnEnd;
+    if (!notifier) throw new Error("Push is configured, so the notifier should exist");
+    const armed = () =>
+      (Reflect.get(notifier, "states") as Map<string, { armed: boolean }>).get(agentId)?.armed === true;
+
+    async function runCommand(name: string, args = "") {
+      const revision = await agentRevision(t, client, agentId!);
+      const response = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId!)}/commands`, {
+        method: "POST",
+        headers: mutationHeaders(client),
+        body: JSON.stringify({ requestId: randomUUID(), name, args, expectedRevision: revision }),
+      });
+      expect(response.status).toBe(202);
+      return (await response.json()) as { result: { kind: string } };
+    }
+
+    // A settings read: no turn, so nothing to announce the end of.
+    const direct = await runCommand("model");
+    expect(direct.result.kind).toBe("model");
+    expect(armed()).toBe(false);
+
+    const session = await runCommand("compact");
+    expect(session.result.kind).toBe("session_accepted");
+    expect(armed()).toBe(true);
+
+    notifier.disarm(agentId);
+    const experimental = await runCommand("demo-extension");
+    expect(experimental.result.kind).toBe("experimental_accepted");
+    expect(armed()).toBe(true);
+  });
+
   it("renames an agent, rejects a malformed name, and maps a refused capability to 403", async () => {
     const t = await startGateway();
     const client = await pairClient(t);

@@ -187,6 +187,28 @@ describe("useComposerDrafts", () => {
       expect(other.current.draft).toBe("from another tab");
     });
 
+    /* The test above proves one event leaves an edited id alone. The bug was in
+       what that event did to the *baseline*: adopting agent-2 used to mark
+       agent-1 as in sync too, so the very next cross-tab write took the edit
+       this rule exists to protect. It takes two events to see. */
+    it("keeps protecting an edited id after adopting an update for a different one", () => {
+      const { result } = renderHook(() => useComposerDrafts("agent-1"));
+      act(() => {
+        result.current.setDrafts((current) => ({ ...current, "agent-1": "editing here" }));
+      });
+
+      act(() => {
+        fireStorageEvent(JSON.stringify({ "agent-1": "editing here", "agent-2": "from another tab" }));
+      });
+      expect(result.current.draft).toBe("editing here");
+
+      act(() => {
+        fireStorageEvent(JSON.stringify({ "agent-1": "clobber attempt", "agent-2": "from another tab" }));
+      });
+
+      expect(result.current.draft).toBe("editing here");
+    });
+
     it("ignores storage events for unrelated keys", () => {
       const { result } = renderHook(() => useComposerDrafts("agent-1"));
       act(() => {
