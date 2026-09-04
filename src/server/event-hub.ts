@@ -38,12 +38,14 @@ export class EventHub {
   readonly epoch = randomUUID();
   private readonly streams = new Map<string, StreamState>();
   /**
-   * The highest seq each stream id ever issued, kept across unregister. The
-   * epoch names the process, not a stream generation, so a re-registered id
-   * (ordinary: ids derive from session identity) that restarted at 0 would
-   * let a stale cursor pass every check and miss what the new one published.
+   * The highest seq any stream has issued. The epoch names the process, not a
+   * stream generation, so a re-registered id (ordinary: ids derive from
+   * session identity) that restarted at 0 would let a stale cursor pass every
+   * check and miss what the new one published. One number for every stream
+   * rather than one per retired id, which a long-lived gateway would keep for
+   * each session it ever deleted.
    */
-  private readonly seqHighWater = new Map<string, number>();
+  private seqHighWater = -1;
   private closed = false;
 
   constructor(
@@ -62,10 +64,9 @@ export class EventHub {
     // One past the high-water, not at it: a re-registered stream that has
     // published nothing would otherwise answer a stale cursor with an empty
     // replay instead of the snapshot a restarted stream owes it.
-    const previous = this.seqHighWater.get(streamId);
     this.streams.set(streamId, {
       id: streamId,
-      seq: previous === undefined ? 0 : previous + 1,
+      seq: this.seqHighWater + 1,
       snapshot: structuredClone(snapshot),
       events: [],
       replayBytes: 0,
@@ -84,7 +85,6 @@ export class EventHub {
     });
     for (const registration of stream.listeners) registration.active = false;
     stream.listeners.clear();
-    this.seqHighWater.set(streamId, stream.seq);
     return this.streams.delete(streamId);
   }
 
@@ -103,6 +103,7 @@ export class EventHub {
     if (!stream) throw new Error(`Unknown stream: ${streamId}`);
 
     stream.seq += 1;
+    if (stream.seq > this.seqHighWater) this.seqHighWater = stream.seq;
     stream.snapshot = structuredClone(snapshot);
     const envelope: EventEnvelope = {
       version: PROTOCOL_VERSION,
