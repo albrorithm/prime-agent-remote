@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { SESSION_SLASH_COMMAND_NAMES } from "../protocol.js";
+import { SESSION_SLASH_COMMAND_NAMES, sessionNameSchema } from "../protocol.js";
 import type {
   AgentCapabilities,
   AgentSnapshot,
@@ -951,8 +951,9 @@ export class DemoBackend implements AgentBackend {
       }
       case "name": {
         if (input.args) {
-          if (input.args.length > 200) throw new BackendCapabilityError("Session name is too long");
-          summary.name = input.args;
+          const name = sessionNameSchema.safeParse(input.args);
+          if (!name.success) throw new BackendCapabilityError("Session name must be a single line of at most 200 characters");
+          summary.name = name.data;
           mutated = true;
           this.catalogState.revision += 1;
           this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);

@@ -18,7 +18,7 @@
  * March", not its name.
  */
 
-/** Longest first: "iPad" must be tested before "Mac", which iPadOS also claims. */
+/** Specific before generic: an iPhone user agent also says "Mac OS X". */
 const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\biPhone\b/i, "iPhone"],
   [/\biPad\b/i, "iPad"],
@@ -29,8 +29,6 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bWindows\b/i, "Windows PC"],
   [/\bLinux\b/i, "Linux"],
 ];
-
-const MAX_DEVICE_LABEL_CHARS = 64;
 
 export function deviceLabel(userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent): string {
   /* Desktop Safari on an iPad reports a Macintosh user agent and is only
@@ -48,5 +46,3 @@ export function deviceLabel(userAgent: string = typeof navigator === "undefined"
   // The schema bounds this at 64; "device" is what the server would have used.
   return "Device";
 }
-
-export { MAX_DEVICE_LABEL_CHARS };

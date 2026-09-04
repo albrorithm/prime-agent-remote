@@ -106,17 +106,20 @@ export function useScrollFollowing({
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+    // The scroller mounts with the selected agent, and an app that started
+    // with no session has none to observe until one is picked; keyed on
+    // nothing, this ran once against an empty ref and stayed inert.
+  }, [selectedAgentId]);
 
+  // Images load lazily, so scrolling up through history loads them as they
+  // come into view. A reader who is not following has nothing new: the
+  // message the image belongs to was counted when it arrived. Only a
+  // follower has to be re-pinned, because the row just grew under them.
   function handleTranscriptImageLoad() {
     const element = scrollRef.current;
-    if (!element) return;
-    if (followingRef.current) {
-      element.scrollTop = element.scrollHeight;
-      setUnseen(0);
-    } else {
-      setUnseen((count) => Math.max(1, count));
-    }
+    if (!element || !followingRef.current) return;
+    element.scrollTop = element.scrollHeight;
+    setUnseen(0);
   }
 
   function updateFollowing() {
@@ -125,9 +128,11 @@ export function useScrollFollowing({
     setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 96);
   }
 
+  // Setting `following` is the jump: the effect above pins the scroller on
+  // the next commit. A smooth `scrollTo` here was cancelled by that instant
+  // one before a single frame of it played.
   function jumpToLatest() {
     setFollowing(true);
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }
 
   return { scrollRef, following, unseen, handleTranscriptImageLoad, updateFollowing, jumpToLatest };

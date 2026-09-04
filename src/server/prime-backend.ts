@@ -9,6 +9,7 @@ import {
   DIRECT_SLASH_COMMAND_NAMES,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
   SESSION_SLASH_COMMAND_NAMES,
+  sessionNameSchema,
 } from "../protocol.js";
 import type {
   AgentCapabilities,
@@ -1853,58 +1854,58 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted> {
-    const record = await this.requiredConnection(input.agentId);
-    const snapshot = this.requiredSnapshot(input.agentId);
-    if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
-    const connection = record.connection;
-
-    if (SESSION_SLASH_COMMAND_NAME_SET.has(input.name)) {
-      const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
-      try {
-        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
-      } catch {
-        throw new Error("Prime command failed");
-      }
-      return {
-        accepted: true,
-        requestId: input.requestId,
-        revision: snapshot.revision,
-        result: { kind: "session_accepted" },
-      };
-    }
-
-    if (!DIRECT_SLASH_COMMAND_NAME_SET.has(input.name)) {
-      if (typeof connection.getCommands !== "function") throw new BackendCapabilityError("Command is not available");
-      let detected: SlashCommandCatalogEntry[];
-      try {
-        const commands = await connection.getCommands();
-        detected = Array.isArray(commands)
-          ? detectedSlashCommandEntries(commands, EXPLICIT_SLASH_COMMAND_NAMES)
-          : [];
-      } catch {
-        throw new Error("Prime experimental command discovery failed");
-      }
-      const experimental = detected.find((command) => command.name === input.name && command.availability === "experimental");
-      if (!experimental || (experimental.source !== "extension" && experimental.source !== "prompt" && experimental.source !== "skill")) {
-        throw new BackendCapabilityError("Command is not available");
-      }
-      const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
-      try {
-        await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
-      } catch {
-        throw new Error("Prime experimental command failed");
-      }
-      return {
-        accepted: true,
-        requestId: input.requestId,
-        revision: snapshot.revision,
-        result: { kind: "experimental_accepted", source: experimental.source },
-      };
-    }
+    // Under the command lock for every kind of command, as `sendMessage` is:
+    // the revision is checked once, here, and stays true until the command has
+    // been handed to the daemon. Session and experimental commands used to run
+    // outside the lock and could interleave with a message to the same agent.
     return this.withCommandLock(input.agentId, async () => {
-      const lockedSnapshot = this.requiredSnapshot(input.agentId);
-      if (lockedSnapshot.revision !== input.expectedRevision) {
-        throw new BackendConflictError("The agent changed. Refresh and try again.");
+      const record = await this.requiredConnection(input.agentId);
+      const snapshot = this.requiredSnapshot(input.agentId);
+      if (snapshot.revision !== input.expectedRevision) throw new BackendConflictError("The agent changed. Refresh and try again.");
+      const connection = record.connection;
+
+      if (SESSION_SLASH_COMMAND_NAME_SET.has(input.name)) {
+        const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+        try {
+          await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
+        } catch {
+          throw new Error("Prime command failed");
+        }
+        return {
+          accepted: true,
+          requestId: input.requestId,
+          revision: snapshot.revision,
+          result: { kind: "session_accepted" },
+        };
+      }
+
+      if (!DIRECT_SLASH_COMMAND_NAME_SET.has(input.name)) {
+        if (typeof connection.getCommands !== "function") throw new BackendCapabilityError("Command is not available");
+        let detected: SlashCommandCatalogEntry[];
+        try {
+          const commands = await connection.getCommands();
+          detected = Array.isArray(commands)
+            ? detectedSlashCommandEntries(commands, EXPLICIT_SLASH_COMMAND_NAMES)
+            : [];
+        } catch {
+          throw new Error("Prime experimental command discovery failed");
+        }
+        const experimental = detected.find((command) => command.name === input.name && command.availability === "experimental");
+        if (!experimental || (experimental.source !== "extension" && experimental.source !== "prompt" && experimental.source !== "skill")) {
+          throw new BackendCapabilityError("Command is not available");
+        }
+        const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
+        try {
+          await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
+        } catch {
+          throw new Error("Prime experimental command failed");
+        }
+        return {
+          accepted: true,
+          requestId: input.requestId,
+          revision: snapshot.revision,
+          result: { kind: "experimental_accepted", source: experimental.source },
+        };
       }
       let result: SlashCommandResult;
       let mutated = false;
@@ -1964,10 +1965,14 @@ export class PrimeBackend implements AgentBackend {
             throw new BackendCapabilityError("Name command is unavailable");
           }
           if (input.args) {
-            if (input.args.length > 200) throw new BackendCapabilityError("Session name is too long");
-            await connection.setSessionName(input.args);
+            // The same rule the rename route applies: one line, no control
+            // characters, at most 200 characters. Two routes to one field
+            // must not accept different names for it.
+            const name = sessionNameSchema.safeParse(input.args);
+            if (!name.success) throw new BackendCapabilityError("Session name must be a single line of at most 200 characters");
+            await connection.setSessionName(name.data);
             mutated = true;
-            result = { kind: "name", name: input.args };
+            result = { kind: "name", name: name.data };
           } else {
             const name = (await connection.getState()).sessionName;
             result = { kind: "name", ...(name ? { name: safeLabel(name, "", 200) } : {}) };
@@ -2002,11 +2007,11 @@ export class PrimeBackend implements AgentBackend {
         default:
           throw new BackendCapabilityError("Command is not available");
       }
-    } catch (error) {
-      if (error instanceof BackendCapabilityError) throw error;
-      throw new Error("Prime command failed");
-    }
-      const revision = mutated ? this.advanceSnapshotRevision(input.agentId) : lockedSnapshot.revision;
+      } catch (error) {
+        if (error instanceof BackendCapabilityError) throw error;
+        throw new Error("Prime command failed");
+      }
+      const revision = mutated ? this.advanceSnapshotRevision(input.agentId) : snapshot.revision;
       return { accepted: true, requestId: input.requestId, revision, result };
     });
   }

@@ -140,8 +140,12 @@ export function useSlashCommandMenu({
         selectSlashCommand(activeSlashCommand);
         return true;
       }
-      const exactCommand = activeSlashCommand.argumentValue === undefined
-        && draft === `/${activeSlashCommand.command.name}`;
+      // The draft already says what the suggestion would write — whether that
+      // is a bare command or a command with its chosen option. Enter submits
+      // it. Deciding this on the command name alone left an option suggestion
+      // re-selecting itself on every Enter, with no way past it but the
+      // Send button.
+      const exactCommand = draft.trim() === activeSlashCommand.completion.trim();
       if (event.key === "Enter" && !event.shiftKey && !exactCommand) {
         event.preventDefault();
         selectSlashCommand(activeSlashCommand);

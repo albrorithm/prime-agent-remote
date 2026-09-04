@@ -221,6 +221,10 @@ function rebuildTargets(): RebuildTarget[] {
 async function safeRebuild(): Promise<boolean> {
   const targets = rebuildTargets();
   const backups = await Promise.all(targets.map(async (target) => {
+    // A rebuild interrupted mid-build (Ctrl-C kills this process and npm with
+    // it) leaves the only good build parked under the backup name. Put it
+    // back before anything else, or the next line would delete it.
+    if (!await exists(target.dir) && await exists(target.previous)) await rename(target.previous, target.dir);
     const hadBuild = await exists(target.dir);
     await rm(target.previous, { recursive: true, force: true });
     if (hadBuild) await rename(target.dir, target.previous);
@@ -428,7 +432,10 @@ async function start(options: Options): Promise<number> {
     line(pairingHint(exposure));
     line();
     const child = spawn(process.execPath, [entry], { cwd: projectRoot, env: environment, stdio: "inherit" });
-    const code = await new Promise<number>((resolve) => child.on("exit", (exitCode) => resolve(exitCode ?? 0)));
+    const code = await new Promise<number>((resolve) => {
+      child.on("error", () => resolve(1));
+      child.on("exit", (exitCode) => resolve(exitCode ?? 0));
+    });
     // No state file outlives a foreground run, so `stop` will never see this
     // mapping. Take down what this run put up, here, while we still know.
     if (serve?.published) await unpublishServe(systemRunner());
@@ -446,10 +453,14 @@ async function start(options: Options): Promise<number> {
     detached: true,
     stdio: "ignore",
   });
+  // Without a listener a spawn failure is an uncaught 'error' event, which
+  // crashes the CLI instead of reaching the message below.
+  child.on("error", () => {});
   child.unref();
   const pid = child.pid;
   if (!pid) {
     line("Could not start the gateway.");
+    if (serve?.published) await unpublishServe(systemRunner());
     return 1;
   }
 
@@ -463,6 +474,10 @@ async function start(options: Options): Promise<number> {
     else line(`The gateway started (pid ${pid}) but nothing is listening on port ${port}.`);
     line("Run `prime-agent-remote start --foreground` to see why.");
     signal(pid, "SIGTERM");
+    // No state file records this mapping, so `stop` could never take it down:
+    // it would point 443 at a dead port until someone noticed by hand, and the
+    // next `start` would find it "ours" and not record it as managed either.
+    if (serve?.published) await unpublishServe(systemRunner());
     return 1;
   }
 
@@ -626,14 +641,19 @@ export async function applyRevocation(
 ): Promise<RevocationOutcome> {
   // The gateway takes ownership again after this call; leave no background writes.
   const store = new DeviceStore(storePath, []);
-  await store.load();
-
   const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath, []) : undefined;
+  // Both before any write: a store that cannot be read cannot be revoked
+  // from, and "no device with that id" over a file that was never read would
+  // send the operator away believing the phone is already out.
+  try {
+    await store.load({ strict: true });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not read the device store at ${storePath}; nothing was revoked. ${reason}`);
+  }
   try {
     await pushStore?.load({ strict: true });
   } catch (error) {
-    // Before any write: a store that cannot be read cannot be revoked from,
-    // and reporting the credential revoked would hide the phone still woken.
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not read the push subscription store at ${pushStorePath}; nothing was revoked. ${reason}`);
   }
@@ -711,26 +731,13 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     line();
   }
 
-  const restart = async (): Promise<number> => {
-    line();
-    line("Starting it again...");
-    line();
-    const restarted = await start(restartOptions(running!));
-    if (restarted !== 0) {
-      line();
-      line("The revocation is applied, but the gateway did not come back up.");
-      line("Start it again with `prime-agent-remote start`.");
-    }
-    return restarted;
-  };
-
   let outcome: RevocationOutcome;
   try {
     outcome = await applyRevocation(config.deviceStorePath, revoke, config.webPushStorePath);
   } catch (error) {
     // The gateway was stopped for this write. A store that would not take it
     // is the caller's to report; it is not a reason to leave the gateway down.
-    if (running) await restart();
+    if (running) await restart(running);
     throw error;
   }
   if (outcome.kind === "revoked-all") {
@@ -747,7 +754,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
   }
 
   if (!running) return outcome.kind === "unknown" ? 1 : 0;
-  const restarted = await restart();
+  const restarted = await restart(running);
   if (restarted !== 0) return restarted;
   return outcome.kind === "unknown" ? 1 : 0;
 }
@@ -835,25 +842,64 @@ async function installCommand(): Promise<number> {
 async function rebuild(options: Pick<Options, "demo">): Promise<number> {
   const config = loadConfig(baseEnv(options));
   const before = await resolveStatus(config.gatewayStatePath);
-  if (!await safeRebuild()) return 1;
+  const running = before.running && before.state ? before.state : null;
 
-  if (!before.running || !before.state) {
+  // Stopped first, not after: the gateway serves `dist/` from disk on every
+  // request, and `safeRebuild` moves that directory aside for the whole build.
+  // Rebuilding under a running gateway answered every request with "Web build
+  // not found" for as long as the build took, on the successful path.
+  if (running) {
+    line(`Stopping the gateway at ${running.url}; it serves the directories the build replaces.`);
+    if (await stop({ demo: running.backend === "demo" }) !== 0) {
+      line("Nothing was rebuilt. The gateway is still serving the old build.");
+      return 1;
+    }
     line();
-    line("Rebuilt. The gateway is not running; `prime-agent-remote start` will serve it.");
-    return 0;
+  }
+
+  const built = await safeRebuild();
+  if (!running) {
+    if (built) {
+      line();
+      line("Rebuilt. The gateway is not running; `prime-agent-remote start` will serve it.");
+    }
+    return built ? 0 : 1;
   }
 
   line();
-  line("Rebuilt. Restarting the gateway so the change is actually live...");
-  if (await stop({ demo: before.state.backend === "demo" }) !== 0) {
-    line("The rebuild finished, but the gateway could not be stopped. The new code is not live yet.");
-    return 1;
-  }
-  const restarted = await start(restartOptions(before.state));
+  line(built ? "Rebuilt. Starting the gateway again so the change is actually live..." : "Starting the gateway again on the build it had...");
+  const restarted = await restart(running);
   if (restarted !== 0) return restarted;
+  if (!built) return 1;
   line();
-  line(`Verify the change at ${before.state.url} — that address, not another one.`);
+  line(`Verify the change at ${running.url} — that address, not another one.`);
   return 0;
+}
+
+/**
+ * Brings a gateway this command stopped back up on the same address. Shared by
+ * `rebuild` and `devices --revoke`, which both stop the gateway around a write
+ * to files it holds in memory. A `start` that throws — an `ExposureError`,
+ * when Tailscale went away in between — is reported the same way as one that
+ * returns non-zero, rather than escaping past the message that says what to
+ * do about it.
+ */
+async function restart(state: GatewayState): Promise<number> {
+  line();
+  line("Starting it again...");
+  line();
+  let restarted: number;
+  try {
+    restarted = await start(restartOptions(state));
+  } catch (error) {
+    line(error instanceof Error ? error.message : String(error));
+    restarted = 1;
+  }
+  if (restarted !== 0) {
+    line();
+    line("The gateway did not come back up. Start it again with `prime-agent-remote start`.");
+  }
+  return restarted;
 }
 
 export async function main(argv: readonly string[]): Promise<number> {

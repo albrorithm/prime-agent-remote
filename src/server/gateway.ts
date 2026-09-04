@@ -50,6 +50,7 @@ import { buildAttentionPushPayload, buildTurnEndPushPayload } from "./push-paylo
 import { PushService } from "./push-service.js";
 import { TurnEndNotifier } from "./turn-end-notifier.js";
 import { DeviceStore } from "./device-store.js";
+import { DirectoryPathError } from "./directories.js";
 import { PushSubscriptionStore } from "./push-store.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import {
@@ -420,8 +421,8 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       try {
         json(res, 200, await backend.listDirectories(requested));
       } catch (error) {
-        if (!(error instanceof RangeError)) throw error;
-        problem(res, 400, "Directory path must be absolute");
+        if (!(error instanceof DirectoryPathError)) throw error;
+        problem(res, 400, error.message);
       }
       return true;
     }
@@ -545,7 +546,13 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`abort:${agentId}`, parsed.data),
-        () => backend.abort({ agentId, ...parsed.data }),
+        async () => {
+          const accepted = await backend.abort({ agentId, ...parsed.data });
+          // The person ended this turn themselves; the quiet that follows is
+          // not a finished turn to wake them for.
+          turnEnd?.disarm(agentId);
+          return accepted;
+        },
       );
       json(res, 202, result);
       return true;
@@ -575,7 +582,13 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`stop:${agentId}`, parsed.data),
-        () => backend.stop({ agentId, ...parsed.data }),
+        async () => {
+          const accepted = await backend.stop({ agentId, ...parsed.data });
+          // Same as abort: a session the person ended is idle because they
+          // ended it, and "Finished and waiting on you" would be a lie.
+          turnEnd?.disarm(agentId);
+          return accepted;
+        },
       );
       json(res, 202, result);
       return true;

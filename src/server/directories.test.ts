@@ -3,6 +3,7 @@ import {
   absoluteDirectoryPath,
   DIRECTORY_SCAN_BOUND,
   directoryCrumbs,
+  DirectoryPathError,
   selectDirectoryEntries,
   type ListedChild,
 } from "./directories.js";
@@ -15,8 +16,8 @@ describe("absoluteDirectoryPath", () => {
   });
 
   it("rejects relative paths rather than resolving against any base", () => {
-    expect(() => absoluteDirectoryPath("projects", "/home/dev")).toThrow(RangeError);
-    expect(() => absoluteDirectoryPath("../etc", "/home/dev")).toThrow(RangeError);
+    expect(() => absoluteDirectoryPath("projects", "/home/dev")).toThrow(DirectoryPathError);
+    expect(() => absoluteDirectoryPath("../etc", "/home/dev")).toThrow(DirectoryPathError);
   });
 });
 

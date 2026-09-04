@@ -16,7 +16,6 @@ export class MutationCache<T> {
     private readonly ttlMs: number,
     private readonly now: () => number = Date.now,
     private readonly maxEntries = 1_000,
-    private readonly pendingTtlMs = 2 * 60_000,
     // A retry racing a slow-but-alive operation must find the same pending
     // promise, not trigger a second execution — so prune() never drops an
     // unsettled entry on the ordinary TTL path (see prune()). This is the
@@ -51,7 +50,9 @@ export class MutationCache<T> {
     const entry: MutationCacheEntry<T> = {
       binding,
       createdAt: this.now(),
-      expiresAt: this.now() + Math.max(1, this.pendingTtlMs),
+      // Meaningful once settled; an unsettled entry is reaped on
+      // `unsettledTtlMs` from `createdAt` instead.
+      expiresAt: Number.POSITIVE_INFINITY,
       settled: false,
       promise: Promise.resolve().then(operation),
     };

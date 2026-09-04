@@ -55,9 +55,14 @@ maximum age, which is the ceiling browsers enforce anyway.
   anyone become a paired device. A test asserts the secret does not appear in
   the file it was issued from.
 - `POST /api/v1/auth/resume` exchanges the credential for a new session. It is
-  deliberately unauthenticated (the cookie is the credential), validates
-  `Origin`, and shares the setup token's rate limit, so that guessing a bearer
-  credential is capped as strictly as guessing the token.
+  deliberately unauthenticated (the cookie is the credential) and validates
+  `Origin`. A credential that fails to verify is charged to the address's
+  pairing budget, so a run of guesses locks that address out of pairing; the
+  resume route itself is not refused on that budget, because the credential is
+  verified before the charge is made, and refusing before verification would
+  lock every legitimate device behind a shared reverse-proxy address out with
+  the guesser. What makes guessing hopeless is the 256-bit secret, not the
+  limiter. A verified device has its own 30-per-minute resume budget.
 - Sign-out revokes the credential, clears both cookies, and ends every other
   session running from that device too, sockets included: a second tab, or a
   session opened before the sign-out, does not survive it. Each of those
@@ -71,7 +76,8 @@ maximum age, which is the ceiling browsers enforce anyway.
   one re-pairing rather than a gateway that will not start.
 - Device and push-store writes are serialized and atomic. A failed write is
   reported to the caller and retried after 1, 5, and 15 seconds using current
-  in-memory state. If all retries fail, the gateway logs that the file is stale;
+  in-memory state; a caller's own write landing in between is the retry, and
+  restarts that schedule. If all retries fail, the gateway logs that the file is stale;
   a restart before persistence succeeds can restore a revoked record. CLI
   revocations disable background retries because the restarted gateway takes
   ownership of the files again.
@@ -163,7 +169,7 @@ A push subscription is a long-lived capability to wake a device, and it intentio
 - A record carries the device it was claimed by as well as the session. The session is what claimed the endpoint, but sessions are in memory and die with the process, while the subscription is written to disk exactly so that it does not — so a record bound only to a session becomes unreachable from a revocation the moment the gateway restarts or the twelve-hour session expires. The device credential outlives both, and is what a revocation matches on. Records written before subscriptions carried a device id have none; they stay reachable through their session while that device is live, and acquire one the next time the app re-claims its endpoint, which it does on every new session.
 - Sign-out revokes: the logout route drops every record bound to that session, and the browser drops its own subscription before the request. Session expiry revokes nothing. A device re-registers its existing subscription on each new session so that sign-out can always find it.
 - Revoking a device drops every subscription bound to that device, whether or not it currently holds a live session, and whether the revocation came from the app or from the CLI. `prime-agent-remote devices --revoke all` clears the store outright, because a record predating the device id has none to match and "revoke all" means no device may be woken. If dropping them fails, the route says so instead of reporting success, and revoking the same id again retries the drop; the CLI refuses to revoke anything at all over a push store it cannot read.
-- A record is otherwise removed only by an explicit unsubscribe or by a push service reporting the endpoint permanently gone (`404`/`410`); it is never removed for being old.
+- A record is otherwise removed only by an explicit unsubscribe, by a push service reporting the endpoint permanently gone (`404`/`410`), or as the oldest record when the store is at its bound of 32, which is one per device the device store can hold. It is never removed merely for being old.
 - Endpoints are device identifiers and are never written to logs.
 - Rotating the VAPID keypair invalidates every existing subscription; each device must turn notifications on again.
 

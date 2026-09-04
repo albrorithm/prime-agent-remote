@@ -7,7 +7,12 @@ import { PersistQueue } from "./persist-queue.js";
  * devices at most. The bound exists so a rotating endpoint (browsers do
  * re-mint them) cannot grow the file without limit, not to ration devices.
  */
-export const MAX_PUSH_SUBSCRIPTIONS = 20;
+/**
+ * One per device the device store can hold. A smaller bound evicted a live
+ * phone's record the day the twenty-first device subscribed, silently, and
+ * `docs/security.md` said no record was ever removed for being old.
+ */
+export const MAX_PUSH_SUBSCRIPTIONS = 32;
 export const MAX_PUSH_ENDPOINT_CHARS = 1024;
 export const MAX_PUSH_KEY_CHARS = 256;
 /** Anything larger is treated as corrupt instead of parsed. */

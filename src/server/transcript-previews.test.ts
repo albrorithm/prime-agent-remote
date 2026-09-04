@@ -130,6 +130,10 @@ describe("tool transcript previews", () => {
   it("still redacts credentials inside quotes", () => {
     expect(sanitizeTranscriptPreview("run --password='hunter2'")).toBe("run --password=<redacted>");
     expect(sanitizeTranscriptPreview("export SECRET='abc def'")).toBe("export SECRET=<redacted>");
+    // The other quote character inside the value used to fail both quoted
+    // rules and pass the credential through whole.
+    expect(sanitizeTranscriptPreview("export PASSWORD=\"don't\"")).toBe("export PASSWORD=<redacted>");
+    expect(sanitizeTranscriptPreview("export SECRET='say \"hi\"'")).toBe("export SECRET=<redacted>");
     expect(sanitizeTranscriptPreview('curl -H "Authorization: Bearer abc123" <url>'))
       .toBe("curl -H <redacted> <url>");
     // The scheme is kept and the credential is not, which is the useful split.
@@ -141,6 +145,25 @@ describe("tool transcript previews", () => {
     expect(sanitizeTranscriptPreview(`token = "${"a".repeat(90)}"`)).toBe("token=<redacted>");
     // A long opaque run still goes even with nothing in the name to flag it.
     expect(sanitizeTranscriptPreview(`payload = "${"a".repeat(90)}"`)).toBe('payload = "<blob>"');
+  });
+});
+
+describe("sanitizeTranscriptPreview on hostile lengths", () => {
+  // The e-mail rule is quadratic in a word run: a 300 KB line held the event
+  // loop for tens of seconds. The input is capped before any pattern runs.
+  it("returns from a very long dotted run in bounded time", () => {
+    const line = `x@${"a.".repeat(150_000)}`;
+    const started = performance.now();
+    const preview = sanitizeTranscriptPreview(line, 120);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(preview.length).toBeLessThanOrEqual(120);
+  });
+
+  it("bounds a thinking block before looking for its first line", () => {
+    const started = performance.now();
+    const recap = thinkingRecap(`x@${"a.".repeat(150_000)}`, "Thinking", 120);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(recap.length).toBeLessThanOrEqual(120);
   });
 });
 

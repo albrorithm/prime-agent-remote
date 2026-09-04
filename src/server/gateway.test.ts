@@ -996,6 +996,39 @@ describe("gateway API routes", () => {
     expect(armed()).toBe(false);
   });
 
+  /* Abort and stop are the person ending the turn. The idle that follows is
+     not a finished turn to wake them for: "Finished and waiting on you" for a
+     session they just stopped is a lie, and it used to be sent. */
+  it("disarms the turn-end notifier when the person aborts the turn", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.send && agent.capabilities.abort)?.id;
+    if (!agentId) throw new Error("No abortable demo agent");
+    const notifier = t.gateway.turnEnd;
+    if (!notifier) throw new Error("Push is configured, so the notifier should exist");
+    const armed = () =>
+      (Reflect.get(notifier, "states") as Map<string, { armed: boolean }>).get(agentId)?.armed === true;
+
+    let revision = await agentRevision(t, client, agentId);
+    const sent = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/messages`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: revision, text: "work on this" }),
+    });
+    expect(sent.status).toBe(202);
+    expect(armed()).toBe(true);
+
+    revision = await agentRevision(t, client, agentId);
+    const aborted = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/abort`, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: revision }),
+    });
+    expect(aborted.status).toBe(202);
+    expect(armed()).toBe(false);
+  });
+
   it("renames an agent, rejects a malformed name, and maps a refused capability to 403", async () => {
     const t = await startGateway();
     const client = await pairClient(t);

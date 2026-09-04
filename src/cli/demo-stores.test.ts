@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CONFIG_FILE_VARIABLES } from "../server/config.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
 
 describe("demoConfigDir", () => {
@@ -15,12 +16,18 @@ describe("demoConfigDir", () => {
 });
 
 describe("demoEnv", () => {
-  it("redirects all four persistent stores away from their real defaults", () => {
+  it("redirects every persistent store away from its real default", () => {
     const env = demoEnv({ XDG_CONFIG_HOME: "/custom/config" });
     expect(env.PRIME_WEB_PAIRING_TOKEN_FILE).toBe("/custom/config/prime-agent-web-demo/pairing-token");
     expect(env.PRIME_WEB_DEVICE_STORE).toBe("/custom/config/prime-agent-web-demo/devices.json");
     expect(env.PRIME_WEB_STATE_FILE).toBe("/custom/config/prime-agent-web-demo/gateway.json");
     expect(env.PRIME_WEB_PUSH_STORE).toBe("/custom/config/prime-agent-web-demo/push-subscriptions.json");
+    expect(env.PRIME_WEB_VAPID_KEY_FILE).toBe("/custom/config/prime-agent-web-demo/vapid-keys.json");
+    // The list the server keeps, not a copy of it: a store added there must
+    // be redirected here or the demo writes it into the real directory.
+    for (const variable of Object.values(CONFIG_FILE_VARIABLES)) {
+      expect(env[variable]).toMatch(/^\/custom\/config\/prime-agent-web-demo\//u);
+    }
   });
 
   it("preserves every other variable so it is safe to spawn a child with", () => {

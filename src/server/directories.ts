@@ -14,9 +14,12 @@ export interface ListedChild {
   directory: boolean;
 }
 
+/** A directory path the listing refuses to resolve: relative, so it would need a base the browser never gets to pick. */
+export class DirectoryPathError extends Error {}
+
 export function absoluteDirectoryPath(path: string | undefined, home: string): string {
   const candidate = path && path.trim() ? path : home;
-  if (!isAbsolute(candidate)) throw new RangeError("directory-unreadable");
+  if (!isAbsolute(candidate)) throw new DirectoryPathError("Directory path must be absolute");
   return resolve(candidate);
 }
 

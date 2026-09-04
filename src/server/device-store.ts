@@ -104,15 +104,20 @@ export class DeviceStore {
   }
 
   /**
-   * Never throws. A corrupt store costs everyone one re-pairing, which is
-   * recoverable; a gateway that refuses to start because of it is not.
+   * Never throws unless `strict`. A corrupt store costs everyone one
+   * re-pairing, which is recoverable; a gateway that refuses to start because
+   * of it is not. The CLI asks for `strict` because it is about to say
+   * "revoked", and an unreadable file must not read as an empty one.
    */
-  async load(): Promise<void> {
+  async load(options: { strict?: boolean } = {}): Promise<void> {
     this.devices = [];
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
-    } catch {
+    } catch (error) {
+      // Absent is empty. Unreadable is unknown, and a strict caller (the CLI,
+      // about to report a revocation as applied) must not take it for empty.
+      if (options.strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return;
     }
     if (raw.length > MAX_DEVICE_STORE_BYTES) return;
@@ -164,7 +169,11 @@ export class DeviceStore {
     const device = this.devices.find((candidate) => candidate.id === parsed.id);
     if (!device || !secretMatches(parsed.secret, device.secretHash)) return null;
     device.lastSeenAt = now.toISOString();
-    await this.persist();
+    // A timestamp the disk would not take is not a reason to refuse a valid
+    // credential: the queue retries in the background and says so if it gives
+    // up. `issue` is different — a credential not on disk must not be handed
+    // out — and keeps its rejection.
+    await this.persist().catch(() => {});
     /* Re-checked after the write, not before it. `revoke` removes the device
        from this array synchronously and only then awaits its own write, so a
        revocation landing while this one is in flight leaves the device gone

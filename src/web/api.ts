@@ -9,6 +9,7 @@ import {
   mutationAcceptedSchema,
   problemDetailsSchema,
   pushAcceptedSchema,
+  pushSubscriptionSchema,
   sessionCreatedSchema,
   slashCommandAcceptedSchema,
   slashCommandCatalogSchema,
@@ -91,7 +92,11 @@ async function decode<T>(response: Response, schema?: ZodType<T>, ownsUnauthoriz
     }
     throw new ApiError(response.status, problem?.detail || problem?.title || `HTTP ${response.status}`);
   }
-  const value = await response.json() as unknown;
+  // A 2xx that is not JSON — a proxy answering with an HTML page — is the
+  // server's failure to report, not a SyntaxError to show verbatim.
+  const value = await response.json().catch(() => {
+    throw new ApiError(502, "The server returned invalid data");
+  }) as unknown;
   if (!schema) return value as T;
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new ApiError(502, "The server returned invalid data");
@@ -144,7 +149,10 @@ export async function pair(
     // takes a device name, and an unnamed record is stuck reading "device"
     // wherever it is listed.
     body: JSON.stringify({ token, ...(deviceName ? { deviceName } : {}) }),
-  }, options, pairResponseSchema);
+    // A 401 here means "wrong token", not "session expired": there is no
+    // session yet. Letting the central handlers tear one down reset the app
+    // on every mistyped token, and twice on a bad pairing link.
+  }, { ...options, ownsUnauthorized: true }, pairResponseSchema);
 }
 
 /**
@@ -260,9 +268,10 @@ export function abortAgent(
   csrfToken: string,
   expectedRevision: number,
   options?: ApiRequestOptions,
+  requestId: string = crypto.randomUUID(),
 ) {
   return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/abort`, csrfToken, {
-    requestId: crypto.randomUUID(),
+    requestId,
     expectedRevision,
   }, options, mutationAcceptedSchema);
 }
@@ -315,15 +324,22 @@ export function deleteAgent(
   }, options, mutationAcceptedSchema);
 }
 
+/**
+ * `requestId` is the caller's to keep: an answer that timed out on the wire
+ * and is tapped again must carry the same id, or the gateway sees a second
+ * response to a request it has already resolved and the user sees "Response
+ * failed" for an answer that landed.
+ */
 export function respondToAttention(
   attentionId: string,
   csrfToken: string,
   expectedRevision: number,
   optionId: string,
   options?: ApiRequestOptions,
+  requestId: string = crypto.randomUUID(),
 ) {
   return mutate(`/api/v1/attention/${encodeURIComponent(attentionId)}/respond`, csrfToken, {
-    requestId: crypto.randomUUID(),
+    requestId,
     expectedRevision,
     optionId,
   }, options, mutationAcceptedSchema);
@@ -372,10 +388,7 @@ export function revokeDevice(
   return mutate("/api/v1/devices/revoke", csrfToken, { deviceId }, options, deviceRevokedSchema);
 }
 
-export interface PushSubscriptionBody {
-  endpoint: string;
-  keys: { p256dh: string; auth: string };
-}
+export type PushSubscriptionBody = z.infer<typeof pushSubscriptionSchema>;
 
 export function subscribeToPush(
   csrfToken: string,

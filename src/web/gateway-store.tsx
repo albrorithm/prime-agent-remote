@@ -477,6 +477,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const pendingPreviewUrlsRef = useRef(new Set<string>());
   const requestBaselinesRef = useRef(new Map<string, string[]>());
   const createRequestIdsRef = useRef(new Map<string, string>());
+  // One request id per (attention, option) until it lands, so an answer that
+  // timed out on the wire and is tapped again is the same request to the
+  // gateway rather than a second answer to a question already resolved.
+  const respondRequestIdsRef = useRef(new Map<string, string>());
   const stateRef = useRef(state);
   /* A stream that answered "gone" while its agent was still listed, and how
      many times. One retry is enough against a gateway that warms the stream
@@ -669,6 +673,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     selectionGeneration.current += 1;
     requestBaselinesRef.current.clear();
     createRequestIdsRef.current.clear();
+    respondRequestIdsRef.current.clear();
     subscriptions.current = new Set(["catalog"]);
     cursors.current.clear();
     realtimeVersions.current.clear();
@@ -1382,8 +1387,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       const agentId = Object.values(current.snapshots)
         .flatMap((snapshot) => snapshot.attention)
         .find((request) => request.id === attentionId)?.agentId ?? current.selectedAgentId;
+      const retryKey = `${attentionId}\0${optionId}`;
+      const requestId = respondRequestIdsRef.current.get(retryKey) ?? crypto.randomUUID();
+      respondRequestIdsRef.current.set(retryKey, requestId);
       try {
-        const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId);
+        const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId, undefined, requestId);
+        respondRequestIdsRef.current.delete(retryKey);
         if (generation !== sessionGeneration.current) return;
         if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
         showError(null);

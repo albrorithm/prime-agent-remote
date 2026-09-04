@@ -77,6 +77,10 @@ describe("readServeState", () => {
     expect(readServeState("{}", 8787)).toBe("free");
   });
 
+  it("treats a node that has never had a serve config, which answers null, as free", () => {
+    expect(readServeState("null", 8787)).toBe("free");
+  });
+
   it("does not guess at output it cannot parse", () => {
     expect(readServeState("not json", 8787)).toBe("unknown");
     expect(readServeState('{"Web": 3}', 8787)).toBe("unknown");

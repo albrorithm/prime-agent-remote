@@ -71,11 +71,19 @@ server.listen(config.port, config.host, () => {
  * politely, and anything still holding on after that is evicted.
  */
 async function shutdown(): Promise<void> {
-  await gateway.shutdown();
-  server.closeIdleConnections();
-  server.close(() => process.exit(0));
+  // Armed first: these are the backstops for a shutdown that never settles,
+  // and a backstop armed after the await it guards is no backstop. A wedged
+  // daemon socket held `gateway.shutdown()` open and SIGTERM did nothing.
   setTimeout(() => server.closeAllConnections(), 1_000).unref();
   setTimeout(() => process.exit(1), 5_000).unref();
+  try {
+    await gateway.shutdown();
+  } catch (error) {
+    console.error("Gateway shutdown failed", error);
+  } finally {
+    server.closeIdleConnections();
+    server.close(() => process.exit(0));
+  }
 }
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());

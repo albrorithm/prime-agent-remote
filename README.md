@@ -82,9 +82,9 @@ no build step.
 prime-agent-remote start      Start it in the background
 prime-agent-remote status     Show the address and whether it is running
 prime-agent-remote stop       Stop it
-prime-agent-remote token      Print the setup token (--rotate to replace it)
+prime-agent-remote token      Print the setup token (--qr for a pairing link, --rotate to replace it)
 prime-agent-remote devices    List paired devices (--revoke <id|all> to remove one)
-prime-agent-remote rebuild    Rebuild the UI and make it live
+prime-agent-remote rebuild    Rebuild the UI and make it live (a checkout only; reinstall a published copy)
 prime-agent-remote install-command   Add /webui to Prime Agent
 ```
 
@@ -189,10 +189,10 @@ a read-only directory-name browser for choosing a working directory.
 touches a real agent. Useful for looking at the interface without a running
 agent, and for development.
 
-Demo mode keeps its own pairing token, paired devices, and gateway state in a
-separate `prime-agent-web-demo` config directory, so a demo run never shares
-credentials with a real one or evicts a real device from the paired-device
-store. Pass `--demo` to `status`, `stop`, and `rebuild` too when you mean the
+Demo mode keeps its own pairing token, paired devices, gateway state, push
+subscriptions, and VAPID keys in a separate `prime-agent-web-demo` config
+directory, so a demo run never shares credentials with a real one or evicts a
+real device from the paired-device store. Pass `--demo` to `status`, `stop`, and `rebuild` too when you mean the
 demo instance; without it they operate on the real one.
 
 ## Documentation

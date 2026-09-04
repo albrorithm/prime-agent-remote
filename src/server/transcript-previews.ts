@@ -106,7 +106,14 @@ function truncate(value: string, maxChars: number): string {
 
 /** Keep compact previews free of credentials, machine paths, and opaque blobs. */
 export function sanitizeTranscriptPreview(value: string, maxChars = 120): string {
-  let safe = value
+  // Capped before any pattern runs, not after. The e-mail rule below is
+  // quadratic in the length of a word run — from every start inside it the
+  // engine scans to the `@` and backtracks the dotted tail — and a single
+  // 300 KB line of model output held the event loop for half a minute. The
+  // output is truncated to `maxChars` anyway, so nothing past a generous
+  // multiple of it can ever be seen.
+  const bounded = value.slice(0, Math.max(20, maxChars) * 8);
+  let safe = bounded
     .replace(/\/(?:Users|home)\/[^/\s'"`]+/g, "~")
     .replace(/[A-Za-z]:\\Users\\[^\\\s'"`]+/gi, "~")
     .replace(/\b(?:https?|wss?|ssh):\/\/[^\s'"`]+/gi, "<url>")
@@ -117,7 +124,10 @@ export function sanitizeTranscriptPreview(value: string, maxChars = 120): string
     .replace(/(-u\s+)\S+/gi, "$1<redacted>")
     .replace(/(-H\s+)(?:"[^"]*"|'[^']*'|\S+)/gi, "$1<redacted>")
     .replace(/[A-Za-z0-9+/]{80,}={0,2}/g, "<blob>")
-    .replace(/\b((?=\w*(?:token|key|secret|password))\w+)\s*=\s*(["'])[^"']*\2/gi, "$1=<redacted>")
+    // Either quote, with the other allowed inside: `PASSWORD="don't"` used to
+    // fail this rule at the apostrophe and the next one at the opening quote,
+    // and pass through whole.
+    .replace(/\b((?=\w*(?:token|key|secret|password))\w+)\s*=\s*(?:"[^"]*"|'[^']*')/gi, "$1=<redacted>")
     .replace(/\b((?=\w*(?:token|key|secret|password))\w+)\s*=\s*(?!["'])[^\s,;]+/gi, "$1=<redacted>")
     .replace(/(["'])sk-[^"']+\1/g, "$1<redacted>$1")
     // The optional quotes matter: this header is usually met inside JSON, as
@@ -132,7 +142,10 @@ export function sanitizeTranscriptPreview(value: string, maxChars = 120): string
 
 /** Match Prime Agent's collapsed-thinking recap rule. */
 export function thinkingRecap(thinking: string, fallback = "Thinking", maxChars = 120): string {
-  const lines = thinking.split("\n").map((line) => line.trim()).filter(Boolean);
+  // Bounded for the same reason `sanitizeTranscriptPreview` bounds its input:
+  // a thinking block is model output of any length, and only its first line
+  // or last header is ever shown.
+  const lines = thinking.slice(0, Math.max(20, maxChars) * 64).split("\n").map((line) => line.trim()).filter(Boolean);
   const lastHeader = [...lines].reverse().find((line) => /^\*\*[^*]+\*\*:?$/.test(line) || /^#{1,6}\s+\S/.test(line));
   const source = lastHeader ?? lines[0] ?? fallback;
   const plain = source
@@ -191,7 +204,7 @@ function previewBash(code: string): string {
   let index = 0;
   for (const rawLine of lines) {
     for (let part of rawLine.split(/\s*(?:&&|;)\s*/)) {
-      part = part.replace(/^\s*!/, "").trim().replace(/^cd\s+[^&;|]+(?:&&|;)\s*/, "").trim();
+      part = part.replace(/^\s*!/, "").trim();
       if (!part || /^#/.test(part) || /^set\s+[-+]/.test(part) || /^(?:export\s+\w+=|source\s+\S+|\.\s+\S+)/.test(part)) continue;
       const candidate = { text: simplifyBash(part), score: bashScore(part, index++) };
       if (!best || candidate.score > best.score) best = candidate;

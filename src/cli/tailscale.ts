@@ -123,6 +123,10 @@ export function readServeState(statusJson: string, localPort: number): ServeStat
   } catch {
     return "unknown";
   }
+  // A node that has never had a serve config answers `null`, not `{}`: the
+  // CLI marshals a nil ServeConfig. That is a definite answer — nothing is
+  // published — and the first-run machine is the one auto-publish exists for.
+  if (parsed === null) return "free";
   if (parsed == null || typeof parsed !== "object") return "unknown";
   const web = (parsed as { Web?: unknown }).Web;
   if (web == null) return "free";

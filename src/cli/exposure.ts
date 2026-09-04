@@ -15,8 +15,6 @@ export interface ExposureInput {
   tailscaleHost?: string;
   /** The mDNS name a phone can resolve on the same network, e.g. `host.local`. */
   localHostname?: string;
-  /** True when the operator supplied a certificate a device already trusts. */
-  tlsConfigured?: boolean;
 }
 
 export interface Exposure {
@@ -100,24 +98,26 @@ export function resolveExposure(input: ExposureInput): Exposure {
   if (!localHostname) {
     throw new ExposureError("LAN mode needs a hostname this network can resolve. Could not determine one.");
   }
-  const scheme = input.tlsConfigured ? "https" : "http";
-  const url = `${scheme}://${localHostname}:${port}`;
-  const warnings = [
-    "LAN mode is experimental.",
-    // An address is not an authorisation, and this is the one mode where the
-    // gateway is reachable by anything that can route to it.
-    "The gateway is reachable by every device on this network. The setup token is what stops them.",
-  ];
-  if (!input.tlsConfigured) warnings.push(LAN_CLEARTEXT_CREDENTIAL_WARNING, INSECURE_CONTEXT_WARNING);
+  // Plain HTTP: nothing in the CLI can hand the gateway a certificate, so LAN
+  // mode is cleartext and every warning below always applies. A TLS branch
+  // used to sit here with no way to reach it.
+  const url = `http://${localHostname}:${port}`;
   return {
     mode,
     host: "0.0.0.0",
     // A name, not an address: a DHCP lease change rewrites the address and
     // would silently invalidate an origin allowlist pinned to it.
     origins: [url],
-    secureCookie: Boolean(input.tlsConfigured),
+    secureCookie: false,
     url,
-    warnings,
+    warnings: [
+      "LAN mode is experimental.",
+      // An address is not an authorisation, and this is the one mode where the
+      // gateway is reachable by anything that can route to it.
+      "The gateway is reachable by every device on this network. The setup token is what stops them.",
+      LAN_CLEARTEXT_CREDENTIAL_WARNING,
+      INSECURE_CONTEXT_WARNING,
+    ],
   };
 }
 

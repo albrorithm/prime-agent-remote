@@ -66,17 +66,17 @@ describe("MutationCache", () => {
   });
 
   // The bug this guards against: a retry of the same sessionId:requestId
-  // arriving after pendingTtlMs while the original operation is still
+  // arriving after the settled TTL while the original operation is still
   // running must not cause a second execution.
-  it("returns the same promise and does not re-run a still-pending operation after pendingTtlMs elapses", async () => {
+  it("returns the same promise and does not re-run a still-pending operation after the settled TTL elapses", async () => {
     let now = 0;
     const never = new Promise<number>(() => {});
     const operation = vi.fn(() => never);
-    const cache = new MutationCache<number>(1_000, () => now, 1_000, 50);
+    const cache = new MutationCache<number>(50, () => now, 1_000);
 
     const first = cache.run("session", "request", "binding-a", operation);
     await Promise.resolve();
-    now = 51; // past pendingTtlMs; the operation has still not settled
+    now = 51; // past the settled TTL; the operation has still not settled
     const second = cache.run("session", "request", "binding-a", operation);
     await Promise.resolve();
 
@@ -84,13 +84,13 @@ describe("MutationCache", () => {
     expect(operation).toHaveBeenCalledTimes(1);
   });
 
-  it("still rejects for capacity when every cached entry is unsettled and past pendingTtlMs", async () => {
+  it("still rejects for capacity when every cached entry is unsettled and past the settled TTL", async () => {
     let now = 0;
     const never = new Promise<number>(() => {});
-    const cache = new MutationCache<number>(1_000, () => now, 1, 50);
+    const cache = new MutationCache<number>(50, () => now, 1);
 
     void cache.run("session", "stuck", "binding", () => never);
-    now = 51; // past pendingTtlMs, but the entry is unsettled and must survive prune()
+    now = 51; // past the settled TTL, but the entry is unsettled and must survive prune()
 
     await expect(cache.run("session", "replacement", "binding", async () => 3))
       .rejects.toBeInstanceOf(MutationCacheCapacityError);
@@ -99,7 +99,7 @@ describe("MutationCache", () => {
   it("reaps an entry whose operation never settles once the unsettled ceiling passes", async () => {
     let now = 0;
     const never = new Promise<number>(() => {});
-    const cache = new MutationCache<number>(1_000, () => now, 1, 50, 30 * 60_000);
+    const cache = new MutationCache<number>(1_000, () => now, 1, 30 * 60_000);
 
     void cache.run("session", "stuck", "binding", () => never);
 

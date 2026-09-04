@@ -82,4 +82,21 @@ describe("latexToUnicode", () => {
     expect(latexToUnicode("\\text{learning_rate} = 0.1")).toBe("learning_rate = 0.1");
     expect(latexToUnicode("\\mathrm{x_i}")).toBe("xᵢ");
   });
+
+  describe("malformed input", () => {
+    it("keeps everything after a stray closing brace", () => {
+      expect(latexToUnicode("f(x) = x^2} + y")).toBe("f(x) = x²} + y");
+      expect(latexToUnicode("x} y z")).toBe("x} y z");
+    });
+
+    it("renders an unclosed group to the end of the source", () => {
+      expect(latexToUnicode("\\frac{a}{b")).toBe("a/b");
+    });
+
+    it("does not overflow the stack on thousands of nested or unclosed braces", () => {
+      const deep = "{".repeat(20_000);
+      expect(() => latexToUnicode(deep)).not.toThrow();
+      expect(latexToUnicode(`${"{".repeat(100)}x${"}".repeat(100)}`)).toContain("x");
+    });
+  });
 });

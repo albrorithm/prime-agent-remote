@@ -4,9 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       # Both versions always report. Cancelling the other run on the first
       # failure is how you learn that something broke without learning which
@@ -25,9 +29,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
-      - run: npm ci
-      - run: npm run typecheck
+      # --ignore-scripts skips `prepare`, which would run the build here and
+      # then again for `smoke`; `build` already runs `typecheck` first. One
+      # build, one typecheck, then the suite and the smoke test against it.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
       - run: npm test
       # End to end against the built artifacts. It caught nothing for a day
       # because it only ran when someone remembered to run it.
-      - run: npm run smoke
+      - run: node scripts/smoke.mjs

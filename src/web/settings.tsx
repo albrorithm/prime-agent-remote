@@ -179,14 +179,14 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }, [settings, systemPrefersDark]);
 
   // Persisting here rather than in the setters keeps the state updaters pure —
-  // StrictMode invokes those twice in dev. The first run is skipped so merely
-  // opening the app doesn't write defaults over a payload a newer build wrote.
-  const loadedRef = useRef(false);
+  // StrictMode invokes those twice in dev. Written only once something has
+  // changed, so merely opening the app doesn't write defaults over a payload a
+  // newer build wrote. A "first run" flag did not survive StrictMode's
+  // setup → cleanup → setup, which ran the effect a second time with the ref
+  // already set and wrote on open anyway.
+  const dirtyRef = useRef(false);
   useEffect(() => {
-    if (!loadedRef.current) {
-      loadedRef.current = true;
-      return;
-    }
+    if (!dirtyRef.current) return;
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     } catch {
@@ -195,10 +195,14 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }, [settings]);
 
   const setSetting = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
+    dirtyRef.current = true;
     setSettings((current) => ({ ...current, [key]: value }));
   }, []);
 
-  const resetSettings = useCallback(() => setSettings({ ...DEFAULT_SETTINGS }), []);
+  const resetSettings = useCallback(() => {
+    dirtyRef.current = true;
+    setSettings({ ...DEFAULT_SETTINGS });
+  }, []);
 
   const value = useMemo<SettingsContextValue>(() => ({
     settings,

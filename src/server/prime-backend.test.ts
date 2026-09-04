@@ -923,6 +923,16 @@ describe("PrimeBackend", () => {
       });
       expect(nameResult.result).toEqual({ kind: "name", name: "Renamed safely" });
 
+      // The same rule the rename route applies: a control character is not a
+      // label, however short the string. Refused before the adapter sees it.
+      await expect(backend.executeSlashCommand({
+        agentId: summary.id,
+        requestId: crypto.randomUUID(),
+        expectedRevision: nameResult.revision,
+        name: "name",
+        args: "tab\there",
+      })).rejects.toThrow(/single line/);
+
       const contextResult = await backend.executeSlashCommand({
         agentId: summary.id,
         requestId: crypto.randomUUID(),

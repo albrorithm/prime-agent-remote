@@ -245,6 +245,30 @@ describe("useSlashCommandMenu navigation and selection", () => {
     expect(setDrafts).not.toHaveBeenCalled();
   });
 
+  it("Enter falls through once the draft is the option suggestion it would write", async () => {
+    const withOptions: SlashCommandCatalog = {
+      ...catalog,
+      commands: [...catalog.commands, {
+        name: "model",
+        description: "Switch model",
+        source: "adapter",
+        availability: "available",
+        takesArguments: true,
+        options: [{ value: "openai/other", label: "openai/other" }, { value: "openai/current", label: "openai/current", current: true }],
+      }],
+    };
+    const draft = "/model openai/other";
+    const loadSlashCommands = vi.fn().mockResolvedValue(withOptions);
+    const { result, setDrafts, rerender, setAttachmentStatus, textareaRef, closeOptions } = setup({ draft, loadSlashCommands });
+    await flushMicrotasks();
+    rerender({ id: "agent-1", draft, canSend: true, optionsOpen: false, sending: false, loadSlashCommands, setDrafts, setAttachmentStatus, textareaRef, closeOptions });
+    expect(result.current.activeSlashCommand?.argumentValue).toBe("openai/other");
+    let handled = false;
+    act(() => { handled = result.current.handleTextareaKeyDown(key({ key: "Enter" })); });
+    expect(handled).toBe(false);
+    expect(setDrafts).not.toHaveBeenCalled();
+  });
+
   it("Escape dismisses the menu only for the current draft", async () => {
     const { result, rerender } = await readyResult("/goal");
     act(() => { result.current.handleTextareaKeyDown(key({ key: "Escape" })); });

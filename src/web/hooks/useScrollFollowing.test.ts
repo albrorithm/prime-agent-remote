@@ -125,14 +125,12 @@ describe("useScrollFollowing", () => {
     Object.defineProperty(navigator, "vibrate", { configurable: true, value: undefined });
   });
 
-  it("jumpToLatest resumes following and scrolls smoothly", () => {
+  it("jumpToLatest resumes following and pins the scroller", () => {
     const { result } = renderHook((props) => useScrollFollowing(props), {
       initialProps: baseOptions(),
     });
     const scroller = document.createElement("div");
     constrainScroll(scroller);
-    const scrollTo = vi.fn();
-    scroller.scrollTo = scrollTo;
     Object.defineProperty(result.current.scrollRef, "current", { configurable: true, value: scroller, writable: true });
     scroller.scrollTop = 100;
     act(() => {
@@ -144,10 +142,10 @@ describe("useScrollFollowing", () => {
       result.current.jumpToLatest();
     });
     expect(result.current.following).toBe(true);
-    expect(scrollTo).toHaveBeenCalledWith({ top: scroller.scrollHeight, behavior: "smooth" });
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
   });
 
-  it("handleTranscriptImageLoad clears unseen while following and bumps it otherwise", () => {
+  it("handleTranscriptImageLoad re-pins while following and leaves a reader of history alone", () => {
     const { result } = renderHook((props) => useScrollFollowing(props), {
       initialProps: baseOptions(),
     });
@@ -164,9 +162,11 @@ describe("useScrollFollowing", () => {
     act(() => {
       result.current.updateFollowing();
     });
+    // An old image lazy-loading as the reader scrolls up is not news.
     act(() => {
       result.current.handleTranscriptImageLoad();
     });
-    expect(result.current.unseen).toBe(1);
+    expect(result.current.unseen).toBe(0);
+    expect(scroller.scrollTop).toBe(100);
   });
 });

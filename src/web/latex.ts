@@ -577,17 +577,37 @@ function parenthesize(text: string): string {
   return isSimpleOperand(text) ? text : `(${text})`;
 }
 
+/**
+ * Groups nested deeper than this are rendered as literal braces rather than
+ * recursed into. Real math nests a handful deep; a few thousand unclosed `{`
+ * in a model's output would otherwise overflow the stack, and nothing above
+ * this module catches a throw from rendering.
+ */
+const MAX_GROUP_DEPTH = 64;
+
 class LatexParser {
   private readonly src: string;
   private pos = 0;
   private textMode = false;
+  private depth = 0;
 
   constructor(src: string) {
     this.src = src;
   }
 
   parse(): string {
-    return this.parseSequence();
+    let result = "";
+    // A sequence stops at a `}`; at the top level that brace closes nothing,
+    // so it is text, and the parse goes on. Stopping there silently dropped
+    // everything after a stray close brace.
+    while (this.pos < this.src.length) {
+      result += this.parseSequence();
+      if (this.src[this.pos] === "}") {
+        this.pos++;
+        result += "}";
+      }
+    }
+    return result;
   }
 
   /** Render atoms (with attached scripts) until a closing brace or end of input. */
@@ -635,11 +655,19 @@ class LatexParser {
   /** Consume "{...}" and render its contents. Assumes "{" at the current position. */
   private parseGroup(): string {
     this.pos++; // consume "{"
-    const content = this.parseSequence();
-    if (this.src[this.pos] === "}") {
-      this.pos++;
+    if (this.depth >= MAX_GROUP_DEPTH) {
+      return "{";
     }
-    return content;
+    this.depth++;
+    try {
+      const content = this.parseSequence();
+      if (this.src[this.pos] === "}") {
+        this.pos++;
+      }
+      return content;
+    } finally {
+      this.depth--;
+    }
   }
 
   /** Consume "[...]" and render its contents, or return undefined when absent. */
@@ -827,8 +855,14 @@ class LatexParser {
  * insignificant, and spacing commands otherwise leave double gaps.
  */
 export function latexToUnicode(tex: string): string {
-  return new LatexParser(tex)
-    .parse()
-    .replace(/[^\S\n]{2,}/g, " ")
-    .replace(/\n\s*\n/g, "\n");
+  try {
+    return new LatexParser(tex)
+      .parse()
+      .replace(/[^\S\n]{2,}/g, " ")
+      .replace(/\n\s*\n/g, "\n");
+  } catch {
+    // The promise is that the output is never worse than the source. A
+    // renderer that throws takes the whole transcript down with it.
+    return tex;
+  }
 }
