@@ -599,7 +599,6 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       const { deviceId } = parsed.data;
       const revokingSelf = auth.deviceIdFor(session) === deviceId;
       const reaped = await auth.revokeDevice(deviceId);
-      if (!reaped) { problem(res, 404, "No such device"); return true; }
       // Everything sign-out does, because this is sign-out aimed elsewhere: the
       // wake capability and the live socket both outlive the credential unless
       // they are taken too.
@@ -607,15 +606,30 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // By device first: `reaped` holds only sessions live in memory, and the
       // phone that matters is asleep or was paired before the last restart.
       // The session pass covers records from before they carried a device id.
-      await Promise.all([
-        pushStore.removeDevice(deviceId),
-        ...reaped.map((id) => pushStore.removeSession(id)),
-      ].map((pending) => pending.catch((error: unknown) => {
+      // Tried for a device that is already gone, too: a revoke whose push write
+      // failed is retried by revoking the same id again.
+      let pushDropped = 0;
+      let pushFailure: unknown;
+      try {
+        const dropped = await Promise.all([
+          pushStore.removeDevice(deviceId),
+          ...(reaped ?? []).map((id) => pushStore.removeSession(id)),
+        ]);
+        pushDropped = dropped.reduce((sum, count) => sum + count, 0);
+      } catch (error) {
+        pushFailure = error;
         console.error("Could not persist push revocation on device revoke", error);
-      })));
-      const sockets = reaped.flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
+      }
+      if (!reaped && !pushDropped && !pushFailure) { problem(res, 404, "No such device"); return true; }
+      const sockets = (reaped ?? []).flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       if (revokingSelf) auth.clearCredentials(res);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Device revoked");
+      if (pushFailure) {
+        // The credential is gone whatever happens next. What has not happened
+        // is durable, and a 200 would say it had.
+        problem(res, 500, "Device revoked, but its push subscriptions could not be dropped", "Revoke it again to retry.");
+        return true;
+      }
       json(res, 200, { revoked: true, self: revokingSelf });
       return true;
     }

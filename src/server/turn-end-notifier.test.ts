@@ -198,6 +198,20 @@ describe("TurnEndNotifier", () => {
     expect(h.sent).toEqual([]);
   });
 
+  /* A short command can start and finish between two polls, so the root is
+     never seen working. Its quiet clock still has to start at the request, not
+     at whenever it last went idle. */
+  it("restarts the quiet clock when an idle agent is asked for work", () => {
+    const h = harness();
+    h.set([agent({ id: "root", ...IDLE })]);
+    h.advance(120_000);
+    h.notifier.arm("root");
+    h.advance(10_000);
+    expect(h.sent).toEqual([]);
+    h.advance(40_000);
+    expect(h.sent).toEqual([{ agentId: "root", outcome: "complete" }]);
+  });
+
   // Work asked of a child is news about its root, the only agent watched.
   it("arms the root when a subagent is the one asked for work", () => {
     const h = harness();

@@ -620,7 +620,14 @@ export async function applyRevocation(
   await store.load();
 
   const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath) : undefined;
-  await pushStore?.load();
+  try {
+    await pushStore?.load({ strict: true });
+  } catch (error) {
+    // Before any write: a store that cannot be read cannot be revoked from,
+    // and reporting the credential revoked would hide the phone still woken.
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not read the push subscription store at ${pushStorePath}; nothing was revoked. ${reason}`);
+  }
 
   if (revoke === "all") {
     return { kind: "revoked-all", count: await store.revokeAll(), pushDropped: (await pushStore?.removeAll()) ?? 0 };

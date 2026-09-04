@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceStore } from "../server/device-store.js";
@@ -296,6 +296,16 @@ describe("applyRevocation", () => {
       await store.load();
       return store.list().map((record) => record.endpoint);
     }
+
+    // An unreadable store loads as empty in the gateway, deliberately. Here it
+    // would read as "nothing to drop" and the revocation would be reported as
+    // applied over a file that still wakes the phone.
+    it("refuses to revoke anything when the push store cannot be read", async () => {
+      const [phone] = await pair("iPhone");
+      await mkdir(pushStorePath());
+      await expect(applyRevocation(storePath, phone.device.id, pushStorePath())).rejects.toThrow(/push subscription store/);
+      expect(await remaining()).toEqual(["iPhone"]);
+    });
 
     it("drops push records by device, none for an unknown id, and every one on `all`", async () => {
       const [phone, tablet] = await pair("iPhone", "iPad");

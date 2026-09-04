@@ -172,6 +172,18 @@ describe("PushSubscriptionStore", () => {
     expect(store.list()[0].deviceId).toBeUndefined();
   });
 
+  it("tells a strict loader that an unreadable store is not an empty one", async () => {
+    const absent = new PushSubscriptionStore(storePath);
+    await absent.load({ strict: true });
+    expect(absent.list()).toEqual([]);
+
+    await mkdir(storePath, { recursive: true });
+    const unreadable = new PushSubscriptionStore(storePath);
+    await expect(unreadable.load({ strict: true })).rejects.toThrow();
+    await unreadable.load();
+    expect(unreadable.list()).toEqual([]);
+  });
+
   it("never persists when nothing matched, so an unreadable store is not truncated", async () => {
     await mkdir(path.dirname(storePath), { recursive: true });
     await writeFile(storePath, "{ not json", "utf8");

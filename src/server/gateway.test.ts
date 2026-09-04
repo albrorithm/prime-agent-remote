@@ -1442,6 +1442,34 @@ describe("device management routes", () => {
     expect(t.gateway.pushStore.list()).toEqual([]);
   });
 
+  /* The credential is gone the moment the device store says so; the wake
+     capability is gone only once the push store has written. A write that did
+     not land is reported, and the same revoke retried drops what it missed. */
+  it("reports a push cleanup that did not land, and drops it on the retry", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+    // Bound to a session that is gone, so only the device pass can reach it.
+    const stored = t.gateway.pushStore.list()[0];
+    await t.gateway.pushStore.upsert({ ...stored, sessionId: "session-from-a-previous-process" });
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)!.id;
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(t.gateway.pushStore, "removeDevice").mockRejectedValueOnce(new Error("disk full"));
+    try {
+      const first = await revokeDevice(t, keeper, doomedId);
+      expect(first.status).toBe(500);
+      expect(await listDevices(t, keeper)).toHaveLength(1);
+      expect(t.gateway.pushStore.list()).toHaveLength(1);
+
+      const retry = await revokeDevice(t, keeper, doomedId);
+      expect(retry.status).toBe(200);
+      expect(t.gateway.pushStore.list()).toEqual([]);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
   it("says so when a device revokes itself, and clears its own cookies", async () => {
     const t = await startGateway();
     const client = await pairClient(t);

@@ -110,12 +110,15 @@ export class PushSubscriptionStore {
    * localStorage — fall back to empty — because a gateway that will not start
    * because of its notification file is worse than one that cannot notify.
    */
-  async load(): Promise<void> {
+  async load(options: { strict?: boolean } = {}): Promise<void> {
     this.records = [];
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
-    } catch {
+    } catch (error) {
+      // Absent is empty. Unreadable is unknown, and a strict caller (the CLI,
+      // about to report a revocation as applied) must not take it for empty.
+      if (options.strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return;
     }
     if (raw.length > MAX_PUSH_STORE_BYTES) return;

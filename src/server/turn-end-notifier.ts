@@ -96,6 +96,9 @@ export class TurnEndNotifier {
   arm(agentId: string): void {
     const state = this.stateFor(this.rootOf(agentId));
     state.armed = true;
+    // A turn short enough to start and finish between two polls is never seen
+    // working; its quiet still has to be counted from now, not from before it.
+    if (state.idleSince !== null) state.idleSince = this.now();
   }
 
   /**
