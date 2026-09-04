@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
+import { writeSecretFileAtomically } from "./atomic-file.js";
 
 /** 32 bytes base64url is 43 characters, comfortably over the production floor. */
 const TOKEN_BYTES = 32;
@@ -50,15 +50,6 @@ export async function rotatePairingToken(filePath: string): Promise<string> {
   return token;
 }
 
-async function writeTokenAtomically(filePath: string, token: string): Promise<void> {
-  const directory = path.dirname(filePath);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(directory, `.${path.basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    await writeFile(temporary, `${token}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, filePath);
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
+function writeTokenAtomically(filePath: string, token: string): Promise<void> {
+  return writeSecretFileAtomically(filePath, `${token}\n`);
 }

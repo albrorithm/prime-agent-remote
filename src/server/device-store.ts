@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { writeSecretFileAtomically } from "./atomic-file.js";
 
 /**
  * A household pairs a handful of phones, not a fleet. The bound stops a
@@ -189,24 +189,8 @@ export class DeviceStore {
     return write;
   }
 
-  /**
-   * Sibling temp file then rename, mode 0600 throughout: the same discipline
-   * the push store uses, for the same reason. A rename inside one directory is
-   * atomic, so a crash mid-write leaves the previous file rather than a
-   * truncated one.
-   */
-  private async writeAtomically(devices: StoredDevice[]): Promise<void> {
-    const directory = path.dirname(this.filePath);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const temporary = path.join(directory, `.${path.basename(this.filePath)}.${randomBytes(6).toString("hex")}.tmp`);
-    const body = JSON.stringify({ version: STORE_VERSION, devices }, null, 2);
-    try {
-      await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.filePath);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw error;
-    }
+  private writeAtomically(devices: StoredDevice[]): Promise<void> {
+    return writeSecretFileAtomically(this.filePath, JSON.stringify({ version: STORE_VERSION, devices }, null, 2));
   }
 }
 

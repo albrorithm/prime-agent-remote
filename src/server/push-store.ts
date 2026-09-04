@@ -1,7 +1,6 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { writeSecretFileAtomically } from "./atomic-file.js";
 
 /**
  * A phone is one subscription, and this gateway pairs with a handful of
@@ -213,24 +212,8 @@ export class PushSubscriptionStore {
     }
   }
 
-  /**
-   * Writes a sibling temp file and renames over the target: a rename within
-   * one directory is atomic, so a crash mid-write leaves the previous file
-   * intact rather than a truncated one that `load` would discard. Mode 0600
-   * throughout — these records are a capability to wake someone's phone.
-   */
-  private async writeAtomically(records: StoredPushSubscription[]): Promise<void> {
-    const directory = path.dirname(this.filePath);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const temporary = path.join(directory, `.${path.basename(this.filePath)}.${randomBytes(6).toString("hex")}.tmp`);
-    const body = JSON.stringify({ version: STORE_VERSION, subscriptions: records }, null, 2);
-    try {
-      await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.filePath);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw error;
-    }
+  private writeAtomically(records: StoredPushSubscription[]): Promise<void> {
+    return writeSecretFileAtomically(this.filePath, JSON.stringify({ version: STORE_VERSION, subscriptions: records }, null, 2));
   }
 }
 
