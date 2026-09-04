@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CONFIG_FILE_VARIABLES } from "../server/config.js";
 
 /**
  * Point every operator-facing store at a throw-away directory, for the whole
@@ -18,14 +19,16 @@ import { join } from "node:path";
  * the redirect through process.env, and a future test cannot leak by
  * forgetting. Individual files may still redirect explicitly; this is the
  * floor, not a substitute.
+ *
+ * Enumerated from `CONFIG_FILE_VARIABLES` rather than listed by hand, the way
+ * `src/server/index.test.ts` already does it. The hand-kept list this replaces
+ * was missing `PRIME_WEB_VAPID_KEY_FILE` — one of the five — which is the same
+ * shape of leak the paragraph above describes, recurring because the list had
+ * to be remembered. Derived, a new store is redirected the moment it is added
+ * to the config.
  */
 const stores = mkdtempSync(join(tmpdir(), "prime-web-test-stores-"));
 
-for (const [name, file] of [
-  ["PRIME_WEB_DEVICE_STORE", "devices.json"],
-  ["PRIME_WEB_PUSH_STORE", "push-subscriptions.json"],
-  ["PRIME_WEB_PAIRING_TOKEN_FILE", "pairing-token"],
-  ["PRIME_WEB_STATE_FILE", "gateway.json"],
-] as const) {
-  process.env[name] = join(stores, file);
+for (const [field, variable] of Object.entries(CONFIG_FILE_VARIABLES)) {
+  process.env[variable] = join(stores, `${field}.json`);
 }

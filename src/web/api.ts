@@ -187,12 +187,18 @@ export async function loadCellOutput(cellId: string, options?: ApiRequestOptions
   }, options, cellOutputSchema);
 }
 
-async function mutate<T = MutationAccepted>(
+/**
+ * The schema is required, and that is the point: it is what decides the return
+ * type. A default of `mutationAcceptedSchema` needed a double cast to pretend
+ * it validated whatever `T` happened to be, which would have silently accepted
+ * a body the caller's type says it parsed. No caller ever used it.
+ */
+async function mutate<T>(
   path: string,
   csrfToken: string,
   body: unknown,
-  options?: ApiRequestOptions,
-  schema: ZodType<T> = mutationAcceptedSchema as unknown as ZodType<T>,
+  options: ApiRequestOptions | undefined,
+  schema: ZodType<T>,
 ): Promise<T> {
   return request<T>(path, {
     method: "POST",

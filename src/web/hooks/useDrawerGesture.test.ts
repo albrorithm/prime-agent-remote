@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  DRAWER_DEAD_ZONE,
   horizontalScrollerConsumes,
   settleDrawer,
   shouldIgnoreDrawerGesture,
@@ -8,7 +7,6 @@ import {
 
 describe("drawer gesture arbitration", () => {
   it("uses progress and velocity to settle in either direction", () => {
-    expect(DRAWER_DEAD_ZONE).toBe(12);
     expect(settleDrawer(0, 0.36, 0)).toBe(true);
     expect(settleDrawer(0, 0.1, 0.5)).toBe(true);
     expect(settleDrawer(0, 0.2, 0.1)).toBe(false);

@@ -1,8 +1,7 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import webPush from "web-push";
 import { DEFAULT_VAPID_SUBJECT, type WebPushConfig } from "./config.js";
+import { writeSecretFileAtomically } from "./atomic-file.js";
 
 /**
  * The gateway's own VAPID keypair, minted and persisted the first time.
@@ -94,15 +93,6 @@ export async function loadOrCreateVapidKeys(
   return { ...keys, subject };
 }
 
-async function writeKeysAtomically(filePath: string, keys: StoredKeys): Promise<void> {
-  const directory = path.dirname(filePath);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(directory, `.${path.basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    await writeFile(temporary, `${JSON.stringify(keys, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, filePath);
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
+function writeKeysAtomically(filePath: string, keys: StoredKeys): Promise<void> {
+  return writeSecretFileAtomically(filePath, `${JSON.stringify(keys, null, 2)}\n`);
 }

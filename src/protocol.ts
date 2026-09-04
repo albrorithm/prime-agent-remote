@@ -7,11 +7,9 @@ export type AgentActivityState = "working" | "idle" | "blocked";
 export type AttentionKind = "dialog" | "question" | "error";
 
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
-export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
 export const DIRECT_SLASH_COMMAND_NAMES = ["model", "effort", "name", "context", "heartbeat"] as const;
 export type DirectSlashCommandName = typeof DIRECT_SLASH_COMMAND_NAMES[number];
 export const EXECUTABLE_SLASH_COMMAND_NAMES = [...SESSION_SLASH_COMMAND_NAMES, ...DIRECT_SLASH_COMMAND_NAMES] as const;
-export type ExecutableSlashCommandName = typeof EXECUTABLE_SLASH_COMMAND_NAMES[number];
 
 export interface SlashCommandOption {
   value: string;
@@ -32,6 +30,25 @@ export interface SlashCommandCatalogEntry {
   takesArguments: boolean;
   options?: SlashCommandOption[];
 }
+
+export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
+
+/**
+ * The four session commands, for both sides of the wire: the gateway builds
+ * the real catalog from this and the browser falls back to it while the
+ * catalog loads, so the two cannot describe a command differently.
+ *
+ * No availability here: that is a property of an agent, decided per session.
+ */
+export const SESSION_SLASH_COMMAND_METADATA: Record<
+  SessionSlashCommandName,
+  Pick<SlashCommandCatalogEntry, "description" | "argumentHint" | "source" | "takesArguments">
+> = {
+  compact: { description: "Compact session context", argumentHint: "[instructions]", source: "session", takesArguments: true },
+  refine: { description: "Refine continual harness", argumentHint: "[--global] [instructions]", source: "session", takesArguments: true },
+  goal: { description: "Manage persistent goal", argumentHint: "[status|pause|resume|clear|objective]", source: "session", takesArguments: true },
+  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", takesArguments: true },
+};
 
 export interface SlashCommandCatalog {
   agentId: string;
@@ -724,13 +741,11 @@ export const attachFrameSchema = z.object({
   type: z.literal("attach"),
   version: z.literal(PROTOCOL_VERSION),
   streamId: z.string().min(1).max(160),
-  since: z
-    .object({
-      epoch: z.string().min(1).max(128),
-      seq: z.number().int().nonnegative(),
-    })
-    .nullable()
-    .optional(),
+  // The same shape the server stamps on every frame it sends, not a second
+  // copy of it: this is the cursor coming back, and a resume where the two
+  // definitions had drifted would fail validation for reasons neither side
+  // could see.
+  since: streamCursorSchema.nullable().optional(),
 });
 
 export const detachFrameSchema = z.object({
@@ -789,8 +804,6 @@ export const executeSlashCommandRequestSchema = z.object({
   args: z.string().trim().max(4_000).refine((value) => !/[\r\n\u2028\u2029]/u.test(value), "Command arguments must be one line"),
 }).strict();
 
-export type ExecuteSlashCommandRequest = z.infer<typeof executeSlashCommandRequestSchema>;
-
 export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
@@ -817,8 +830,6 @@ export const pushSubscriptionSchema = z.object({
     auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   }).strict(),
 }).strict();
-
-export type PushSubscriptionInput = z.infer<typeof pushSubscriptionSchema>;
 
 export const pushSubscribeRequestSchema = z.object({
   requestId: z.string().uuid(),

@@ -296,7 +296,7 @@ export function Composer() {
           maxLength={MAX_DRAFT_LENGTH}
           aria-autocomplete="list"
           aria-controls={slashMenu.slashMenuOpen ? "slash-command-options" : undefined}
-          aria-activedescendant={slashMenu.slashMenuOpen && slashMenu.activeSlashCommand && slashMenu.selectableSlashIndexes.length ? `slash-command-${slashMenu.activeSlashCommandIndex}` : undefined}
+          aria-activedescendant={slashMenu.slashMenuOpen && slashMenu.activeSlashCommand && slashMenu.slashSelectable ? `slash-command-${slashMenu.activeSlashCommandIndex}` : undefined}
           placeholder={wakeOnSend ? "Send a message to wake" : "Send a message"}
           disabled={!canCompose}
         />

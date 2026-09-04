@@ -9,6 +9,7 @@ import type {
 } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import type { AgentStatusTone } from "./agent-status";
+import { formatCoarseDuration } from "../duration";
 
 // The dashboard is the surface for what the transcript cannot show: overall
 // session status, context/token usage, real per-child stats, an advisory
@@ -40,15 +41,6 @@ const CHILD_LABEL: Record<SessionDashboardChildStatus, string> = {
   unknown: "Unknown",
 };
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
 function formatClock(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -64,7 +56,7 @@ function contextPercent(usage?: SessionContextUsage): number | undefined {
 function childMeta(child: SessionDashboardChild): string {
   const parts = [CHILD_LABEL[child.status]];
   if (child.status === "running" && child.toolName) parts.push(`using ${child.toolName}`);
-  if (child.durationMs !== undefined) parts.push(formatDuration(child.durationMs));
+  if (child.durationMs !== undefined) parts.push(formatCoarseDuration(child.durationMs / 1000));
   if (child.toolUseCount !== undefined) parts.push(`${child.toolUseCount} tool${child.toolUseCount === 1 ? "" : "s"}`);
   if (child.tokenCount !== undefined) parts.push(`${child.tokenCount.toLocaleString()} tokens`);
   return parts.join(" · ");

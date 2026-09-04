@@ -3,72 +3,12 @@ import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, type Settings } from "../settings";
-import { MessageContent, parseMessageBlocks, renderInline } from "./MessageContent";
+import { MessageContent, renderInline } from "./MessageContent";
 
 function render(ui: ReactElement, overrides: Partial<Settings> = {}) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...overrides }));
   return renderBare(ui, { wrapper: SettingsProvider });
 }
-
-describe("parseMessageBlocks", () => {
-  it("splits fenced code from prose and extracts the language", () => {
-    const blocks = parseMessageBlocks("Before\n```ts title=example\nconst x = 1;\n```\nAfter");
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0]).toEqual({ kind: "text", text: "Before\n" });
-    expect(blocks[1]).toEqual({ kind: "code", lang: "ts", code: "const x = 1;", streaming: false });
-    expect(blocks[2]).toEqual({ kind: "text", text: "\nAfter" });
-  });
-
-  it("supports tilde fences", () => {
-    expect(parseMessageBlocks("~~~python\nprint(1)\n~~~")).toEqual([
-      { kind: "code", lang: "python", code: "print(1)", streaming: false },
-    ]);
-  });
-
-  it("removes up to the opener indentation from fenced code", () => {
-    expect(parseMessageBlocks("  ```text\n  two spaces\n one space\nnone\n  ```")).toEqual([
-      { kind: "code", lang: "text", code: "two spaces\none space\nnone", streaming: false },
-    ]);
-  });
-
-  it("detects unterminated CRLF fences as streaming", () => {
-    expect(parseMessageBlocks("```js\r\nwork()\r\n")).toEqual([
-      { kind: "code", lang: "js", code: "work()\r\n", streaming: true },
-    ]);
-  });
-
-  it("treats an unterminated fence as streaming code", () => {
-    const blocks = parseMessageBlocks("Look:\n```python\nprint(1)");
-    expect(blocks).toHaveLength(2);
-    expect(blocks[1]).toEqual({ kind: "code", lang: "python", code: "print(1)", streaming: true });
-  });
-
-  it("keeps plain text intact when no fences exist", () => {
-    expect(parseMessageBlocks("just words")).toEqual([{ kind: "text", text: "just words" }]);
-  });
-
-  it("keeps JSON payloads as ordinary transcript text", () => {
-    const text = '{"type":"tool","payload":{"ok":true}}';
-    expect(parseMessageBlocks(text)).toEqual([{ kind: "text", text }]);
-  });
-
-  it("does not close a fence at a mid-line backtick run", () => {
-    expect(parseMessageBlocks("```js\nfoo ``` bar\nbaz\n```")).toEqual([
-      { kind: "code", lang: "js", code: "foo ``` bar\nbaz", streaming: false },
-    ]);
-  });
-
-  it("keeps a mid-line backtick run inside streaming code", () => {
-    expect(parseMessageBlocks("```js\nconst marker = ```;\nstill writing")).toEqual([
-      {
-        kind: "code",
-        lang: "js",
-        code: "const marker = ```;\nstill writing",
-        streaming: true,
-      },
-    ]);
-  });
-});
 
 describe("renderInline", () => {
   it("wraps inline code spans", () => {

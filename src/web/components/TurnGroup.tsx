@@ -159,21 +159,12 @@ export function turnSettled(rows: readonly TranscriptMessage[]): boolean {
   return splitTurn(rows).tail.length > 0 && !rows.some(rowActive);
 }
 
-export function summarizeTurnWork(work: readonly TranscriptMessage[]): { steps: number; durationMs: number } {
-  let durationMs = 0;
-  for (const row of work) {
-    const presentation = row.presentation;
-    if (presentation?.kind === "python" && presentation.durationMs) durationMs += presentation.durationMs;
-  }
-  return { steps: work.length, durationMs };
-}
-
 /**
  * How long the turn actually took, first row to last.
  *
- * The summary used to show summarizeTurnWork's durationMs, which only ever
- * added up python cell durations — so a turn that spent four minutes in tool
- * calls, model latency and network waits announced itself as "689ms". Row
+ * The summary used to sum python cell durations, and nothing else — so a turn
+ * that spent four minutes in tool calls, model latency and network waits
+ * announced itself as "689ms". Row
  * timestamps are the only end-to-end clock the transcript carries. Returns 0
  * when the span is unusable (single row, unparseable or backwards timestamps),
  * and the caller then shows the step count alone rather than a wrong number.
@@ -214,7 +205,6 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   const [userChoice, setUserChoice] = useState<boolean | undefined>(undefined);
   const { settings } = useSettings();
   const { prompt, segments } = splitTurnSegments(rows);
-  const work = segments.flatMap((segment) => segment.kind === "work" ? segment.rows : []);
   const settled = turnSettled(rows);
   // A live turn stays open whatever the setting says — its work is what the
   // user is watching. `turnsCollapsed` only decides where a turn lands once
@@ -227,12 +217,10 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   // mounted, so re-collapsing preserves whatever the user expanded inside them.
   const [everOpened, setEverOpened] = useState(open);
   const mountWork = open || everOpened;
-  const { steps } = summarizeTurnWork(work);
+  // The turn's end-to-end span, which rides on the first work block below;
+  // later blocks time only their own run.
   const durationMs = turnWallClockMs(rows);
-  const stepsLabel = `${steps} step${steps === 1 ? "" : "s"}`;
-  const countsLabel = durationMs > 0 ? `${stepsLabel} · ${formatWorkDuration(durationMs)}` : stepsLabel;
   const useRecap = settled && Boolean(recap);
-  const summaryText = !settled ? `Working… · ${stepsLabel}` : useRecap ? recap! : countsLabel;
 
   const toggle = (event: { preventDefault: () => void }) => {
     event.preventDefault();

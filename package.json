@@ -14,7 +14,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.2"
   },
   "scripts": {
     "dev": "concurrently -k -n gateway,web -c blue,magenta \"npm:dev:gateway\" \"npm:dev:web\"",

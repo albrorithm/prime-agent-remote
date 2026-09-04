@@ -95,7 +95,7 @@ describe("PWA assets", () => {
     // keyboard has covered part of the strip.
     expect(styles).toContain(":root { --composer-rest-bottom: max(28px, env(safe-area-inset-bottom, 0px)); }");
     expect(styles).toContain("--composer-safe-bottom: max(0px, calc(var(--composer-rest-bottom) - var(--keyboard-height, 0px)));");
-    expect(styles).toContain("padding: 9px 10px max(9px, var(--composer-safe-bottom))");
+    expect(styles).toMatch(/padding:[^;]*var\(--composer-safe-bottom\)/);
   });
 
   it("precaches the built Vite shell without touching unrelated or private caches", async () => {

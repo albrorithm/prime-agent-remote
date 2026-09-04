@@ -5,27 +5,10 @@ import { latexToUnicode } from "../latex";
 import { useSettings } from "../settings";
 import { SyntaxHighlight } from "./SyntaxHighlight";
 
-export interface TextBlock {
-  kind: "text";
-  text: string;
-}
-
-export interface CodeBlockModel {
-  kind: "code";
-  lang: string;
-  code: string;
-  streaming: boolean;
-}
-
-export type MessageBlock = TextBlock | CodeBlockModel;
-
-type Segment = (TextBlock | CodeBlockModel) & { start: number };
-
 const FENCE_OPENER = /^( {0,3})(`{3,}|~{3,})(.*)\r?$/;
 // Keep streaming model output from repeatedly running an unbounded Markdown
 // parse on mobile. Longer output stays readable as plain text.
 const MARKDOWN_PARSE_MAX_CHARS = 64_000;
-const FENCE_SCAN_MAX_CHARS = 250_000;
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -145,86 +128,6 @@ function isExternalWebHref(href: string): boolean {
 
 function closeFencePattern(character: string, length: number): RegExp {
   return new RegExp(`^ {0,3}${character}{${length},}[ \t]*\r?$`);
-}
-
-/**
- * Split message text into fenced code blocks and prose runs.
- * Fences are recognized only at line starts (CommonMark), so a ``` run
- * inside a code body or mid-line never terminates a block early.
- */
-function parseSegments(text: string): Segment[] {
-  if (text.length > FENCE_SCAN_MAX_CHARS) {
-    return [{ kind: "text", text, start: 0 }];
-  }
-  const lines = text.split("\n");
-  const lineStarts: number[] = [];
-  let offset = 0;
-  for (const line of lines) {
-    lineStarts.push(offset);
-    offset += line.length + 1;
-  }
-
-  const segments: Segment[] = [];
-  let proseStart: number | null = 0;
-  let index = 0;
-  while (index < lines.length) {
-    const opener = FENCE_OPENER.exec(lines[index]);
-    // A backtick fence's info string cannot contain backticks; such lines are prose.
-    const validOpener = Boolean(opener && !(opener[2][0] === "`" && opener[3].includes("`")));
-    if (!validOpener) {
-      if (proseStart === null) proseStart = lineStarts[index];
-      index += 1;
-      continue;
-    }
-    if (proseStart !== null && proseStart !== lineStarts[index]) {
-      segments.push({ kind: "text", text: text.slice(proseStart, lineStarts[index]), start: proseStart });
-    }
-    const openerIndent = opener![1].length;
-    const fenceCharacter = opener![2][0];
-    const fenceLength = opener![2].length;
-    const info = opener![3].trim();
-    const lang = info.split(/\s+/)[0] ?? "";
-
-    let closeIndex = -1;
-    const closer = closeFencePattern(fenceCharacter, fenceLength);
-    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-      if (closer.test(lines[cursor])) {
-        closeIndex = cursor;
-        break;
-      }
-    }
-    const start = lineStarts[index];
-    const codeEnd = closeIndex < 0 ? lines.length : closeIndex;
-    const code = lines
-      .slice(index + 1, codeEnd)
-      .map((line) => {
-        let remove = 0;
-        while (remove < openerIndent && line[remove] === " ") remove += 1;
-        return line.slice(remove);
-      })
-      .join("\n");
-    if (closeIndex < 0) {
-      segments.push({ kind: "code", lang, code, streaming: true, start });
-      return segments;
-    }
-    segments.push({ kind: "code", lang, code, streaming: false, start });
-    // Preserve the newline after the closing fence as prose, matching the
-    // previous parseMessageBlocks contract and keeping source offsets exact.
-    proseStart = lineStarts[closeIndex] + lines[closeIndex].length;
-    index = closeIndex + 1;
-  }
-  if (proseStart !== null && proseStart < text.length) {
-    segments.push({ kind: "text", text: text.slice(proseStart), start: proseStart });
-  }
-  return segments;
-}
-
-export function parseMessageBlocks(text: string): MessageBlock[] {
-  return parseSegments(text).map((segment) =>
-    segment.kind === "code"
-      ? { kind: segment.kind, lang: segment.lang, code: segment.code, streaming: segment.streaming }
-      : { kind: segment.kind, text: segment.text },
-  );
 }
 
 type InlinePart = string | ReactElement;

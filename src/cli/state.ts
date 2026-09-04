@@ -1,7 +1,7 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import path from "node:path";
+import { writeSecretFileAtomically } from "../server/atomic-file.js";
 
 /**
  * What a running gateway is, written where another process can read it.
@@ -54,17 +54,8 @@ export async function readGatewayState(filePath: string): Promise<GatewayState |
   }
 }
 
-export async function writeGatewayState(filePath: string, state: GatewayState): Promise<void> {
-  const directory = path.dirname(filePath);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(directory, `.${path.basename(filePath)}.${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, filePath);
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
+export function writeGatewayState(filePath: string, state: GatewayState): Promise<void> {
+  return writeSecretFileAtomically(filePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export async function clearGatewayState(filePath: string): Promise<void> {
