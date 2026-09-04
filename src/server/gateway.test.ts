@@ -979,6 +979,20 @@ describe("gateway API routes", () => {
     const experimental = await runCommand("demo-extension");
     expect(experimental.result.kind).toBe("experimental_accepted");
     expect(armed()).toBe(true);
+
+    // A retry with the same request id is answered from the cache without
+    // prompting the agent again, so it owes no notification: the turn it names
+    // may already have ended and been announced.
+    const revision = await agentRevision(t, client, agentId);
+    const headers = mutationHeaders(client);
+    const body = JSON.stringify({ requestId: randomUUID(), name: "compact", args: "", expectedRevision: revision });
+    const post = () => fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/commands`, { method: "POST", headers, body });
+    notifier.disarm(agentId);
+    expect((await post()).status).toBe(202);
+    expect(armed()).toBe(true);
+    notifier.disarm(agentId);
+    expect((await post()).status).toBe(202);
+    expect(armed()).toBe(false);
   });
 
   it("renames an agent, rejects a malformed name, and maps a refused capability to 403", async () => {

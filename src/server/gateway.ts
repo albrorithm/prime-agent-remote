@@ -497,11 +497,15 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`message:${agentId}`, parsed.data),
-        () => backend.sendMessage({ agentId, ...parsed.data, images }),
+        async () => {
+          const accepted = await backend.sendMessage({ agentId, ...parsed.data, images });
+          // Somebody asked this agent for work, so its next quiet is a finished
+          // turn. Inside the operation, not after it: a retried request id is
+          // answered from the cache without prompting the agent again.
+          turnEnd?.arm(agentId);
+          return accepted;
+        },
       );
-      // Somebody asked this agent for work, so its next quiet is a finished
-      // turn rather than a session that was already idle.
-      turnEnd?.arm(agentId);
       json(res, 202, result);
       return true;
     }
@@ -514,13 +518,17 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`command:${agentId}`, parsed.data),
-        () => backend.executeSlashCommand({ agentId, ...parsed.data }),
+        async () => {
+          const executed = await backend.executeSlashCommand({ agentId, ...parsed.data });
+          // Session and experimental commands prompt the agent like a message
+          // does, so their next quiet is a finished turn. Direct commands start
+          // no turn, and a cached retry (see the message route) prompts nothing.
+          if (executed.result.kind === "session_accepted" || executed.result.kind === "experimental_accepted") {
+            turnEnd?.arm(agentId);
+          }
+          return executed;
+        },
       );
-      // Session and experimental commands prompt the agent like a message does,
-      // so their next quiet is a finished turn. Direct commands start no turn.
-      if (result.result.kind === "session_accepted" || result.result.kind === "experimental_accepted") {
-        turnEnd?.arm(agentId);
-      }
       json(res, 202, result);
       return true;
     }

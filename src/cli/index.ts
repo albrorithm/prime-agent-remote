@@ -625,10 +625,12 @@ export async function applyRevocation(
   if (revoke === "all") {
     return { kind: "revoked-all", count: await store.revokeAll(), pushDropped: (await pushStore?.removeAll()) ?? 0 };
   }
-  if (await store.revoke(revoke)) {
-    return { kind: "revoked", id: revoke, pushDropped: (await pushStore?.removeDevice(revoke)) ?? 0 };
-  }
-  return { kind: "unknown", id: revoke, pushDropped: 0 };
+  // The push record is tried whether or not the device record is still there:
+  // a retry after a failed push write finds the device already gone, and the
+  // record it came for is the one still able to wake the phone.
+  const revoked = await store.revoke(revoke);
+  const pushDropped = (await pushStore?.removeDevice(revoke)) ?? 0;
+  return { kind: revoked ? "revoked" : "unknown", id: revoke, pushDropped };
 }
 
 /**

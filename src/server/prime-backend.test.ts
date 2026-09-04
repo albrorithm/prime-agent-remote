@@ -1163,7 +1163,10 @@ describe("PrimeBackend", () => {
       expect(queued?.capabilities).toMatchObject({ send: false, abort: false, resume: false });
       expect(agents.find((agent) => agent.name === "Quiet worker")).toMatchObject({ lifecycle: "starting" });
       expect(agents.find((agent) => agent.name === "Dead worker")).toMatchObject({ lifecycle: "failed" });
-      expect(agents.find((agent) => agent.name === "Stopping worker")).toMatchObject({ lifecycle: "stopped" });
+      expect(agents.find((agent) => agent.name === "Stopping worker")).toMatchObject({
+        lifecycle: "stopped",
+        capabilities: { send: false, abort: false, stop: false, respond: false },
+      });
     } finally {
       fixture.sessions = originalSessions;
       hub.close();

@@ -2436,8 +2436,10 @@ export class PrimeBackend implements AgentBackend {
       updatedAt: toIso(summary.lastActivityAt || summary.modified || summary.created),
       capabilities: {
         ...defaultCapabilities,
-        send: Boolean(summary.activeSessionId),
-        abort: Boolean(summary.activeSessionId && working),
+        // A stopping worker still names an active session, and is not one to
+        // send to, answer, or stop again.
+        send: Boolean(summary.activeSessionId) && !stopping,
+        abort: Boolean(summary.activeSessionId && working) && !stopping,
         resume: !summary.activeSessionId && typeof summary.sessionFile === "string" && Boolean(summary.sessionFile),
         // Structural, not probed: capabilities are stamped from the daemon's
         // `list` output with no connection in hand. A live session renames
@@ -2447,13 +2449,13 @@ export class PrimeBackend implements AgentBackend {
         rename: Boolean(summary.activeSessionId) || Boolean(summary.sessionFile),
         // Only a live session has something to end. `kill` takes an
         // activeSessionId, so a saved one has nothing to name.
-        stop: Boolean(summary.activeSessionId),
+        stop: Boolean(summary.activeSessionId) && !stopping,
         // The mirror image: `delete_saved_session` deletes a file, so a live
         // session has to be stopped before it can be deleted. That two-step is
         // deliberate — it is one more thing between a phone and an
         // irreversible loss.
         delete: !summary.activeSessionId && Boolean(summary.sessionFile),
-        respond: Boolean(summary.activeSessionId),
+        respond: Boolean(summary.activeSessionId) && !stopping,
         images: summary.model?.input?.includes("image") === true,
       },
     };

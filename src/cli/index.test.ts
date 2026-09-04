@@ -299,10 +299,15 @@ describe("applyRevocation", () => {
 
     it("drops push records by device, none for an unknown id, and every one on `all`", async () => {
       const [phone, tablet] = await pair("iPhone", "iPad");
-      // The third record is from before subscriptions carried a device id.
-      await subscribe(phone.device.id, tablet.device.id, undefined);
+      // The third record is from before subscriptions carried a device id; the
+      // fourth is what a revoke that wrote the device store and then failed on
+      // the push store leaves behind.
+      await subscribe(phone.device.id, tablet.device.id, undefined, "ghost");
 
       expect(await applyRevocation(storePath, "not-a-device", pushStorePath())).toMatchObject({ kind: "unknown", pushDropped: 0 });
+      expect(await endpoints()).toHaveLength(4);
+
+      expect(await applyRevocation(storePath, "ghost", pushStorePath())).toMatchObject({ kind: "unknown", pushDropped: 1 });
       expect(await endpoints()).toHaveLength(3);
 
       expect(await applyRevocation(storePath, phone.device.id, pushStorePath())).toMatchObject({ kind: "revoked", pushDropped: 1 });
