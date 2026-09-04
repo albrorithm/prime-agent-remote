@@ -34,17 +34,11 @@ export interface SlashCommandCatalogEntry {
 export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
 
 /**
- * What the four session commands are, for both sides of the wire.
+ * The four session commands, for both sides of the wire: the gateway builds
+ * the real catalog from this and the browser falls back to it while the
+ * catalog loads, so the two cannot describe a command differently.
  *
- * Here rather than in either consumer because both need it and this is the one
- * module they both compile: the gateway builds the real catalog from it, and
- * the browser falls back to it while the catalog is still loading. Written out
- * twice, the fallback the user sees before the catalog arrives could describe a
- * command differently from the catalog that replaces it a moment later.
- *
- * Availability is deliberately absent. It is not a property of a command but of
- * an agent — the gateway decides it per session, and the browser's fallback
- * assumes availability because a command it cannot run is not worth suggesting.
+ * No availability here: that is a property of an agent, decided per session.
  */
 export const SESSION_SLASH_COMMAND_METADATA: Record<
   SessionSlashCommandName,

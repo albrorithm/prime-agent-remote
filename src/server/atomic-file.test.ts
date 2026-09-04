@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,16 +17,10 @@ afterEach(async () => {
 });
 
 describe("writeSecretFileAtomically", () => {
-  it("creates the directory and writes the body exactly", async () => {
-    await writeSecretFileAtomically(filePath, "one\n");
-    expect(await readFile(filePath, "utf8")).toBe("one\n");
-  });
-
-  /* The two JSON stores write no trailing newline and the three single-value
-     files do. The helper must not decide that for them. */
-  it("adds nothing to a body that ends without a newline", async () => {
+  it("creates the directory, writes the body byte for byte, and leaves no temp file", async () => {
     await writeSecretFileAtomically(filePath, '{"version":1}');
     expect(await readFile(filePath, "utf8")).toBe('{"version":1}');
+    expect(await readdir(path.dirname(filePath))).toEqual(["secret.json"]);
   });
 
   // These files hold a pairing token, device secret hashes, a VAPID private
@@ -43,20 +37,14 @@ describe("writeSecretFileAtomically", () => {
     expect(await readFile(filePath, "utf8")).toBe("second");
   });
 
-  /* The temp file is a sibling so the rename stays within one directory, which
-     is what makes it atomic. It must not be left behind either way. */
-  it("leaves no temp file behind on success", async () => {
-    await writeSecretFileAtomically(filePath, "body");
-    expect(await readdir(path.dirname(filePath))).toEqual(["secret.json"]);
-  });
+  it("cleans up the temp file and rethrows when the rename cannot land", async () => {
+    // The temp file is written; the rename onto an existing directory is what
+    // fails. That is the catch branch, and the temp file must not survive it.
+    const occupied = path.join(root, "occupied");
+    await mkdir(occupied);
 
-  it("cleans up the temp file and rethrows when the write cannot land", async () => {
-    // A file where the directory has to go: mkdir fails, so nothing is written
-    // and nothing is left over.
-    const blocked = path.join(root, "occupied");
-    await writeFile(blocked, "not a directory", "utf8");
-
-    await expect(writeSecretFileAtomically(path.join(blocked, "secret.json"), "body")).rejects.toThrow();
-    expect(await readFile(blocked, "utf8")).toBe("not a directory");
+    await expect(writeSecretFileAtomically(occupied, "body")).rejects.toThrow();
+    expect((await stat(occupied)).isDirectory()).toBe(true);
+    expect(await readdir(root)).toEqual(["occupied"]);
   });
 });

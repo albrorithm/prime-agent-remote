@@ -218,10 +218,7 @@ function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
   const [everOpened, setEverOpened] = useState(open);
   const mountWork = open || everOpened;
   // The turn's end-to-end span, which rides on the first work block below;
-  // later blocks time only their own run. The per-block labels are built there
-  // rather than here — an outer steps/duration/summary chain used to be
-  // computed alongside this and rendered nowhere, superseded by the per-block
-  // version and left behind.
+  // later blocks time only their own run.
   const durationMs = turnWallClockMs(rows);
   const useRecap = settled && Boolean(recap);
 

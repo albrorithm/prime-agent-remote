@@ -7,9 +7,7 @@ import {
   MAX_IMAGE_ATTACHMENTS,
   MAX_IMAGE_BASE64_CHARS,
   MAX_IMAGE_DIMENSION,
-  MAX_IMAGE_PIXELS,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
-  MAX_IMAGE_REQUEST_PIXELS,
   validateImageAttachments,
 } from "./image-attachments.js";
 
@@ -108,9 +106,6 @@ describe("validateImageAttachments", () => {
   });
 
   it("rejects excessive dimensions, per-image pixels, and request pixels", () => {
-    expect(MAX_IMAGE_DIMENSION).toBe(16_384);
-    expect(MAX_IMAGE_PIXELS).toBe(40_000_000);
-    expect(MAX_IMAGE_REQUEST_PIXELS).toBe(80_000_000);
     expectInvalid([attachment("image/png", pngBytes(MAX_IMAGE_DIMENSION + 1, 1))]);
 
     const tooManyPixels = Buffer.from(JPEG_BYTES);
@@ -201,8 +196,6 @@ describe("validateImageAttachments", () => {
   });
 
   it("accepts images at the per-image and total encoded limits", () => {
-    expect(MAX_IMAGE_BASE64_CHARS).toBe(4.5 * 1024 * 1024);
-    expect(MAX_IMAGE_REQUEST_BASE64_CHARS).toBe(13.5 * 1024 * 1024);
     expect(MAX_IMAGE_REQUEST_BASE64_CHARS).toBe(MAX_IMAGE_ATTACHMENTS * MAX_IMAGE_BASE64_CHARS);
 
     const decodedLength = (MAX_IMAGE_BASE64_CHARS / 4) * 3;

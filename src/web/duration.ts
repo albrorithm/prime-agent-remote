@@ -2,11 +2,9 @@
  * A duration at the coarsest unit that still says something: seconds under a
  * minute, whole minutes under an hour, then hours and minutes.
  *
- * Shared because `GoalStrip` and `SessionDashboard` had the same ladder written
- * out twice, differing only in that one was handed seconds and the other
- * milliseconds. `TurnGroup.formatWorkDuration` is deliberately not this: a turn
- * is often under a second, so it carries sub-second precision this would round
- * away to "0s".
+ * `TurnGroup.formatWorkDuration` is deliberately not this: a turn is often
+ * under a second, so it carries sub-second precision this would round away to
+ * "0s".
  */
 export function formatCoarseDuration(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds));

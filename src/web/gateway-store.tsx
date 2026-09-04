@@ -473,11 +473,8 @@ function socketUrl(): string {
 /** What an HTTP snapshot fetch yields: the snapshot, and whether the reducer may accept it at an unchanged revision. */
 interface LoadedAgent {
   snapshot: AgentSnapshot;
-  /**
-   * True when no realtime update touched this stream while the fetch was in
-   * flight. A snapshot at the same revision is then still the newest thing
-   * known; otherwise the socket has already said something more recent.
-   */
+  /** No realtime update touched this stream during the fetch, so an
+      equal-revision snapshot is still the newest thing known. */
   allowEqualRevision: boolean;
 }
 
@@ -594,14 +591,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  /**
-   * Hand a fetched snapshot to the reducer.
-   *
-   * Every caller reassembled the same action out of `loadAgentHttp`'s two
-   * fields, which is the only part of those call sites that was ever the same —
-   * each one's generation guard differs, and that difference is the thing worth
-   * reading.
-   */
+  /** Hand a fetched snapshot to the reducer. Each caller's generation guard differs; this part never did. */
   const dispatchLoadedSnapshot = useCallback((loaded: LoadedAgent) => {
     dispatch({
       type: "snapshot",
@@ -1292,15 +1282,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   }, [dispatchLoadedSnapshot, loadAgentHttp]);
 
   /**
-   * The shared body of an agent mutation: resolve the revision it must be
-   * applied against, run it, and either record the new revision or report the
-   * failure — all of it guarded on the session generation, so a mutation that
-   * lands after a sign-out or a re-bootstrap neither dispatches nor shows an
-   * error into a store that has moved on.
-   *
-   * `onSuccess` defaults to recording the new revision, which is what a
-   * mutation means. Only deletion opts out, because there is no agent left to
-   * carry one.
+   * The shared body of an agent mutation: resolve the revision to apply it
+   * against, run it, record the new revision or show the failure, all guarded
+   * on the session generation so nothing lands in a store that has moved on.
+   * `onSuccess` replaces the revision record; only deletion needs that, since
+   * there is no agent left to carry one.
    */
   const guardedMutation = useCallback(async <T extends MutationAccepted,>(
     agentId: string,

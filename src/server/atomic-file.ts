@@ -12,11 +12,9 @@ import path from "node:path";
  * empty rather than as an error. A truncated write would not fail loudly; it
  * would quietly unpair every device, or lose the pairing token.
  *
- * There is one copy of this because there were five, byte for byte, across the
+ * Every credential-bearing file the gateway owns comes through here: the
  * device store, the push store, the pairing token, the VAPID keypair and the
- * CLI's gateway state — every credential-bearing file the gateway owns. Any
- * hardening of the write discipline had to be applied five times, and would
- * have silently skipped whichever copy was missed.
+ * CLI's gateway state. Harden the write discipline once, in this function.
  *
  * `body` is written exactly as given. Callers differ on the trailing newline
  * (the two JSON stores write none, the three single-value files do), and that
