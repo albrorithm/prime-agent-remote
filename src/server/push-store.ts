@@ -23,13 +23,9 @@ export interface StoredPushSubscription {
   /** The gateway session that most recently claimed this endpoint. */
   sessionId: string;
   /**
-   * The paired device the claiming session descended from.
-   *
-   * Sessions are in memory and die with the process; the subscription
-   * deliberately does not. So a record bound only to a session is unreachable
-   * from a revocation the moment the gateway restarts or the 12-hour session
-   * expires — and the revoked phone keeps being woken. The device credential
-   * is the thing that outlives both, so the wake capability is bound to it.
+   * The paired device the claiming session descended from. Sessions die with
+   * the process and the subscription does not, so the wake capability is
+   * bound to the one credential a later revocation can still reach.
    */
   deviceId?: string;
   createdAt: string;

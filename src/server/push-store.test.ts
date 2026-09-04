@@ -122,18 +122,13 @@ describe("PushSubscriptionStore", () => {
     expect(await store.removeSession("session-a")).toBe(0);
   });
 
-  /* The case `removeSession` cannot reach. Sessions die with the process and
-     the subscription deliberately outlives it, so by the time anyone revokes a
-     phone they no longer hold, its record's sessionId matches nothing. Bound to
-     the device, the record is still reachable. */
+  // The case `removeSession` cannot reach: the record's session died with an
+  // earlier process, and only the device binding still names it.
   it("drops a revoked device's records however long ago its session died", async () => {
     const store = new PushSubscriptionStore(storePath);
     await store.load();
     await store.upsert(subscription({ endpoint: "https://push.example.test/phone", sessionId: "long-gone", deviceId: "device-a" }));
     await store.upsert(subscription({ endpoint: "https://push.example.test/laptop", sessionId: "live", deviceId: "device-b" }));
-
-    expect(await store.removeSession("long-gone")).toBe(1);
-    await store.upsert(subscription({ endpoint: "https://push.example.test/phone", sessionId: "long-gone", deviceId: "device-a" }));
 
     expect(await store.removeDevice("device-a")).toBe(1);
     expect(store.list().map((record) => record.endpoint)).toEqual(["https://push.example.test/laptop"]);

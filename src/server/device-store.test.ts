@@ -93,22 +93,16 @@ describe("DeviceStore", () => {
      the revoke handler had already collected the sessions it would reap, the
      session minted from it was reachable by nothing: absent from the device
      list, so a second revoke 404s, and alive until the session TTL. */
-  it("refuses a token whose device is revoked while the sighting is being written", async () => {
+  const removers: Array<[string, (store: DeviceStore, id: string) => Promise<unknown>]> = [
+    ["revoke", (store, id) => store.revoke(id)],
+    ["revokeAll", (store) => store.revokeAll()],
+  ];
+  it.each(removers)("refuses a token whose device %s removed while the sighting is being written", async (_name, remove) => {
     const store = new DeviceStore(filePath);
     const issued = await store.issue("phone");
 
     const verifying = store.verify(issued.token);
-    await expect(store.revoke(issued.device.id)).resolves.toBe(true);
-
-    await expect(verifying).resolves.toBeNull();
-  });
-
-  it("refuses a token whose device is caught by revokeAll mid-write", async () => {
-    const store = new DeviceStore(filePath);
-    const issued = await store.issue("phone");
-
-    const verifying = store.verify(issued.token);
-    await expect(store.revokeAll()).resolves.toBe(1);
+    await remove(store, issued.device.id);
 
     await expect(verifying).resolves.toBeNull();
   });

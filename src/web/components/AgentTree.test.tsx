@@ -38,11 +38,9 @@ describe("AgentTree", () => {
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
   });
 
-  /* Position and keyboard descent used to come from a local index built in
-     arrival order while the rows were rendered in priority order. A screen
-     reader then read the tree back to front, and ArrowRight skipped past the
-     first visible child — whenever the daemon changed an agent's activity or
-     attention, which is precisely the sort key. */
+  /* Rows render in priority order. An index built in arrival order had a
+     screen reader reading the tree back to front and ArrowRight skipping the
+     first visible child whenever activity, the sort key, changed. */
   it("reports position and descends in the order the rows are actually rendered", async () => {
     const reordered = [
       makeAgent("root", null, 0),

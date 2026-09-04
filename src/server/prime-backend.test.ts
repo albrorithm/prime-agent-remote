@@ -184,10 +184,7 @@ export class DaemonClient {
   // waiting on a stalled socket forever; a fixture that ignored timeoutMs could
   // not produce the state the bounded call exists for.
   async request(command, timeoutMs) {
-    // Whether the call asked for all is recorded because it decides which
-    // daemon-side branch answers: without it the supervisor replies from
-    // memory, with it it scans the whole session archive. The two cannot
-    // share a deadline.
+    // Whether "all" was asked for is recorded too: it picks the daemon branch, and so the deadline.
     if (typeof timeoutMs === "number") {
       state.requestTimeouts.push({ type: command.type, timeoutMs, ...(command.all === true ? { all: true } : {}) });
     }
@@ -260,9 +257,7 @@ export class DaemonClient {
       saved.sessionName = command.name;
       return { success: true, data: {} };
     }
-    // Both branches the supervisor really has: a bare list answers the roster,
-    // and only "all" goes off to scan the archive. Rejecting the roster-only
-    // form would have made the reconnect probe untestable.
+    // Both daemon branches: a bare list answers the roster; only "all" scans the archive.
     if (command.type !== "list") return { success: false, error: "unexpected command" };
     state.listCalls += 1;
     state.activeListRequests += 1;
@@ -276,9 +271,7 @@ export class DaemonClient {
       state.activeListRequests -= 1;
     }
   }
-  // The real 0.9 client is not an EventEmitter: it takes a close listener and
-  // hands back an unsubscribe. Modelling that is the only way to notice that
-  // the gateway used to register "close" on an "on" that has never existed.
+  // Shaped like the real 0.9 client: a close listener in, an unsubscribe back.
   onClose(listener) {
     state.closeListeners.add(listener);
     return () => { state.closeListeners.delete(listener); };
@@ -2802,12 +2795,8 @@ describe("PrimeBackend", () => {
     }
   });
 
-  /* The gateway registered its drop handler with `client.on("close", ...)`, and
-     no Prime Agent build has ever had `on` — DaemonClient is a plain class with
-     `onMessage`/`onClose`, not an EventEmitter. So the `typeof client.on !==
-     "function"` guard above it was always true, and the handler never armed at
-     all. The 2s catalog poll still noticed, which is why nothing looked broken;
-     this is about noticing at the moment the socket drops instead. */
+  /* Registered with `client.on("close")` before, which DaemonClient has never
+     had, so this never armed and only the 2s poll noticed a dropped socket. */
   it("starts reconnecting the moment the daemon socket closes, not at the next poll", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     fixture.listError = false;
@@ -2838,12 +2827,7 @@ describe("PrimeBackend", () => {
     }
   });
 
-  /* The daemon answers `list all` by scanning every saved transcript in a child
-     process it budgets five minutes for, so on a large session archive it is
-     slow without being stalled. Held to the roster-only five seconds, that
-     healthy daemon failed: `initialize` awaits the first refresh, so the gateway
-     would not start, and the reconnect ladder probed with the same request, so
-     it could never recover either. */
+  // See PRIME_CATALOG_LIST_TIMEOUT_MS: for an archive scan, slow is not stalled.
   it("gives the archive scan a budget the roster-only deadline would have failed", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     fixture.listError = false;

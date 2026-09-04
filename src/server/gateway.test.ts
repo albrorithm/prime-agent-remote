@@ -941,13 +941,9 @@ describe("gateway API routes", () => {
     expect(forbidden.status).toBe(403);
   });
 
-  /* A session command prompts the agent exactly as a message does, so its next
-     quiet is a finished turn. Nothing armed the notifier on this route, so
-     /compact, /refine and /goal ran and finished in silence on a locked phone —
-     the one case turn-end notifications exist for — recovered only by the 90s
-     self-arm, which short commands never reach. The direct commands read or
-     change a setting without starting a turn and must stay unarmed, or the
-     phone gets "turn complete" for a settings query. */
+  /* Session and experimental commands prompt the agent like a message does, so
+     their next quiet is a finished turn. Direct commands read or set something
+     and start no turn, so arming there would announce a settings read. */
   it("arms the turn-end notifier for commands that prompt the agent, and only those", async () => {
     const t = await startGateway({ config: { webPush: VAPID } });
     const client = await pairClient(t);
@@ -1414,12 +1410,8 @@ describe("device management routes", () => {
     expect(t.gateway.pushStore.list()).toEqual([]);
   });
 
-  /* The ordinary case, and the one the test above cannot reach: sessions live
-     in memory and die with the process, while the subscription is written to
-     disk precisely so it does not. So by the time anyone revokes a phone they
-     no longer hold, the record's sessionId names a session that no longer
-     exists — a revoke that reaped only live sessions would find nothing to
-     drop and leave the phone being woken indefinitely. */
+  /* The ordinary case: the record outlives the session that claimed it, so a
+     revoke that reaped only live sessions would leave this phone being woken. */
   it("drops the subscription of a device whose session died with an earlier process", async () => {
     const t = await startGateway({ config: { webPush: VAPID } });
     const keeper = await pairClient(t);

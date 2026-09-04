@@ -165,15 +165,10 @@ export async function reclaimPushSubscription(
 /**
  * Changes the turn-end preference on the subscription this device already has.
  *
- * Deliberately not `enablePush`. That unsubscribes and re-mints, which is right
- * when turning notifications on — an existing subscription may be bound to a
- * VAPID key the operator has since rotated — and wrong for a preference flip,
- * which has no reason to pay for it. Two ways it went wrong: a re-subscribe
- * that failed or was throttled left the device with no subscription at all, so
- * changing what you are notified *about* lost notifications entirely; and each
- * flip appended a fresh endpoint and orphaned the old one, so enough toggling
- * pushed other phones' records past the store's bound and silently stopped
- * waking them.
+ * Not `enablePush`: that unsubscribes and re-mints, which is right when turning
+ * notifications on (the old subscription may be bound to a rotated VAPID key)
+ * and wrong for a preference flip. A failed re-subscribe left the device with
+ * no subscription at all, and each flip orphaned an endpoint in a bounded store.
  *
  * Asks for no permission: the toggle only renders once notifications are on.
  */

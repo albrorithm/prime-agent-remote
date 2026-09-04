@@ -830,12 +830,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       replayingStreams.current.clear();
       const closeEvent = event as CloseEvent;
       // 1008 also carries "Invalid protocol frame", which must keep retrying,
-      // so the reason is load-bearing. These three strings are the gateway's
-      // auth-loss closes (src/server/gateway.ts): sign-out, device revocation,
-      // and expiry. The first two reach every tab sharing the reaped sessions,
-      // not just the one that acted — and for a revoked device this frame is
-      // the only notice it gets, since only the revoking device runs signOut()
-      // locally.
+      // so the reason is load-bearing. These are the gateway's three auth-loss
+      // closes, and for a revoked device this frame is the only notice it gets.
       if (closeEvent.code === 1008 && /session expired|signed out|device revoked/i.test(closeEvent.reason)) {
         resetForUnauthorized();
         return;
@@ -966,12 +962,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         resetForUnauthorized();
         return;
       }
-      /* A failed bootstrap or root snapshot says nothing about the transport.
-         If the socket is open it is still delivering events, and "offline" is a
-         claim nothing here can retract: plain `event` frames never reach
-         updateSocketPhase, so the banner would go on offering a Reconnect that
-         tears down a healthy socket. The per-agent retry is the right
-         affordance for a transcript that would not load. */
+      /* A failed bootstrap says nothing about the transport. "offline" is a
+         claim only a re-attach can retract, so on an open socket it would leave
+         a banner offering a Reconnect that tears down a healthy connection. */
       if (socketRef.current?.readyState === WebSocket.OPEN) updateSocketPhase();
       else dispatch({ type: "connection", value: "offline" });
       showError(humanizeError(error, "Could not start the app"));

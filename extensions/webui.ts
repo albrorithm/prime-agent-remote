@@ -83,26 +83,18 @@ export default function (pi: ExtensionAPI) {
 				try {
 					return await pi.exec(CLI, argv, { timeout: 120_000 });
 				} catch (error) {
-					// `pi.exec` resolves for every process outcome and throws only
-					// for a stale extension context, so this is not a failed
-					// command. It carries a message, which keeps it out of
-					// `couldNotRun` below and sends it to the generic error path.
+					// `pi.exec` throws only for a stale extension context. The message
+					// keeps this out of `couldNotRun` and on the generic error path.
 					return { stdout: "", stderr: error instanceof Error ? error.message : String(error), code: 1, killed: false };
 				}
 			};
 
 			/**
-			 * Whether the CLI could not be run at all, as opposed to running and
-			 * failing.
-			 *
-			 * There is no exit code for this. `pi.exec` spawns without a shell, so
-			 * a missing binary raises ENOENT on the child rather than the 127 a
-			 * shell would produce — and the host resolves that as code 1 with both
-			 * streams empty. Testing for 127 therefore never matched, and a
-			 * missing CLI reported "Web UI is not running. Starting it..." and
-			 * then "/webui status failed.", with nothing saying the command was
-			 * never found. Every failure path in the CLI itself prints something,
-			 * so silence plus a non-zero code is the signature.
+			 * Whether the CLI could not be run at all. There is no exit code for
+			 * it: `pi.exec` spawns without a shell, so a missing binary is ENOENT
+			 * on the child, which the host reports as code 1 with both streams
+			 * empty, never the 127 a shell would give. Every failure path in the
+			 * CLI itself prints something, so silence plus non-zero is the sign.
 			 */
 			const couldNotRun = (result: { code: number; stdout: string; stderr: string; killed?: boolean }) =>
 				result.code !== 0 && !result.killed && !result.stdout.trim() && !result.stderr.trim();

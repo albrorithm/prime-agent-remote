@@ -604,18 +604,12 @@ export type RevocationOutcome =
   | { kind: "unknown"; id: string; pushDropped: number };
 
 /**
- * Applies a revocation to the stores on disk. The caller owns the printing.
- *
- * Two stores, because a device credential and a push subscription are two
- * separate capabilities and only one of them lives in the device store. The
- * push record is the one that survives a restart, so an offline revocation
- * that skipped it would leave the phone it was aimed at still being woken.
- *
- * `all` clears the push store outright rather than matching device ids:
- * records written before subscriptions carried one have no id to match, and
- * "revoke all" means no device may be woken. Safe here in a way it would not
- * be in the gateway, because the caller has already stopped the gateway — the
- * same reasoning `revokeDevices` makes for the device store.
+ * Applies a revocation to both stores on disk; the caller owns the printing.
+ * The push record is the one that survives a restart, so skipping it would
+ * leave the phone still being woken. `all` clears the push store outright:
+ * records from before subscriptions carried a device id have nothing to match,
+ * and "revoke all" means no device may be woken. Safe because the caller has
+ * already stopped the gateway, as `revokeDevices` explains.
  */
 export async function applyRevocation(
   storePath: string,
@@ -707,9 +701,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
   } else {
     line(`No device with id ${outcome.id}.`);
   }
-  // Said out loud because it is the half of a revocation an operator cannot
-  // see: the credential is gone from a list they can print, the wake
-  // capability is not.
+  // The half of a revocation an operator cannot otherwise see.
   if (outcome.pushDropped > 0) {
     const plural = outcome.pushDropped === 1 ? "" : "s";
     line(`Dropped ${outcome.pushDropped} push subscription${plural}. Those devices stop being woken.`);

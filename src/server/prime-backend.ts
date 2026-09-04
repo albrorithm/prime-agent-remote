@@ -308,21 +308,14 @@ const CONTEXT_STATS_MIN_INTERVAL_MS = 20_000;
  */
 export const PRIME_LIST_TIMEOUT_MS = 5_000;
 /**
- * `list all` is not the same round trip. The supervisor answers the roster from
- * memory and returns early, but `all` sends it off to scan the session archive
- * in a child process — one sequential transcript read per saved session — which
- * the daemon itself budgets five minutes for. So this is transcript-proportional
- * work like the snapshot, not control-plane work, and holding it to five seconds
- * meant a large archive or a cold page cache failed a healthy daemon.
+ * `list all` is not the roster round trip: the supervisor scans the session
+ * archive in a child process, one transcript read per saved session, and
+ * budgets itself five minutes for it. Transcript-proportional work, like the
+ * snapshot, so a large archive or a cold cache is slow without being stalled.
  *
- * That failure was not a slow catalog: `initialize` awaits the first refresh, so
- * the gateway would not start at all, and once running the reconnect ladder
- * probed with the same request, so a daemon too slow to answer in five seconds
- * could never satisfy the probe that would have declared it healthy again.
- *
- * Thirty seconds rather than the daemon's own five minutes, because the mutation
- * routes await a catalog refresh: this budget is also the worst case a phone
- * spends waiting on rename, delete or stop.
+ * Thirty seconds rather than the daemon's five minutes because the mutation
+ * routes await a catalog refresh: this is also the worst case a phone spends
+ * waiting on rename, delete or stop.
  */
 export const PRIME_CATALOG_LIST_TIMEOUT_MS = 30_000;
 /**
@@ -1622,10 +1615,6 @@ export class PrimeBackend implements AgentBackend {
    * Notices a dropped socket at the moment it drops, rather than up to one
    * poll interval later when the next catalog refresh fails. The poll is the
    * dependable detector; this only makes it prompt.
-   *
-   * The previous version registered `client.on("close")`, which no Prime Agent
-   * build has ever had — `DaemonClient` is a plain class, not an EventEmitter —
-   * so the guard above it was always false and this never armed at all.
    */
   private observeClientDisconnect(client: PrimeDaemonClient): void {
     this.releaseClientCloseListener();
@@ -1690,11 +1679,8 @@ export class PrimeBackend implements AgentBackend {
       // but answers nothing would park here forever and stop the ladder from
       // ever reaching its next rung.
       //
-      // Deliberately roster-only. `all` would send the supervisor off to scan
-      // the whole session archive, making the liveness probe proportional to
-      // how much history is on disk rather than to whether the daemon is
-      // answering — so a big archive could keep the ladder from ever
-      // succeeding against a daemon that was fine.
+      // Roster-only: `all` would make the liveness probe proportional to how
+      // much history is on disk, not to whether the daemon is answering.
       const probe = await replacement.request({ type: "list" }, PRIME_LIST_TIMEOUT_MS);
       if (!probe.success) throw new Error("Prime daemon list failed");
     } catch {
@@ -2400,12 +2386,9 @@ export class PrimeBackend implements AgentBackend {
     const failed = summary.workerState === "failed" || summary.statusLabel === "failed";
     const recovering = summary.workerState === "starting" || summary.workerState === "recovering"
       || summary.statusLabel === "recovering";
-    /* Daemon schema revision 16 added a fifth worker state that is neither live
-       nor on its way back: a worker being torn down. Unhandled, it fell through
-       to "live" and the row read as a session you could send to. "stopped"
-       rather than "starting", because it is not coming back — and because
-       "stopped" is outside ANSWERABLE_ATTENTION_LIFECYCLES, so a stopping row
-       also stops badging the app with an attention the daemon would refuse. */
+    /* A "stopping" worker (daemon schema 16) is being torn down and not coming
+       back, so "stopped" rather than "starting". That also puts it outside
+       ANSWERABLE_ATTENTION_LIFECYCLES, so it stops badging the app. */
     const stopping = summary.workerState === "stopping";
     const lifecycle = queued
       ? "starting"

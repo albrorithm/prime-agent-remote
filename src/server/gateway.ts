@@ -100,11 +100,7 @@ export interface Gateway {
   hub: EventHub;
   auth: AuthService;
   pushStore: PushSubscriptionStore;
-  /**
-   * Null unless push is configured. Exposed for the same reason `pushStore` is:
-   * whether a route arms a turn is a property of that route, and there is no
-   * other way to observe it from outside without driving a whole push delivery.
-   */
+  /** Null unless push is configured. Exposed, like `pushStore`, so a test can see whether a route armed a turn. */
   turnEnd: TurnEndNotifier | null;
   shutdown(): Promise<void>;
 }
@@ -520,12 +516,8 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         mutationBinding(`command:${agentId}`, parsed.data),
         () => backend.executeSlashCommand({ agentId, ...parsed.data }),
       );
-      // A session or experimental command prompts the agent exactly as a
-      // message does, so its next quiet is a finished turn — and without this,
-      // /compact, /refine and /goal ran and finished in silence on a locked
-      // phone, which is the one case the notifier exists for. Only these two
-      // kinds: the direct commands read or change a setting without starting a
-      // turn, and arming there would push "finished" for a settings read.
+      // Session and experimental commands prompt the agent like a message does,
+      // so their next quiet is a finished turn. Direct commands start no turn.
       if (result.result.kind === "session_accepted" || result.result.kind === "experimental_accepted") {
         turnEnd?.arm(agentId);
       }
@@ -604,12 +596,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // wake capability and the live socket both outlive the credential unless
       // they are taken too.
       //
-      // By device first, and that is the case that matters: `reaped` holds only
-      // sessions still live in memory, so a phone that is asleep, or was paired
-      // before the last restart, reaps nothing and would otherwise keep its
-      // subscription — and go on being woken by a credential it no longer has.
-      // The session pass stays for records written before subscriptions carried
-      // a device id.
+      // By device first: `reaped` holds only sessions live in memory, and the
+      // phone that matters is asleep or was paired before the last restart.
+      // The session pass covers records from before they carried a device id.
       await Promise.all([
         pushStore.removeDevice(deviceId),
         ...reaped.map((id) => pushStore.removeSession(id)),
@@ -646,8 +635,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
               p256dh: request.subscription.keys.p256dh,
               auth: request.subscription.keys.auth,
               sessionId: session.id,
-              // The session is what claimed the endpoint; the device is what
-              // outlives the session, and so what a revocation can still find.
+              // What outlives the session, and so what a revocation can still find.
               deviceId: auth.deviceIdFor(session),
               createdAt: new Date().toISOString(),
               // Sent on every subscribe, including the one the app makes on

@@ -335,7 +335,13 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
-  it("turns an expired-session websocket close into centralized auth reset", async () => {
+  /* Three close reasons mean the credential is gone, and for a revoked device
+     this frame is the only word it gets: the revoking device runs signOut()
+     locally, every other tab bound to the reaped sessions sees nothing but the
+     1008. Unmatched, a reason read as an ordinary drop and the app stayed
+     interactive through a backoff and a wasted socket attempt while every
+     mutation 401'd. */
+  it.each(["Session expired", "Device revoked", "Signed out"])("turns a %s websocket close into centralized auth reset", async (reason) => {
     apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
     apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
     const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
@@ -343,27 +349,7 @@ describe("GatewayProvider recovery and state ownership", () => {
     const socket = MockWebSocket.instances[0];
     act(() => socket.open());
 
-    act(() => socket.close(1008, "Session expired"));
-
-    expect(result.current.authRequired).toBe(true);
-    expect(result.current.snapshots).toEqual({});
-    expect(result.current.catalog.agents).toEqual([]);
-  });
-
-  /* The third auth-loss close, and the one a revoked device learns about only
-     from this frame: the revoking device runs signOut() locally, every other
-     tab bound to the reaped sessions gets nothing but the 1008. Unmatched, it
-     read as an ordinary drop and the app stayed interactive through a backoff
-     and a wasted socket attempt while every mutation 401'd. */
-  it("turns a device-revoked websocket close into the same auth reset", async () => {
-    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
-    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
-    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
-    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
-    const socket = MockWebSocket.instances[0];
-    act(() => socket.open());
-
-    act(() => socket.close(1008, "Device revoked"));
+    act(() => socket.close(1008, reason));
 
     expect(result.current.authRequired).toBe(true);
     expect(result.current.snapshots).toEqual({});
