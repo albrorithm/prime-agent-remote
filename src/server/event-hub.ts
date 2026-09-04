@@ -37,6 +37,18 @@ const DEFAULT_REPLAY_BYTE_BUDGET = 1024 * 1024;
 export class EventHub {
   readonly epoch = randomUUID();
   private readonly streams = new Map<string, StreamState>();
+  /**
+   * The highest seq each stream id ever issued, kept across unregister.
+   *
+   * The epoch identifies the process, not a stream generation, so without this
+   * a re-registered id restarted numbering at 0 under an unchanged epoch — and
+   * a client holding a cursor from the previous generation would pass every
+   * check and be replayed only the events above its old seq, silently missing
+   * everything the new generation had already published. Re-registration is
+   * ordinary: the opaque id is derived from session identity, so an agent that
+   * drops out of a catalog refresh and comes back gets the same id.
+   */
+  private readonly seqHighWater = new Map<string, number>();
   private closed = false;
 
   constructor(
@@ -52,9 +64,16 @@ export class EventHub {
       current.snapshot = structuredClone(snapshot);
       return;
     }
+    // Above every seq this id ever issued, not merely at it: a re-registered
+    // stream that has published nothing would otherwise sit exactly on a stale
+    // cursor, answer it with an empty replay, and leave the client on the
+    // snapshot it had before the discontinuity. One past the high-water makes
+    // every stale cursor fail the coverage check and get a fresh snapshot,
+    // which is the honest answer to a stream that restarted.
+    const previous = this.seqHighWater.get(streamId);
     this.streams.set(streamId, {
       id: streamId,
-      seq: 0,
+      seq: previous === undefined ? 0 : previous + 1,
       snapshot: structuredClone(snapshot),
       events: [],
       replayBytes: 0,
@@ -73,6 +92,7 @@ export class EventHub {
     });
     for (const registration of stream.listeners) registration.active = false;
     stream.listeners.clear();
+    this.seqHighWater.set(streamId, stream.seq);
     return this.streams.delete(streamId);
   }
 

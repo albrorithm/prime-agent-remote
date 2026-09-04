@@ -87,6 +87,32 @@ describe("DeviceStore", () => {
     await expect(store.verify(second.token)).resolves.not.toBeNull();
   });
 
+  /* `verify` writes lastSeenAt before returning, and `revoke` removes the
+     device synchronously before its own write. A resume sitting in that write
+     used to come back holding a device that had just been revoked — and since
+     the revoke handler had already collected the sessions it would reap, the
+     session minted from it was reachable by nothing: absent from the device
+     list, so a second revoke 404s, and alive until the session TTL. */
+  it("refuses a token whose device is revoked while the sighting is being written", async () => {
+    const store = new DeviceStore(filePath);
+    const issued = await store.issue("phone");
+
+    const verifying = store.verify(issued.token);
+    await expect(store.revoke(issued.device.id)).resolves.toBe(true);
+
+    await expect(verifying).resolves.toBeNull();
+  });
+
+  it("refuses a token whose device is caught by revokeAll mid-write", async () => {
+    const store = new DeviceStore(filePath);
+    const issued = await store.issue("phone");
+
+    const verifying = store.verify(issued.token);
+    await expect(store.revokeAll()).resolves.toBe(1);
+
+    await expect(verifying).resolves.toBeNull();
+  });
+
   it("reports a revoke that matched nothing", async () => {
     const store = new DeviceStore(filePath);
     await expect(store.revoke("never-existed")).resolves.toBe(false);

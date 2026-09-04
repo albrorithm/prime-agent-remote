@@ -103,6 +103,48 @@ describe("EventHub", () => {
   });
 
 
+  /* The epoch names the process, not a stream generation. A re-registered id
+     used to restart its seq at 0 under the same epoch, so a cursor held from
+     before the gap passed every check and was replayed only what sat above its
+     old seq — silently missing everything the new generation had published.
+     Ordinary, not exotic: the opaque id comes from session identity, so an
+     agent that drops out of a catalog refresh and returns gets the same id. */
+  it("answers a cursor from before a re-registration with a snapshot, not a partial replay", () => {
+    const hub = new EventHub();
+    hub.register("catalog", catalog(1));
+    hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(2) }, catalog(2));
+    const before = hub.attach("catalog", null, vi.fn())!;
+    const staleCursor = { epoch: hub.epoch, seq: 1 };
+    before.detach();
+    hub.unregister("catalog");
+
+    hub.register("catalog", catalog(3));
+    hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(4) }, catalog(4));
+
+    const resumed = hub.attach("catalog", staleCursor, vi.fn());
+    expect(resumed?.initial.type).toBe("snapshot");
+    if (resumed?.initial.type === "snapshot") expect(resumed.initial.snapshot).toEqual(catalog(4));
+    resumed?.detach();
+  });
+
+  // Same discontinuity, but the new generation has published nothing yet: the
+  // stream sits one past the high-water rather than on it, so the stale cursor
+  // still fails coverage instead of being answered with an empty replay.
+  it("answers a stale cursor with a snapshot even when the new stream is silent", () => {
+    const hub = new EventHub();
+    hub.register("catalog", catalog(1));
+    hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(2) }, catalog(2));
+    const staleCursor = { epoch: hub.epoch, seq: 1 };
+    hub.unregister("catalog");
+
+    hub.register("catalog", catalog(3));
+
+    const resumed = hub.attach("catalog", staleCursor, vi.fn());
+    expect(resumed?.initial.type).toBe("snapshot");
+    if (resumed?.initial.type === "snapshot") expect(resumed.initial.snapshot).toEqual(catalog(3));
+    resumed?.detach();
+  });
+
   it("keeps stale detach tokens from retaining or detaching a replacement stream", () => {
     const hub = new EventHub();
     const listener = vi.fn();
