@@ -614,21 +614,32 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // A revoke whose write failed left memory right and disk behind; the
       // same id revoked again is the retry, and matches nothing by then.
       const retryingWrite = failedPushRevocations.has(deviceId);
-      let pushDropped = 0;
+      // What this revoke has of its own to drop, read before the removal
+      // rather than inferred from it afterwards. `removeWhere` mutates memory
+      // and then writes, so a rejected write loses the count it would have
+      // returned — and a write is owed by the store, not by this request:
+      // once one device's write has failed, every later revoke re-persists and
+      // fails too. Taking that failure as evidence that this id was real is
+      // what let an id nothing has ever heard of answer "revoked".
+      const reapedSessions = new Set(reaped ?? []);
+      const heldPush = pushStore.list().some((record) =>
+        record.deviceId === deviceId || reapedSessions.has(record.sessionId));
       let pushFailure: unknown;
       try {
-        const dropped = await Promise.all([
+        await Promise.all([
           pushStore.removeDevice(deviceId),
           ...(reaped ?? []).map((id) => pushStore.removeSession(id)),
         ]);
-        pushDropped = dropped.reduce((sum, count) => sum + count, 0);
       } catch (error) {
         pushFailure = error;
         console.error("Could not persist push revocation on device revoke", error);
       }
+      // Before the set is touched: an id no part of this gateway knows must not
+      // be remembered as a revocation owing a write, or the next revoke of that
+      // same id would answer "revoked" on the strength of the record it left.
+      if (!reaped && !heldPush && !retryingWrite) { problem(res, 404, "No such device"); return true; }
       if (pushFailure) failedPushRevocations.add(deviceId);
       else failedPushRevocations.delete(deviceId);
-      if (!reaped && !pushDropped && !pushFailure && !retryingWrite) { problem(res, 404, "No such device"); return true; }
       const sockets = (reaped ?? []).flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       if (revokingSelf) auth.clearCredentials(res);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Device revoked");

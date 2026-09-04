@@ -1491,6 +1491,45 @@ describe("device management routes", () => {
     }
   });
 
+  /* A store that owes a write re-persists on every removal, hit or miss, so
+     once one device's write has failed every later revoke fails too. That
+     failure belongs to the device that caused it and to no other id. */
+  it("still says no such device while a push write is owed, and does not remember the id", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)!.id;
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const write = atomicFile.writeSecretFileAtomically;
+    let failPushWrite = true;
+    const writer = vi.spyOn(atomicFile, "writeSecretFileAtomically").mockImplementation((filePath, body) => {
+      if (failPushWrite && filePath === join(t.tmpDir, "push-subscriptions.json")) {
+        return Promise.reject(new Error("disk full"));
+      }
+      return write(filePath, body);
+    });
+    try {
+      expect((await revokeDevice(t, keeper, doomedId)).status).toBe(500);
+      expect(t.gateway.pushStore.hasPendingWrite).toBe(true);
+
+      // 404, not the 500 the owed write would otherwise borrow: nothing was
+      // revoked here, and "revoked, but the push write failed" would say one
+      // had been.
+      expect((await revokeDevice(t, keeper, "never-existed")).status).toBe(404);
+
+      // And the failure it walked through is not now filed under its name: the
+      // same id asked again, on a working disk, is still nobody.
+      failPushWrite = false;
+      expect((await revokeDevice(t, keeper, "never-existed")).status).toBe(404);
+      // The device that did fail still owns its retry.
+      expect((await revokeDevice(t, keeper, doomedId)).status).toBe(200);
+    } finally {
+      writer.mockRestore();
+      quiet.mockRestore();
+    }
+  });
+
   it("says so when a device revokes itself, and clears its own cookies", async () => {
     const t = await startGateway();
     const client = await pairClient(t);
