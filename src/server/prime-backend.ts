@@ -217,8 +217,12 @@ interface PrimeDaemonClient {
   connect(timeoutMs?: number): Promise<void>;
   request(command: Record<string, unknown>, timeoutMs?: number): Promise<PrimeResponse>;
   close(): void;
-  /** Newer daemon builds expose an emitter surface; older ones only fail requests. */
-  on?(event: string, listener: (...args: unknown[]) => void): unknown;
+  /**
+   * 0.9 clients register a close listener and hand back an unsubscribe. Not an
+   * emitter: `DaemonClient` is a plain class with `onMessage`/`onClose` and has
+   * never had `on`. Optional because an older build may only fail requests.
+   */
+  onClose?(listener: (error: Error) => void): () => void;
 }
 
 interface PrimeModule {
@@ -1539,6 +1543,8 @@ export class PrimeBackend implements AgentBackend {
   private readonly attentionListeners: AttentionListener[] = [];
   private module!: PrimeModule;
   private client!: PrimeDaemonClient;
+  /** Unsubscribes the current client's close listener; see observeClientDisconnect. */
+  private clientCloseUnsubscribe: (() => void) | undefined;
   private catalogState: CatalogSnapshot = { revision: 0, agents: [] };
   private rawSummaries = new Map<string, PrimeSessionSummary>();
   private publicBySession = new Map<string, string>();
@@ -1612,17 +1618,29 @@ export class PrimeBackend implements AgentBackend {
     }, this.catalogPollIntervalMs);
   }
 
+  /**
+   * Notices a dropped socket at the moment it drops, rather than up to one
+   * poll interval later when the next catalog refresh fails. The poll is the
+   * dependable detector; this only makes it prompt.
+   *
+   * The previous version registered `client.on("close")`, which no Prime Agent
+   * build has ever had — `DaemonClient` is a plain class, not an EventEmitter —
+   * so the guard above it was always false and this never armed at all.
+   */
   private observeClientDisconnect(client: PrimeDaemonClient): void {
-    if (typeof client.on !== "function") return;
-    const dropped = () => {
-      if (!this.closed && this.client === client) this.noteDaemonFailure();
-    };
-    // Subscribing to "error" also keeps an emitter-based client from crashing
-    // the process on an unhandled error event.
+    this.releaseClientCloseListener();
+    if (typeof client.onClose !== "function") return;
     try {
-      client.on("close", dropped);
-      client.on("error", dropped);
-    } catch { /* Emitter surface is optional. */ }
+      this.clientCloseUnsubscribe = client.onClose(() => {
+        if (!this.closed && this.client === client) this.noteDaemonFailure();
+      });
+    } catch { /* Close-listener surface is optional. */ }
+  }
+
+  /** So a superseded client's listener does not outlive the client. */
+  private releaseClientCloseListener(): void {
+    try { this.clientCloseUnsubscribe?.(); } catch { /* Best-effort cleanup. */ }
+    this.clientCloseUnsubscribe = undefined;
   }
 
   private noteDaemonFailure(): void {
@@ -2248,6 +2266,7 @@ export class PrimeBackend implements AgentBackend {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.releaseClientCloseListener();
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;

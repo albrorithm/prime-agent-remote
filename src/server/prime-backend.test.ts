@@ -45,6 +45,7 @@ interface FixtureState {
   deletes: Array<Record<string, unknown>>;
   deleteError?: string;
   listener: ((event: unknown) => void) | null;
+  closeListeners: Set<(error: Error) => void>;
   createError?: string;
   listError: boolean;
   connectError: boolean;
@@ -155,6 +156,7 @@ const fixture: FixtureState = {
   kills: [],
   deletes: [],
   listener: null,
+  closeListeners: new Set<(error: Error) => void>(),
   listError: false,
   connectError: false,
   snapshotError: false,
@@ -273,6 +275,13 @@ export class DaemonClient {
     } finally {
       state.activeListRequests -= 1;
     }
+  }
+  // The real 0.9 client is not an EventEmitter: it takes a close listener and
+  // hands back an unsubscribe. Modelling that is the only way to notice that
+  // the gateway used to register "close" on an "on" that has never existed.
+  onClose(listener) {
+    state.closeListeners.add(listener);
+    return () => { state.closeListeners.delete(listener); };
   }
   close() { state.clientsClosed += 1; }
 }
@@ -2775,6 +2784,42 @@ describe("PrimeBackend", () => {
       // close() instead of the assertion.
       await vi.advanceTimersByTimeAsync(15 * 60_000);
       vi.useRealTimers();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  /* The gateway registered its drop handler with `client.on("close", ...)`, and
+     no Prime Agent build has ever had `on` — DaemonClient is a plain class with
+     `onMessage`/`onClose`, not an EventEmitter. So the `typeof client.on !==
+     "function"` guard above it was always true, and the handler never armed at
+     all. The 2s catalog poll still noticed, which is why nothing looked broken;
+     this is about noticing at the moment the socket drops instead. */
+  it("starts reconnecting the moment the daemon socket closes, not at the next poll", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.closeListeners.clear();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    // Long enough that a poll cannot be what noticed.
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      expect(fixture.closeListeners.size).toBe(1);
+
+      for (const listener of [...fixture.closeListeners]) listener(new Error("socket closed"));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(error).toHaveBeenCalledWith("Prime daemon connection lost; reconnecting with backoff");
+      expect(Reflect.get(backend, "daemonState")).toBe("reconnecting");
+    } finally {
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      error.mockRestore();
       hub.close();
       await backend.close();
     }
