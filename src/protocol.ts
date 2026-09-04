@@ -418,6 +418,11 @@ const agentSummarySchema = z.object({
   parentId: z.string().nullable(),
   depth: z.number().int().nonnegative(),
   name: z.string(),
+  /* The interface has carried this since push landed; the schema had not, and
+     Zod strips what it does not declare — so the gateway set it, the wire
+     carried it, and the browser's parse deleted it before anything could read
+     it. Nothing was visibly broken only because no browser code reads it yet. */
+  notificationLabel: z.string().optional(),
   description: z.string().optional(),
   cwd: z.string().optional(),
   lifecycle: z.enum(["starting", "live", "inactive", "stopped", "failed"]),
