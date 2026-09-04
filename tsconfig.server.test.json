@@ -10,6 +10,10 @@
     "checkJs": false,
     "rootDir": "."
   },
-  "include": ["src/protocol.ts", "src/server/**/*.ts", "src/cli/**/*.ts", "scripts/**/*.mjs"],
+  // src/test and vitest.config.ts are here because nothing else checked them:
+  // tsconfig.json covers src/web and vite.config.ts, tsconfig.server.json
+  // covers src/server and src/cli. The suite-wide store redirect lives in
+  // src/test, which is exactly the kind of helper the comment above is about.
+  "include": ["src/protocol.ts", "src/server/**/*.ts", "src/cli/**/*.ts", "src/test/**/*.ts", "scripts/**/*.mjs", "vitest.config.ts"],
   "exclude": []
 }

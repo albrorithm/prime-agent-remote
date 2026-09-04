@@ -67,8 +67,14 @@ describe("hashBuiltServiceWorker", () => {
       rmSync(otherDir, { recursive: true, force: true });
     }
 
+    /* The placeholder is what the patch matches on, and the first call above
+       consumed it. Without restoring it this call returns null, and
+       `null !== first` passes while asserting nothing about the hash — which
+       is what it did. */
+    writeFileSync(join(outDir, "sw.js"), readFileSync(join(projectRoot, "public/sw.js"), "utf8"));
     writeStubShell("<html>shell v2 (changed)</html>", ["index-abc123.js", "index-def456.css"]);
     const changed = hashBuiltServiceWorker(outDir);
+    expect(changed).toMatch(/^[0-9a-f]{12}$/);
     expect(changed).not.toBe(first);
   });
 
