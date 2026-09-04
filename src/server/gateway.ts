@@ -588,7 +588,17 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // Everything sign-out does, because this is sign-out aimed elsewhere: the
       // wake capability and the live socket both outlive the credential unless
       // they are taken too.
-      await Promise.all(reaped.map((id) => pushStore.removeSession(id).catch((error: unknown) => {
+      //
+      // By device first, and that is the case that matters: `reaped` holds only
+      // sessions still live in memory, so a phone that is asleep, or was paired
+      // before the last restart, reaps nothing and would otherwise keep its
+      // subscription — and go on being woken by a credential it no longer has.
+      // The session pass stays for records written before subscriptions carried
+      // a device id.
+      await Promise.all([
+        pushStore.removeDevice(deviceId),
+        ...reaped.map((id) => pushStore.removeSession(id)),
+      ].map((pending) => pending.catch((error: unknown) => {
         console.error("Could not persist push revocation on device revoke", error);
       })));
       const sockets = reaped.flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
@@ -621,6 +631,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
               p256dh: request.subscription.keys.p256dh,
               auth: request.subscription.keys.auth,
               sessionId: session.id,
+              // The session is what claimed the endpoint; the device is what
+              // outlives the session, and so what a revocation can still find.
+              deviceId: auth.deviceIdFor(session),
               createdAt: new Date().toISOString(),
               // Sent on every subscribe, including the one the app makes on
               // each launch to re-claim its record. A subscribe that omitted it

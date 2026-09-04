@@ -11,6 +11,7 @@ import { type GatewayConfig, loadConfig } from "../server/config.js";
 import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
 import { resolvePrimeModule } from "../server/prime-module.js";
+import { PushSubscriptionStore } from "../server/push-store.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
 import { type ExposureMode, defaultExposureMode, resolveExposure, type Exposure } from "./exposure.js";
 import { isPrimeWebGatewayResponse } from "./gateway-identity.js";
@@ -598,17 +599,42 @@ async function token(options: Options): Promise<number> {
 }
 
 export type RevocationOutcome =
-  | { kind: "revoked"; id: string }
-  | { kind: "revoked-all"; count: number }
-  | { kind: "unknown"; id: string };
+  | { kind: "revoked"; id: string; pushDropped: number }
+  | { kind: "revoked-all"; count: number; pushDropped: number }
+  | { kind: "unknown"; id: string; pushDropped: number };
 
-/** Applies a revocation to the store on disk. The caller owns the printing. */
-export async function applyRevocation(storePath: string, revoke: string): Promise<RevocationOutcome> {
+/**
+ * Applies a revocation to the stores on disk. The caller owns the printing.
+ *
+ * Two stores, because a device credential and a push subscription are two
+ * separate capabilities and only one of them lives in the device store. The
+ * push record is the one that survives a restart, so an offline revocation
+ * that skipped it would leave the phone it was aimed at still being woken.
+ *
+ * `all` clears the push store outright rather than matching device ids:
+ * records written before subscriptions carried one have no id to match, and
+ * "revoke all" means no device may be woken. Safe here in a way it would not
+ * be in the gateway, because the caller has already stopped the gateway — the
+ * same reasoning `revokeDevices` makes for the device store.
+ */
+export async function applyRevocation(
+  storePath: string,
+  revoke: string,
+  pushStorePath?: string,
+): Promise<RevocationOutcome> {
   const store = new DeviceStore(storePath);
   await store.load();
-  if (revoke === "all") return { kind: "revoked-all", count: await store.revokeAll() };
-  if (await store.revoke(revoke)) return { kind: "revoked", id: revoke };
-  return { kind: "unknown", id: revoke };
+
+  const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath) : undefined;
+  await pushStore?.load();
+
+  if (revoke === "all") {
+    return { kind: "revoked-all", count: await store.revokeAll(), pushDropped: (await pushStore?.removeAll()) ?? 0 };
+  }
+  if (await store.revoke(revoke)) {
+    return { kind: "revoked", id: revoke, pushDropped: (await pushStore?.removeDevice(revoke)) ?? 0 };
+  }
+  return { kind: "unknown", id: revoke, pushDropped: 0 };
 }
 
 /**
@@ -673,13 +699,20 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     line();
   }
 
-  const outcome = await applyRevocation(config.deviceStorePath, revoke);
+  const outcome = await applyRevocation(config.deviceStorePath, revoke, config.webPushStorePath);
   if (outcome.kind === "revoked-all") {
     line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
   } else if (outcome.kind === "revoked") {
     line(`Revoked ${outcome.id}.`);
   } else {
     line(`No device with id ${outcome.id}.`);
+  }
+  // Said out loud because it is the half of a revocation an operator cannot
+  // see: the credential is gone from a list they can print, the wake
+  // capability is not.
+  if (outcome.pushDropped > 0) {
+    const plural = outcome.pushDropped === 1 ? "" : "s";
+    line(`Dropped ${outcome.pushDropped} push subscription${plural}. Those devices stop being woken.`);
   }
 
   if (!running) return outcome.kind === "unknown" ? 1 : 0;

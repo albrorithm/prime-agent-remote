@@ -122,6 +122,74 @@ describe("PushSubscriptionStore", () => {
     expect(await store.removeSession("session-a")).toBe(0);
   });
 
+  /* The case `removeSession` cannot reach. Sessions die with the process and
+     the subscription deliberately outlives it, so by the time anyone revokes a
+     phone they no longer hold, its record's sessionId matches nothing. Bound to
+     the device, the record is still reachable. */
+  it("drops a revoked device's records however long ago its session died", async () => {
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    await store.upsert(subscription({ endpoint: "https://push.example.test/phone", sessionId: "long-gone", deviceId: "device-a" }));
+    await store.upsert(subscription({ endpoint: "https://push.example.test/laptop", sessionId: "live", deviceId: "device-b" }));
+
+    expect(await store.removeSession("long-gone")).toBe(1);
+    await store.upsert(subscription({ endpoint: "https://push.example.test/phone", sessionId: "long-gone", deviceId: "device-a" }));
+
+    expect(await store.removeDevice("device-a")).toBe(1);
+    expect(store.list().map((record) => record.endpoint)).toEqual(["https://push.example.test/laptop"]);
+    expect((await readStore()).subscriptions).toHaveLength(1);
+    expect(await store.removeDevice("device-a")).toBe(0);
+  });
+
+  // Written before subscriptions carried a device id: unreachable by device,
+  // which is why `removeAll` and not `removeDevice` backs `--revoke all`.
+  it("leaves a record with no device id alone on removeDevice, and takes it on removeAll", async () => {
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    await store.upsert(subscription({ endpoint: "https://push.example.test/legacy" }));
+    await store.upsert(subscription({ endpoint: "https://push.example.test/phone", deviceId: "device-a" }));
+
+    expect(await store.removeDevice("device-a")).toBe(1);
+    expect(store.list().map((record) => record.endpoint)).toEqual(["https://push.example.test/legacy"]);
+
+    expect(await store.removeAll()).toBe(1);
+    expect(store.list()).toEqual([]);
+    expect((await readStore()).subscriptions).toEqual([]);
+  });
+
+  // Same reason turnEnd is optional: `.strict()` plus a fall-back-to-empty
+  // load means a required field silently unsubscribes everyone on upgrade.
+  it("reads a record written before subscriptions carried a device id", async () => {
+    await mkdir(path.dirname(storePath), { recursive: true });
+    const legacy = {
+      endpoint: "https://push.example.test/device",
+      p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU",
+      auth: "3v0fHqQhH3xQ1r6mB3dOsg",
+      sessionId: "session-1",
+      createdAt: "2026-08-27T00:00:00.000Z",
+      turnEnd: true,
+    };
+    await writeFile(storePath, JSON.stringify({ version: 1, subscriptions: [legacy] }), "utf8");
+
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0].deviceId).toBeUndefined();
+  });
+
+  it("never persists when nothing matched, so an unreadable store is not truncated", async () => {
+    await mkdir(path.dirname(storePath), { recursive: true });
+    await writeFile(storePath, "{ not json", "utf8");
+
+    const store = new PushSubscriptionStore(storePath);
+    await store.load();
+    expect(store.list()).toEqual([]);
+
+    expect(await store.removeDevice("device-a")).toBe(0);
+    expect(await store.removeAll()).toBe(0);
+    expect(await readFile(storePath, "utf8")).toBe("{ not json");
+  });
+
   it("removes a single endpoint and reports whether it was there", async () => {
     const store = new PushSubscriptionStore(storePath);
     await store.load();

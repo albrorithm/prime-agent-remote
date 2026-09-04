@@ -1370,6 +1370,28 @@ describe("device management routes", () => {
     expect(t.gateway.pushStore.list()).toEqual([]);
   });
 
+  /* The ordinary case, and the one the test above cannot reach: sessions live
+     in memory and die with the process, while the subscription is written to
+     disk precisely so it does not. So by the time anyone revokes a phone they
+     no longer hold, the record's sessionId names a session that no longer
+     exists — a revoke that reaped only live sessions would find nothing to
+     drop and leave the phone being woken indefinitely. */
+  it("drops the subscription of a device whose session died with an earlier process", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+
+    const stored = t.gateway.pushStore.list()[0];
+    expect(stored.deviceId).toBeDefined();
+    // What a restart leaves behind: the record survives, its session does not.
+    await t.gateway.pushStore.upsert({ ...stored, sessionId: "session-from-a-previous-process" });
+
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)?.id;
+    expect((await revokeDevice(t, keeper, doomedId!)).status).toBe(200);
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
   it("says so when a device revokes itself, and clears its own cookies", async () => {
     const t = await startGateway();
     const client = await pairClient(t);

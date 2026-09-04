@@ -22,6 +22,16 @@ export interface StoredPushSubscription {
   auth: string;
   /** The gateway session that most recently claimed this endpoint. */
   sessionId: string;
+  /**
+   * The paired device the claiming session descended from.
+   *
+   * Sessions are in memory and die with the process; the subscription
+   * deliberately does not. So a record bound only to a session is unreachable
+   * from a revocation the moment the gateway restarts or the 12-hour session
+   * expires — and the revoked phone keeps being woken. The device credential
+   * is the thing that outlives both, so the wake capability is bound to it.
+   */
+  deviceId?: string;
   createdAt: string;
   /**
    * Whether this device also asked to be told when an agent finishes its turn,
@@ -37,6 +47,13 @@ const storedSubscriptionSchema = z.object({
   p256dh: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   sessionId: z.string().min(1).max(256),
+  /* Optional for the same reason `turnEnd` is, below: records written before
+     this field existed lack it, and a required field would drop every one of
+     them on upgrade. Those legacy records stay reachable through
+     `removeSession` while their device is live, and re-acquire a `deviceId`
+     the next time the app re-claims its endpoint — which it does on every new
+     session. `removeAll` is what covers them when no device is live at all. */
+  deviceId: z.string().min(1).max(256).optional(),
   createdAt: z.string().min(1).max(64),
   /* Optional, and that is load-bearing rather than lax. Every record written
      before this field existed lacks it, `.strict()` rejects what it does not
@@ -151,8 +168,33 @@ export class PushSubscriptionStore {
 
   /** Sign-out revocation. Expiry deliberately has no equivalent. */
   async removeSession(sessionId: string): Promise<number> {
-    const remaining = this.records.filter((record) => record.sessionId !== sessionId);
+    return this.removeWhere((record) => record.sessionId === sessionId);
+  }
+
+  /**
+   * Device revocation. Unlike `removeSession` this reaches records whose
+   * session is long gone, which is the ordinary case for a phone that is
+   * asleep, or was paired before the last restart.
+   */
+  async removeDevice(deviceId: string): Promise<number> {
+    return this.removeWhere((record) => record.deviceId === deviceId);
+  }
+
+  /**
+   * Drops every record. For `devices --revoke all`, where the intent is that
+   * no device may be woken and legacy records carrying no `deviceId` must go
+   * too.
+   */
+  async removeAll(): Promise<number> {
+    return this.removeWhere(() => true);
+  }
+
+  private async removeWhere(doomed: (record: StoredPushSubscription) => boolean): Promise<number> {
+    const remaining = this.records.filter((record) => !doomed(record));
     const removed = this.records.length - remaining.length;
+    // Never persists on a miss: the CLI opens this store on a file it may not
+    // be able to read, which loads as empty, and a blind write would truncate
+    // a store that was merely unreadable.
     if (!removed) return 0;
     this.records = remaining;
     await this.persist();
