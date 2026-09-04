@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { writeSecretFileAtomically } from "./atomic-file.js";
+import { PersistQueue } from "./persist-queue.js";
 
 /**
  * A household pairs a handful of phones, not a fleet. The bound stops a
@@ -92,10 +92,16 @@ export interface IssuedDevice {
  */
 export class DeviceStore {
   private devices: StoredDevice[] = [];
-  /** Serializes writes so two concurrent mutations cannot interleave renames. */
-  private writes: Promise<unknown> = Promise.resolve();
+  private readonly file: PersistQueue;
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, persistRetryDelaysMs?: readonly number[]) {
+    this.file = new PersistQueue(filePath, () => JSON.stringify({ version: STORE_VERSION, devices: this.devices }, null, 2), {
+      retryDelaysMs: persistRetryDelaysMs,
+      onRetriesExhausted: () => console.error(
+        "Could not persist the device store after repeated attempts; a revoked device may return after a restart.",
+      ),
+    });
+  }
 
   /**
    * Never throws. A corrupt store costs everyone one re-pairing, which is
@@ -177,7 +183,10 @@ export class DeviceStore {
   /** Revocation is removal: there is nothing a revoked record would be for. */
   async revoke(id: string): Promise<boolean> {
     const remaining = this.devices.filter((device) => device.id !== id);
-    if (remaining.length === this.devices.length) return false;
+    if (remaining.length === this.devices.length) {
+      if (this.file.hasPendingWrite) await this.persist();
+      return false;
+    }
     this.devices = remaining;
     await this.persist();
     return true;
@@ -186,23 +195,14 @@ export class DeviceStore {
   /** Rotating the pairing token deliberately does not do this. */
   async revokeAll(): Promise<number> {
     const removed = this.devices.length;
-    if (!removed) return 0;
+    if (!removed && !this.file.hasPendingWrite) return 0;
     this.devices = [];
     await this.persist();
     return removed;
   }
 
   private persist(): Promise<void> {
-    const snapshot = this.devices.map((device) => ({ ...device }));
-    const write = this.writes.then(() => this.writeAtomically(snapshot), () => this.writeAtomically(snapshot));
-    // The tracked tail must never reject, or an earlier failure would reject
-    // every later write that merely queued behind it.
-    this.writes = write.catch(() => {});
-    return write;
-  }
-
-  private writeAtomically(devices: StoredDevice[]): Promise<void> {
-    return writeSecretFileAtomically(this.filePath, JSON.stringify({ version: STORE_VERSION, devices }, null, 2));
+    return this.file.persist();
   }
 }
 

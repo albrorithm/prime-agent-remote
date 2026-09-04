@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { writeSecretFileAtomically } from "./atomic-file.js";
+import { PersistQueue } from "./persist-queue.js";
 
 /**
  * A phone is one subscription, and this gateway pairs with a handful of
@@ -64,51 +64,20 @@ const storeFileSchema = z.object({
   subscriptions: z.array(z.unknown()).max(MAX_PUSH_SUBSCRIPTIONS * 4),
 });
 
-/**
- * How long to wait before re-attempting a write the disk rejected, and how
- * many times to try before giving up and just logging. Injectable so tests
- * don't have to wait on real backoff delays.
- */
-const DEFAULT_PERSIST_RETRY_DELAYS_MS = [1_000, 5_000, 15_000];
-
-/**
- * The gateway's only persistent state.
- *
- * Everything else here is in-memory and dies with the process, which is a
- * property the security model leans on. A push subscription cannot be: it is a
- * capability to wake a device, and it has to outlive both the process and the
- * 12-hour session cookie that authorized it, or push stops working overnight —
- * which is exactly when an agent that needs an answer is worth waking someone
- * for. Records are dropped by explicit sign-out, by an explicit unsubscribe,
- * and by a push service reporting the endpoint gone. Not by time.
- */
+/** Push subscriptions survive gateway restarts and session expiry. */
 export class PushSubscriptionStore {
   private records: StoredPushSubscription[] = [];
-  /** Serializes writes so two concurrent mutations cannot interleave renames. */
-  private writes: Promise<unknown> = Promise.resolve();
-  /**
-   * Tracks a pending re-attempt after a write failed. A failed write leaves
-   * `records` (already updated by the caller — see `removeEndpoint`) as the
-   * only correct view of state in this process, with the file on disk stale.
-   * Silently accepting that would let a revoked push subscription — a
-   * capability to wake someone's phone — survive a restart. So a failed
-   * persist is retried a bounded number of times with backoff instead of
-   * just logged and dropped. `unref()`ed so a store with a retry in flight
-   * never keeps the process alive on its own.
-   */
-  private persistRetryTimer: NodeJS.Timeout | undefined;
-  private persistRetryAttempt = 0;
-  /**
-   * Disk is behind memory: a write failed and none has landed since. Memory
-   * is already right, so a later mutation that matches nothing is still the
-   * write that is owed, and `removeWhere` persists on it.
-   */
-  private pendingWrite = false;
+  private readonly file: PersistQueue;
 
-  constructor(
-    private readonly filePath: string,
-    private readonly persistRetryDelaysMs: readonly number[] = DEFAULT_PERSIST_RETRY_DELAYS_MS,
-  ) {}
+  constructor(private readonly filePath: string, persistRetryDelaysMs?: readonly number[]) {
+    this.file = new PersistQueue(filePath, () => JSON.stringify({ version: STORE_VERSION, subscriptions: this.records }, null, 2), {
+      retryDelaysMs: persistRetryDelaysMs,
+      onRetriesExhausted: () => console.error(
+        "Could not persist a push subscription store change after repeated attempts; " +
+          "a revoked push subscription may return after a restart.",
+      ),
+    });
+  }
 
   /**
    * Reads the file if it is there and usable. Never throws: an unreadable or
@@ -149,7 +118,7 @@ export class PushSubscriptionStore {
 
   /** Whether the file has yet to catch up with a change already made here. */
   get hasPendingWrite(): boolean {
-    return this.pendingWrite;
+    return this.file.hasPendingWrite;
   }
 
   /**
@@ -170,7 +139,7 @@ export class PushSubscriptionStore {
 
   async removeEndpoint(endpoint: string): Promise<boolean> {
     const remaining = this.records.filter((record) => record.endpoint !== endpoint);
-    if (remaining.length === this.records.length && !this.pendingWrite) return false;
+    if (remaining.length === this.records.length && !this.file.hasPendingWrite) return false;
     this.records = remaining;
     await this.persist();
     return true;
@@ -205,69 +174,14 @@ export class PushSubscriptionStore {
     // Never persists on a miss, unless a write is already owed: the CLI opens
     // this store on a file it may not be able to read, which loads as empty,
     // and a blind write would truncate a store that was merely unreadable.
-    if (!removed && !this.pendingWrite) return 0;
+    if (!removed && !this.file.hasPendingWrite) return 0;
     this.records = remaining;
     await this.persist();
     return removed;
   }
 
   private persist(): Promise<void> {
-    const snapshot = this.records.map((record) => ({ ...record }));
-    const write = this.writes.then(() => this.writeAtomically(snapshot), () => this.writeAtomically(snapshot));
-    // The tracked tail must never reject, or an earlier failure would reject
-    // every later write that merely queued behind it.
-    this.writes = write.catch(() => {});
-    write.then(
-      () => this.onPersistSucceeded(),
-      () => this.onPersistFailed(),
-    );
-    return write;
-  }
-
-  private onPersistSucceeded(): void {
-    this.pendingWrite = false;
-    this.cancelPersistRetry();
-    this.persistRetryAttempt = 0;
-  }
-
-  /**
-   * Re-attempts the write with backoff. Every mutation (`upsert`,
-   * `removeEndpoint`, `removeSession`) already calls `persist()` again with
-   * whatever `records` looks like at that moment, so this timer only matters
-   * when nothing else touches the store in the meantime — the case a
-   * revocation right before a quiet restart falls into.
-   */
-  private onPersistFailed(): void {
-    this.pendingWrite = true;
-    this.cancelPersistRetry();
-    if (this.persistRetryAttempt >= this.persistRetryDelaysMs.length) {
-      // Retries exhausted. Say plainly what that means operationally rather
-      // than leaving it implicit: the stale record is still on disk.
-      console.error(
-        "Could not persist a push subscription store change after repeated attempts; " +
-          "a revoked push subscription may return after a restart.",
-      );
-      this.persistRetryAttempt = 0;
-      return;
-    }
-    const delay = this.persistRetryDelaysMs[this.persistRetryAttempt];
-    this.persistRetryAttempt += 1;
-    this.persistRetryTimer = setTimeout(() => {
-      this.persistRetryTimer = undefined;
-      void this.persist();
-    }, delay);
-    this.persistRetryTimer.unref?.();
-  }
-
-  private cancelPersistRetry(): void {
-    if (this.persistRetryTimer) {
-      clearTimeout(this.persistRetryTimer);
-      this.persistRetryTimer = undefined;
-    }
-  }
-
-  private writeAtomically(records: StoredPushSubscription[]): Promise<void> {
-    return writeSecretFileAtomically(this.filePath, JSON.stringify({ version: STORE_VERSION, subscriptions: records }, null, 2));
+    return this.file.persist();
   }
 }
 

@@ -55,6 +55,20 @@ describe("gateway state file", () => {
     expect(state?.serveManaged).toBeUndefined();
   });
 
+  // Read back by `devices --revoke` and `rebuild` so an internal restart does
+  // not silently republish Tailscale Serve for a `--no-serve` gateway.
+  it("remembers that this launcher was started with --no-serve", async () => {
+    await writeGatewayState(filePath, { ...sample, noServe: true });
+    await expect(readGatewayState(filePath)).resolves.toMatchObject({ noServe: true });
+  });
+
+  it("reads a state file that predates noServe as absent, not false", async () => {
+    await writeGatewayState(filePath, sample);
+    const state = await readGatewayState(filePath);
+    expect(state).not.toBeNull();
+    expect(state?.noServe).toBeUndefined();
+  });
+
   it("writes 0600, since it names a port someone may reach", async () => {
     await writeGatewayState(filePath, sample);
     expect((await stat(filePath)).mode & 0o777).toBe(0o600);

@@ -27,6 +27,8 @@ export interface GatewayState {
    * there — a mapping we did not create is not ours to remove.
    */
   serveManaged?: boolean;
+  /** Preserve an explicit --no-serve through internal restarts. */
+  noServe?: boolean;
 }
 
 const MAX_STATE_BYTES = 8 * 1024;
@@ -40,7 +42,8 @@ function isState(value: unknown): value is GatewayState {
     && typeof state.port === "number"
     && typeof state.mode === "string"
     && typeof state.backend === "string"
-    && typeof state.startedAt === "string";
+    && typeof state.startedAt === "string"
+    && (state.noServe === undefined || typeof state.noServe === "boolean");
 }
 
 export async function readGatewayState(filePath: string): Promise<GatewayState | null> {

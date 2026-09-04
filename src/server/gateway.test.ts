@@ -14,6 +14,7 @@ import { EventHub } from "./event-hub.js";
 import { createGateway, stableStringify, type Gateway } from "./gateway.js";
 import { PushService, type PushSender } from "./push-service.js";
 import { PushSubscriptionStore } from "./push-store.js";
+import * as atomicFile from "./atomic-file.js";
 import { MAX_PAIR_ATTEMPTS_PER_CLIENT } from "./auth.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 
@@ -1457,8 +1458,15 @@ describe("device management routes", () => {
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
     // The real removal runs and drops the record from memory; the write is
     // what fails. That is the state a retry has to be able to finish from.
-    const writer = t.gateway.pushStore as unknown as { writeAtomically: () => Promise<void> };
-    vi.spyOn(writer, "writeAtomically").mockRejectedValueOnce(new Error("disk full"));
+    const write = atomicFile.writeSecretFileAtomically;
+    let failPushWrite = true;
+    const writer = vi.spyOn(atomicFile, "writeSecretFileAtomically").mockImplementation((filePath, body) => {
+      if (failPushWrite && filePath === join(t.tmpDir, "push-subscriptions.json")) {
+        failPushWrite = false;
+        return Promise.reject(new Error("disk full"));
+      }
+      return write(filePath, body);
+    });
     try {
       const first = await revokeDevice(t, keeper, doomedId);
       expect(first.status).toBe(500);
@@ -1474,6 +1482,7 @@ describe("device management routes", () => {
       expect(t.gateway.pushStore.hasPendingWrite).toBe(false);
       expect(t.gateway.pushStore.list()).toEqual([]);
     } finally {
+      writer.mockRestore();
       quiet.mockRestore();
     }
   });

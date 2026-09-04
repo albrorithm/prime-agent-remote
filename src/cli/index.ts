@@ -16,7 +16,7 @@ import { demoConfigDir, demoEnv } from "./demo-stores.js";
 import { type ExposureMode, defaultExposureMode, resolveExposure, type Exposure } from "./exposure.js";
 import { isPrimeWebGatewayResponse } from "./gateway-identity.js";
 import { QrTooLongError, encodeQr, renderQr } from "./qr.js";
-import { clearGatewayState, isProcessAlive, resolveStatus, writeGatewayState } from "./state.js";
+import { type GatewayState, clearGatewayState, isProcessAlive, resolveStatus, writeGatewayState } from "./state.js";
 import {
   type PublishOutcome,
   publishServe,
@@ -152,6 +152,7 @@ export function parseArguments(argv: readonly string[]): Options {
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--tailscale" || argument === "--loopback" || argument === "--lan") {
+      if (options.mode) throw new Error("--tailscale, --loopback, and --lan are mutually exclusive.");
       options.mode = argument.slice(2) as ExposureMode;
     } else if (argument === "--demo") options.demo = true;
     else if (argument === "--foreground") options.foreground = true;
@@ -167,9 +168,9 @@ export function parseArguments(argv: readonly string[]): Options {
       index += 1;
     }
     else if (argument === "--port") {
-      const value = Number(argv[index + 1]);
-      if (!Number.isInteger(value)) throw new Error(`--port needs a number, not ${argv[index + 1] ?? "nothing"}`);
-      options.port = value;
+      const raw = argv[index + 1];
+      if (!raw || !/^[0-9]+$/u.test(raw)) throw new Error(`--port needs a number, not ${raw ?? "nothing"}`);
+      options.port = Number(raw);
       index += 1;
     } else throw new Error(`Unknown option ${argument}. Run \`prime-agent-remote help\`.`);
   }
@@ -213,17 +214,9 @@ function rebuildTargets(): RebuildTarget[] {
 }
 
 /**
- * Rebuilds without risking the working app.
- *
- * The gateway serves `dist/` from disk and is itself compiled into
- * `dist-server/` — and `npm run build` deletes `dist-server/` up front, before
- * typecheck or compilation, so ANY build failure (one TS error is enough)
- * leaves it gone. A broken edit would then take down a working install rather
- * than merely failing to change it: the bin symlink points at a file that no
- * longer exists, so even `rebuild` itself cannot run again to fix it. Both
- * previous builds are moved aside first and put back if the new one does not
- * finish. That is what makes an edit cheap to undo, which matters more than
- * making it careful.
+ * Back up both build directories before rebuilding. Typechecking precedes
+ * server cleanup, but a later compile or write can still fail after cleanup.
+ * Restore both backups on failure so the CLI and served app remain usable.
  */
 async function safeRebuild(): Promise<boolean> {
   const targets = rebuildTargets();
@@ -484,6 +477,7 @@ async function start(options: Options): Promise<number> {
     // Recorded only when this run created it, because that is exactly when
     // `stop` may take it down. A mapping someone else made outlives us.
     ...(serve?.published ? { serveManaged: true } : {}),
+    ...(options.noServe ? { noServe: true } : {}),
   });
 
   printStartupInfo(exposure, token, port, serve);
@@ -598,6 +592,20 @@ async function token(options: Options): Promise<number> {
   return 0;
 }
 
+/** Preserve the running gateway's exposure choices during internal restarts. */
+export function restartOptions(state: GatewayState): Options {
+  return {
+    command: "start",
+    mode: state.mode as ExposureMode,
+    port: state.port,
+    demo: state.backend === "demo",
+    foreground: false,
+    rotate: false,
+    noServe: state.noServe ?? false,
+    qr: false,
+  };
+}
+
 export type RevocationOutcome =
   | { kind: "revoked"; id: string; pushDropped: number }
   | { kind: "revoked-all"; count: number; pushDropped: number }
@@ -616,10 +624,11 @@ export async function applyRevocation(
   revoke: string,
   pushStorePath?: string,
 ): Promise<RevocationOutcome> {
-  const store = new DeviceStore(storePath);
+  // The gateway takes ownership again after this call; leave no background writes.
+  const store = new DeviceStore(storePath, []);
   await store.load();
 
-  const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath) : undefined;
+  const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath, []) : undefined;
   try {
     await pushStore?.load({ strict: true });
   } catch (error) {
@@ -706,16 +715,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     line();
     line("Starting it again...");
     line();
-    const restarted = await start({
-      command: "start",
-      mode: running!.mode as ExposureMode,
-      port: running!.port,
-      demo: running!.backend === "demo",
-      foreground: false,
-      rotate: false,
-      noServe: false,
-      qr: false,
-    });
+    const restarted = await start(restartOptions(running!));
     if (restarted !== 0) {
       line();
       line("The revocation is applied, but the gateway did not come back up.");
@@ -845,17 +845,11 @@ async function rebuild(options: Pick<Options, "demo">): Promise<number> {
 
   line();
   line("Rebuilt. Restarting the gateway so the change is actually live...");
-  await stop({ demo: before.state.backend === "demo" });
-  const restarted = await start({
-    command: "start",
-    mode: before.state.mode as ExposureMode,
-    port: before.state.port,
-    demo: before.state.backend === "demo",
-    foreground: false,
-    rotate: false,
-    noServe: false,
-    qr: false,
-  });
+  if (await stop({ demo: before.state.backend === "demo" }) !== 0) {
+    line("The rebuild finished, but the gateway could not be stopped. The new code is not live yet.");
+    return 1;
+  }
+  const restarted = await start(restartOptions(before.state));
   if (restarted !== 0) return restarted;
   line();
   line(`Verify the change at ${before.state.url} — that address, not another one.`);

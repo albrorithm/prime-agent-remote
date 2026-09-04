@@ -69,6 +69,12 @@ maximum age, which is the ceiling browsers enforce anyway.
 - Records are bounded in count and per-field size, written mode `0600` through
   a temp file and rename, and a corrupt store falls back to empty, which costs
   one re-pairing rather than a gateway that will not start.
+- Device and push-store writes are serialized and atomic. A failed write is
+  reported to the caller and retried after 1, 5, and 15 seconds using current
+  in-memory state. If all retries fail, the gateway logs that the file is stale;
+  a restart before persistence succeeds can restore a revoked record. CLI
+  revocations disable background retries because the restarted gateway takes
+  ownership of the files again.
 - Rotating the setup token does not revoke any device. Revoking a device does
   not affect the others.
 - Devices are listed and revoked from Settings → Paired devices in the app, or

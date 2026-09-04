@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceStore } from "../server/device-store.js";
 import { PushSubscriptionStore } from "../server/push-store.js";
-import { applyRevocation, connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
+import type { GatewayState } from "./state.js";
+import { restartOptions, applyRevocation, connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
 
 /* Every npm `bin` is a symlink, so this is the ordinary case, not an edge one:
    installed under its own name the CLI used to print nothing and exit 0 for
@@ -66,6 +67,25 @@ describe("parseArguments", () => {
   it("refuses a port that is not a number instead of starting on a guess", () => {
     expect(() => parseArguments(["start", "--port", "http"])).toThrow(/--port/u);
     expect(() => parseArguments(["start", "--port"])).toThrow(/--port/u);
+  });
+
+  // Number() alone reads "0x10", "1e2", and "-5" as integers; none of them is
+  // a port anyone typed on purpose, so digits-only matches config.ts's
+  // parseInteger.
+  it("refuses a port that Number() would accept but nobody typed on purpose", () => {
+    expect(() => parseArguments(["start", "--port", "0x10"])).toThrow(/--port/u);
+    expect(() => parseArguments(["start", "--port", "1e2"])).toThrow(/--port/u);
+    expect(() => parseArguments(["start", "--port", "-5"])).toThrow(/--port/u);
+    expect(() => parseArguments(["start", "--port", "3.5"])).toThrow(/--port/u);
+  });
+
+  // Silent last-wins meant `start --tailscale --loopback` bound loopback-only
+  // while claiming (and behaving like) a tailnet-published run, or the other
+  // way around, depending on flag order nobody was paying attention to.
+  it("refuses a second exposure flag instead of letting the last one win", () => {
+    expect(() => parseArguments(["start", "--tailscale", "--loopback"])).toThrow(/mutually exclusive/u);
+    expect(() => parseArguments(["start", "--loopback", "--lan"])).toThrow(/mutually exclusive/u);
+    expect(() => parseArguments(["start", "--tailscale", "--tailscale"])).toThrow(/mutually exclusive/u);
   });
 
   it("reads the standalone switches", () => {
@@ -261,6 +281,24 @@ describe("applyRevocation", () => {
     expect(await remaining()).toEqual(["iPhone"]);
   });
 
+  it("leaves no retry that can overwrite the gateway after a failed CLI revocation", async () => {
+    const [phone] = await pair("phone");
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await chmod(directory, 0o500);
+      await expect(applyRevocation(storePath, phone.device.id)).rejects.toThrow();
+      await chmod(directory, 0o700);
+      const restarted = new DeviceStore(storePath);
+      await restarted.load();
+      await restarted.issue("new phone");
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(await remaining()).toEqual(["phone", "new phone"]);
+    } finally {
+      await chmod(directory, 0o700);
+      quiet.mockRestore();
+    }
+  });
+
   it("counts what `all` actually removed", async () => {
     await pair("iPhone", "iPad", "Android");
     expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 3, pushDropped: 0 });
@@ -326,5 +364,36 @@ describe("applyRevocation", () => {
       expect(await applyRevocation(storePath, "all", pushStorePath())).toMatchObject({ kind: "revoked-all", count: 1, pushDropped: 2 });
       expect(await endpoints()).toEqual([]);
     });
+  });
+});
+
+describe("restartOptions", () => {
+  const state: GatewayState = {
+    pid: 4242,
+    url: "https://host.tailnet.ts.net",
+    host: "127.0.0.1",
+    port: 9001,
+    mode: "tailscale",
+    backend: "prime",
+    startedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("carries --no-serve forward when the running gateway was started with it", () => {
+    expect(restartOptions({ ...state, noServe: true }).noServe).toBe(true);
+  });
+
+  it("defaults to false for a state written before the field existed", () => {
+    expect(restartOptions(state).noServe).toBe(false);
+  });
+
+  it("carries the port, mode, and backend forward unchanged", () => {
+    const options = restartOptions({ ...state, backend: "demo" });
+    expect(options.port).toBe(9001);
+    expect(options.mode).toBe("tailscale");
+    expect(options.demo).toBe(true);
+    expect(options.command).toBe("start");
+    expect(options.foreground).toBe(false);
+    expect(options.rotate).toBe(false);
+    expect(options.qr).toBe(false);
   });
 });

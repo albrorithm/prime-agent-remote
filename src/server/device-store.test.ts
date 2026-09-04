@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -19,6 +19,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await chmod(directory, 0o700);
+  vi.restoreAllMocks();
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -211,5 +213,36 @@ describe("two writers on one store file", () => {
     expect(onDisk.some((device: { id: string }) => device.id === doomed.device.id)).toBe(true);
     // And it still verifies, because the in-memory copy never lost it.
     expect(await gateway.verify(doomed.token)).not.toBeNull();
+  });
+});
+
+
+describe("DeviceStore failed persistence", () => {
+  it("rejects revoked credentials immediately and retries their removal on disk", async () => {
+    const store = new DeviceStore(filePath, [10, 10, 10]);
+    const issued = await store.issue("phone");
+    await chmod(directory, 0o500);
+    await expect(store.revoke(issued.device.id)).rejects.toThrow();
+    await expect(store.verify(issued.token)).resolves.toBeNull();
+    expect(JSON.parse(await readFile(filePath, "utf8")).devices).toHaveLength(1);
+    await chmod(directory, 0o700);
+    await vi.waitFor(async () => expect(JSON.parse(await readFile(filePath, "utf8")).devices).toEqual([]));
+    const restarted = new DeviceStore(filePath);
+    await restarted.load();
+    await expect(restarted.verify(issued.token)).resolves.toBeNull();
+  });
+
+  it.each(["one", "all"])("persists a pending revocation on a repeated %s removal", async (kind) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new DeviceStore(filePath, []);
+    const issued = await store.issue("phone");
+    await chmod(directory, 0o500);
+    const remove = () => kind === "one" ? store.revoke(issued.device.id) : store.revokeAll();
+    await expect(remove()).rejects.toThrow();
+    await chmod(directory, 0o700);
+    await remove();
+    const restarted = new DeviceStore(filePath);
+    await restarted.load();
+    expect(restarted.list()).toEqual([]);
   });
 });
