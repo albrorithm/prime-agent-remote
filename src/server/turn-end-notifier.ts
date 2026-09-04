@@ -25,6 +25,12 @@ import type { AgentSummary, CatalogSnapshot } from "../protocol.js";
  *     which covers a turn started from the terminal rather than the app;
  *   - firing disarms it.
  *
+ * Arming says work was asked for; whether any happened is the catalog's to
+ * say. A notification needs the agent seen working since it was armed, or a
+ * settings read or an extension that answers directly would be announced as
+ * a finished turn. The cost is a turn short enough to start and finish between
+ * two polls, which goes unannounced; whoever sent it is still looking.
+ *
  * A three-second straggler reaches neither condition, so it cannot re-arm. Work
  * that runs long enough to pass `resumeMs` can, and that is intended: a
  * subagent that genuinely works for two minutes after the root went quiet is
@@ -68,6 +74,8 @@ interface AgentState {
   idleSince: number | null;
   /** When it last started working, or null while it is not. */
   workingSince: number | null;
+  /** Seen working since it was last armed while idle, or last notified. */
+  workSeen: boolean;
 }
 
 function isWatched(agent: AgentSummary): boolean {
@@ -96,9 +104,12 @@ export class TurnEndNotifier {
   arm(agentId: string): void {
     const state = this.stateFor(this.rootOf(agentId));
     state.armed = true;
-    // A turn short enough to start and finish between two polls is never seen
-    // working; its quiet still has to be counted from now, not from before it.
-    if (state.idleSince !== null) state.idleSince = this.now();
+    // Asked while idle: the quiet is counted from now, and whatever work was
+    // seen before belongs to a turn that already ended.
+    if (state.idleSince !== null) {
+      state.idleSince = this.now();
+      state.workSeen = false;
+    }
   }
 
   /**
@@ -139,6 +150,7 @@ export class TurnEndNotifier {
       const settled = !working && agent.activity === "idle";
 
       if (working) {
+        state.workSeen = true;
         state.idleSince = null;
         if (state.workingSince === null) state.workingSince = at;
         // Long enough to be a real turn rather than a straggler's few seconds.
@@ -155,9 +167,10 @@ export class TurnEndNotifier {
       }
 
       if (state.idleSince === null) state.idleSince = at;
-      if (!state.armed || at - state.idleSince < this.quietMs) continue;
+      if (!state.armed || !state.workSeen || at - state.idleSince < this.quietMs) continue;
 
       state.armed = false;
+      state.workSeen = false;
       this.options.notify({
         agentId: agent.id,
         outcome: agent.lifecycle === "failed" ? "failed" : "complete",
@@ -172,7 +185,7 @@ export class TurnEndNotifier {
   private stateFor(agentId: string): AgentState {
     const existing = this.states.get(agentId);
     if (existing) return existing;
-    const created: AgentState = { armed: false, idleSince: null, workingSince: null };
+    const created: AgentState = { armed: false, idleSince: null, workingSince: null, workSeen: false };
     this.states.set(agentId, created);
     return created;
   }

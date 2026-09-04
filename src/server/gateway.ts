@@ -282,6 +282,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     return `${scope}:${createHash("sha256").update(stableStringify(semanticValue)).digest("base64url")}`;
   }
 
+  /** Devices whose revocation is done except for the push write. In memory only: after a restart the record is back on disk, and a revoke of the same id drops it as an ordinary miss on the device store. */
+  const failedPushRevocations = new Set<string>();
+
   async function deduplicated<T>(
     session: AuthenticatedSession,
     requestId: string,
@@ -610,7 +613,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // failed is retried by revoking the same id again.
       // A revoke whose write failed left memory right and disk behind; the
       // same id revoked again is the retry, and matches nothing by then.
-      const retryingWrite = pushStore.hasPendingWrite;
+      const retryingWrite = failedPushRevocations.has(deviceId);
       let pushDropped = 0;
       let pushFailure: unknown;
       try {
@@ -623,6 +626,8 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         pushFailure = error;
         console.error("Could not persist push revocation on device revoke", error);
       }
+      if (pushFailure) failedPushRevocations.add(deviceId);
+      else failedPushRevocations.delete(deviceId);
       if (!reaped && !pushDropped && !pushFailure && !retryingWrite) { problem(res, 404, "No such device"); return true; }
       const sockets = (reaped ?? []).flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       if (revokingSelf) auth.clearCredentials(res);

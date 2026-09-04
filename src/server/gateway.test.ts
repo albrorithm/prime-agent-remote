@@ -1465,6 +1465,10 @@ describe("device management routes", () => {
       expect(await listDevices(t, keeper)).toHaveLength(1);
       expect(t.gateway.pushStore.hasPendingWrite).toBe(true);
 
+      // The pending write is that device's to retry, not a licence for any
+      // id to answer "revoked".
+      expect((await revokeDevice(t, keeper, "never-existed")).status).toBe(404);
+
       const retry = await revokeDevice(t, keeper, doomedId);
       expect(retry.status).toBe(200);
       expect(t.gateway.pushStore.hasPendingWrite).toBe(false);

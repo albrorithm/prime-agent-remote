@@ -118,8 +118,10 @@ describe("TurnEndNotifier", () => {
 
   it("treats work that runs long as a new turn worth its own notification", () => {
     const h = harness();
-    h.set([agent({ id: "root", ...IDLE })]);
+    h.set([agent({ id: "root", ...WORKING })]);
     h.notifier.arm("root");
+    h.advance(POLL_MS);
+    h.set([agent({ id: "root", ...IDLE })]);
     h.advance(50_000);
     expect(h.sent).toHaveLength(1);
 
@@ -198,17 +200,35 @@ describe("TurnEndNotifier", () => {
     expect(h.sent).toEqual([]);
   });
 
-  /* A short command can start and finish between two polls, so the root is
-     never seen working. Its quiet clock still has to start at the request, not
-     at whenever it last went idle. */
-  it("restarts the quiet clock when an idle agent is asked for work", () => {
+  /* Arming says work was asked for. Whether any happened is the catalog's to
+     say: a settings read or an extension that answers directly starts no turn,
+     and "finished" for one of those is a notification about nothing. */
+  it("announces nothing for an armed agent that was never seen working", () => {
     const h = harness();
     h.set([agent({ id: "root", ...IDLE })]);
-    h.advance(120_000);
     h.notifier.arm("root");
-    h.advance(10_000);
+    h.advance(120_000);
     expect(h.sent).toEqual([]);
+  });
+
+  it("counts the quiet from the request, and only work after it", () => {
+    const h = harness();
+    h.set([agent({ id: "root", ...WORKING })]);
+    h.advance(10_000);
+    h.set([agent({ id: "root", ...IDLE })]);
+    // A turn nobody asked this notifier about, long over.
+    h.advance(600_000);
+
+    h.notifier.arm("root");
+    h.advance(120_000);
+    expect(h.sent).toEqual([]);
+
+    h.set([agent({ id: "root", ...WORKING })]);
+    h.advance(POLL_MS);
+    h.set([agent({ id: "root", ...IDLE })]);
     h.advance(40_000);
+    expect(h.sent).toEqual([]);
+    h.advance(10_000);
     expect(h.sent).toEqual([{ agentId: "root", outcome: "complete" }]);
   });
 
