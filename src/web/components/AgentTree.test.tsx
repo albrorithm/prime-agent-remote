@@ -38,6 +38,36 @@ describe("AgentTree", () => {
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
   });
 
+  /* Position and keyboard descent used to come from a local index built in
+     arrival order while the rows were rendered in priority order. A screen
+     reader then read the tree back to front, and ArrowRight skipped past the
+     first visible child — whenever the daemon changed an agent's activity or
+     attention, which is precisely the sort key. */
+  it("reports position and descends in the order the rows are actually rendered", async () => {
+    const reordered = [
+      makeAgent("root", null, 0),
+      // Arrives first, sorts second: idle loses to working.
+      makeAgent("idle-child", "root", 1),
+      { ...makeAgent("working-child", "root", 1), activity: "working" as const },
+    ];
+    const onSelect = vi.fn();
+    render(<AgentTree agents={reordered} selectedId="root" onSelect={onSelect} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(3));
+
+    const items = screen.getAllByRole("treeitem");
+    const rendered = items.map((item) => item.textContent);
+    expect(rendered[1]).toContain("working-child");
+    expect(rendered[2]).toContain("idle-child");
+    // What each row announces has to match where it actually is.
+    expect(items.slice(1).map((item) => item.getAttribute("aria-posinset"))).toEqual(["1", "2"]);
+    expect(items.slice(1).map((item) => item.getAttribute("aria-setsize"))).toEqual(["2", "2"]);
+
+    items[0].focus();
+    fireEvent.keyDown(items[0], { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole("treeitem")[1]));
+    expect(document.activeElement?.textContent).toContain("working-child");
+  });
+
   it("hides descendants of collapsed nodes instead of flattening them", async () => {
     const onSelect = vi.fn();
     render(<AgentTree agents={agents} selectedId="root" onSelect={onSelect} />);

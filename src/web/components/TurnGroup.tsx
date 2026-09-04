@@ -197,6 +197,13 @@ export interface TurnGroupProps {
   recap?: string;
   /** Must return a keyed element per row; identity changes are deliberately ignored by the memo comparator. */
   renderRow: (message: TranscriptMessage) => ReactNode;
+  /**
+   * Compared, not rendered. `renderRow` closes over the agent's name, and the
+   * comparator cannot see inside a closure — so anything the closure reads that
+   * can change independently of `rows` has to be mirrored here or a settled
+   * turn keeps rendering the old value. See the comparator's note.
+   */
+  agentName: string;
 }
 
 function TurnGroupImpl({ rows, recap, renderRow }: TurnGroupProps) {
@@ -280,11 +287,20 @@ function presentationFingerprint(row: TranscriptMessage): string {
 /**
  * Settled turns skip the per-tick re-render the full-replaced messages array
  * would otherwise cause; live turns always re-render (their row text/status is
- * what's changing). renderRow identity is ignored on purpose: it closes over
- * only ref-backed handlers, so a stale closure stays correct.
+ * what's changing).
+ *
+ * renderRow identity has to be ignored — it captures a Set rebuilt every tick,
+ * so comparing it would mean the memo never bails and the whole thing is
+ * pointless. The price is that the comparator is blind to everything the
+ * closure reads, so every such value must appear here as its own prop.
+ * `agentName` is the one there is today, and it was the bug: renaming a session
+ * left every settled turn showing the old name — in author lines and in each
+ * message's actions label — beside live turns showing the new one, until an
+ * agent switch remounted them.
  */
 function turnGroupPropsEqual(previous: TurnGroupProps, next: TurnGroupProps): boolean {
   if (previous.turnId !== next.turnId || previous.recap !== next.recap) return false;
+  if (previous.agentName !== next.agentName) return false;
   if (!turnSettled(next.rows)) return false;
   if (previous.rows.length !== next.rows.length) return false;
   const last = next.rows.length - 1;
