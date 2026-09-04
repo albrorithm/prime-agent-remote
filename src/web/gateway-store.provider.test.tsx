@@ -45,7 +45,10 @@ function unauthorized(message = "Session expired") {
   };
 }
 
-const pushMock = vi.hoisted(() => ({ revokePushLocally: vi.fn(async () => {}) }));
+const pushMock = vi.hoisted(() => ({
+  revokePushLocally: vi.fn(async () => {}),
+  reclaimPushSubscription: vi.fn(async () => {}),
+}));
 vi.mock("./push", () => pushMock);
 
 vi.mock("./api", () => ({
@@ -199,6 +202,7 @@ beforeEach(() => {
   apiMock.respondToAttention.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
   pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
+  pushMock.reclaimPushSubscription.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -1426,5 +1430,116 @@ describe("GatewayProvider pairing links", () => {
     expect(result.current.linkError).toBeNull();
     // And a fragment that means something to someone else is left alone.
     expect(window.location.hash).toBe("#section");
+  });
+});
+
+describe("GatewayProvider automatic transcript loading", () => {
+  function replaceCatalog(socket: MockWebSocket, ids: string[], seq = 2, full = false) {
+    const catalog = { revision: seq, agents: ids.map(summary) };
+    socket.message(full ? {
+      type: "snapshot", version: 1, streamId: "catalog", cursor: { epoch: "epoch", seq }, snapshot: catalog,
+    } : {
+      type: "event", version: 1,
+      envelope: {
+        version: 1, streamId: "catalog", epoch: "epoch", seq,
+        emittedAt: "2026-01-01T00:00:00.000Z",
+        event: { kind: "catalog.replaced", payload: catalog },
+      },
+    });
+  }
+
+  it.each([false, true])("loads the fallback selected by a catalog update (full snapshot: %s)", async (full) => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    const pending = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockImplementation((id: string) => id === "agent-b" ? pending.promise : Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => { socket.open(); replaceCatalog(socket, ["agent-b"], 2, full); });
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", undefined));
+    act(() => replaceCatalog(socket, ["agent-b"], 3, full));
+    expect(apiMock.loadAgent.mock.calls.filter(([id]) => id === "agent-b")).toHaveLength(1);
+    expect(socket.sent.some((frame) => JSON.parse(frame).streamId === "agent:agent-b")).toBe(true);
+    await act(async () => { pending.resolve(snapshot("agent-b")); });
+    expect(result.current.selectedSnapshot?.agentId).toBe("agent-b");
+  });
+
+  it("leaves a failed fallback on Retry without retrying on unrelated catalog changes", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    apiMock.loadAgent.mockImplementation((id: string) => id === "agent-b"
+      ? Promise.reject(new Error("Transcript unavailable")) : Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => { socket.open(); replaceCatalog(socket, ["agent-b"]); });
+    await waitFor(() => expect(result.current.transcriptErrors["agent-b"]).toBeDefined());
+    act(() => replaceCatalog(socket, ["agent-b"], 3));
+    expect(apiMock.loadAgent.mock.calls.filter(([id]) => id === "agent-b")).toHaveLength(1);
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-b"));
+    await act(() => result.current.retryTranscript("agent-b"));
+    expect(result.current.selectedSnapshot?.agentId).toBe("agent-b");
+    expect(result.current.transcriptErrors["agent-b"]).toBeUndefined();
+  });
+
+  it("does not duplicate a tap's pending load when React commits the selection", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    const pending = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockImplementation((id: string) => id === "agent-b" ? pending.promise : Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    let selecting!: Promise<void>;
+    act(() => { selecting = result.current.selectAgent("agent-b"); });
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
+    expect(apiMock.loadAgent.mock.calls.filter(([id]) => id === "agent-b")).toHaveLength(1);
+    await act(async () => { pending.resolve(snapshot("agent-b")); await selecting; });
+  });
+
+  it("keeps the fallback subscribed when an earlier tap finishes loading", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("root"), summary("agent-a"), summary("agent-b")]));
+    const a = deferred<AgentSnapshot>();
+    const b = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockImplementation((id: string) => id === "agent-a" ? a.promise
+      : id === "agent-b" ? b.promise : Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots.root).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    let selecting!: Promise<void>;
+    act(() => { selecting = result.current.selectAgent("agent-a"); });
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-a"));
+    act(() => replaceCatalog(socket, ["agent-b"]));
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", undefined));
+    await act(async () => { a.resolve(snapshot("agent-a")); await selecting; });
+    expect(socket.sent.map((frame) => JSON.parse(frame)).filter((frame) =>
+      frame.type === "detach" && frame.streamId === "agent:agent-b")).toEqual([]);
+    await act(async () => { b.resolve(snapshot("agent-b")); });
+    expect(result.current.selectedSnapshot?.agentId).toBe("agent-b");
+  });
+
+  it("reclaims the push subscription after an auth reset even when the token is reused", async () => {
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(pushMock.reclaimPushSubscription).toHaveBeenCalledTimes(1));
+    act(() => apiMock.unauthorized?.());
+    await act(() => result.current.pair("test-token"));
+    expect(pushMock.reclaimPushSubscription).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards an automatic load after sign-out and fetches anew after pairing", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+    const pending = deferred<AgentSnapshot>();
+    apiMock.loadAgent.mockImplementation((id: string) => id === "agent-b" ? pending.promise : Promise.resolve(snapshot(id)));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => { socket.open(); replaceCatalog(socket, ["agent-b"]); });
+    await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-b"));
+    act(() => apiMock.unauthorized?.());
+    await act(async () => { pending.resolve(snapshot("agent-b")); });
+    expect(result.current.snapshots).toEqual({});
+    expect(result.current.transcriptErrors).toEqual({});
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-b")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-b", 2));
+    await act(() => result.current.pair("test-token"));
+    expect(result.current.selectedSnapshot?.revision).toBe(2);
   });
 });

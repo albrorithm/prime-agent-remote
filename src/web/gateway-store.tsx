@@ -325,9 +325,17 @@ function reducer(state: State, action: Action): State {
         connection: action.value,
         hasReconnected: state.hasReconnected || action.value === "offline",
       };
-    case "catalog":
+    case "catalog": {
       if (action.value.revision < state.catalog.revision) return state;
-      return { ...state, catalog: action.value };
+      const catalog = action.value;
+      const stillListed = catalog.agents.some((agent) => agent.id === state.selectedAgentId);
+      return {
+        ...state,
+        catalog,
+        selectedAgentId: stillListed ? state.selectedAgentId
+          : catalog.agents.find((agent) => agent.parentId === null)?.id ?? null,
+      };
+    }
     case "snapshot": {
       const current = state.snapshots[action.value.agentId];
       // A stream that was explicitly declared gone must never be resurrected by a
@@ -373,21 +381,7 @@ function reducer(state: State, action: Action): State {
     }
     case "event": {
       if (action.value.event.kind === "catalog.replaced") {
-        const catalog = action.value.event.payload;
-        if (catalog.revision < state.catalog.revision) return state;
-        // A session can leave the catalog while it is the one on screen —
-        // deleted from here, or ended from anywhere else. Falling back to the
-        // first root keeps the app pointed at something real rather than at a
-        // selection the catalog no longer contains.
-        const stillListed = state.selectedAgentId !== null
-          && catalog.agents.some((agent) => agent.id === state.selectedAgentId);
-        return {
-          ...state,
-          catalog,
-          selectedAgentId: stillListed
-            ? state.selectedAgentId
-            : catalog.agents.find((agent) => agent.parentId === null)?.id ?? null,
-        };
+        return reducer(state, { type: "catalog", value: action.value.event.payload });
       }
       const agentId = action.value.streamId.startsWith("agent:") ? action.value.streamId.slice(6) : null;
       if (!agentId) return state;
@@ -513,6 +507,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // this, a stale call's cleanup can detach the *newer* call's just-attached
   // stream, because it only sees "no snapshot yet" and not "superseded".
   const openAgentGeneration = useRef(0);
+  // Track each load separately: an older request must not clear a newer one.
+  const loadingAgents = useRef(new Map<string, Set<symbol>>());
+  const autoHydrated = useRef<string | null>(null);
   const socketRetryBlocked = useRef(false);
   // Holds the latest `initialize` so the socket-retry scheduler (defined before
   // `initialize` exists) can call it without a circular useCallback dependency.
@@ -584,11 +581,20 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   const loadAgentHttp = useCallback(async (agentId: string, options?: api.ApiRequestOptions): Promise<LoadedAgent> => {
     const streamId = `agent:${agentId}`;
     const baseline = realtimeVersions.current.get(streamId) ?? 0;
-    const snapshot = await api.loadAgent(agentId, options);
-    return {
-      snapshot,
-      allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === baseline,
-    };
+    const loads = loadingAgents.current.get(agentId) ?? new Set<symbol>();
+    const request = Symbol();
+    loads.add(request);
+    loadingAgents.current.set(agentId, loads);
+    try {
+      const snapshot = await api.loadAgent(agentId, options);
+      return {
+        snapshot,
+        allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === baseline,
+      };
+    } finally {
+      loads.delete(request);
+      if (!loads.size && loadingAgents.current.get(agentId) === loads) loadingAgents.current.delete(agentId);
+    }
   }, []);
 
   /** Hand a fetched snapshot to the reducer. Each caller's generation guard differs; this part never did. */
@@ -633,6 +639,28 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  // Attach before fetching, and keep each caller's lifecycle guard on both outcomes.
+  const hydrateAgent = useCallback(async (
+    agentId: string,
+    isCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean> => {
+    const streamId = `agent:${agentId}`;
+    subscriptions.current.add(streamId);
+    attach(streamId);
+    try {
+      const loaded = await loadAgentHttp(agentId, signal ? { signal } : undefined);
+      if (!isCurrent()) return false;
+      dispatchLoadedSnapshot(loaded);
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      const message = transcriptErrorMessage(error);
+      if (message) dispatch({ type: "transcript_error", agentId, message });
+      throw error;
+    }
+  }, [attach, dispatchLoadedSnapshot, loadAgentHttp]);
+
   const resetForUnauthorized = useCallback((signedOut?: true, linkError?: string) => {
     initializationGeneration.current += 1;
     sessionGeneration.current += 1;
@@ -645,6 +673,10 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     cursors.current.clear();
     realtimeVersions.current.clear();
     replayingStreams.current.clear();
+    streamGoneRetries.current.clear();
+    loadingAgents.current.clear();
+    autoHydrated.current = null;
+    pushClaimedFor.current = null;
     socketRetryBlocked.current = false;
     retryCount.current = 0;
     if (errorTimer.current != null) window.clearTimeout(errorTimer.current);
@@ -887,23 +919,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       const first = value.catalog.agents.find((agent) => agent.id === requested)
         ?? value.catalog.agents.find((agent) => agent.parentId === null);
       if (first) {
-        const streamId = `agent:${first.id}`;
-        subscriptions.current.add(streamId);
-        attach(streamId);
-        try {
-          const loaded = await loadAgentHttp(first.id, { signal: controller.signal });
-          if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-          dispatchLoadedSnapshot(loaded);
-        } catch (error) {
-          if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-          // This is the path that produced the endless spinner: the agent is
-          // selected, the snapshot never arrives, and there is no selection to
-          // roll back to. Record the reason, then rethrow so the global error
-          // and the offline phase still happen as before.
-          const message = transcriptErrorMessage(error);
-          if (message) dispatch({ type: "transcript_error", agentId: first.id, message });
-          throw error;
-        }
+        const current = await hydrateAgent(
+          first.id,
+          () => generation === initializationGeneration.current && !controller.signal.aborted,
+          controller.signal,
+        );
+        if (!current) return;
       }
       if (pushClaimedFor.current !== value.csrfToken) {
         pushClaimedFor.current = value.csrfToken;
@@ -971,7 +992,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     } finally {
       if (lifecycleAbort.current === controller) lifecycleAbort.current = null;
     }
-  }, [attach, connect, dispatchLoadedSnapshot, loadAgentHttp, resetForUnauthorized, showError, updateSocketPhase]);
+  }, [connect, hydrateAgent, resetForUnauthorized, showError, updateSocketPhase]);
 
   // Written from an effect (not during render) so a discarded StrictMode /
   // concurrent render can never leave a stale `initialize` behind — the retry
@@ -1080,28 +1101,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       // double-tap between two cold sessions) get distinct, increasing values.
       const openGeneration = ++openAgentGeneration.current;
       const streamId = `agent:${id}`;
-      subscriptions.current.add(streamId);
-      attach(streamId);
       if (!stateRef.current.snapshots[id]) {
-        try {
-          const loaded = await loadAgentHttp(id);
-          if (generation !== sessionGeneration.current) return;
-          // Deliberately not gated on openGeneration: a superseded call's own
-          // snapshot is still worth caching, and dispatching it here is what
-          // lets the *newer* call's own cleanup below see this agent already
-          // has a snapshot instead of wrongly detaching it.
-          dispatchLoadedSnapshot(loaded);
-        } catch (error) {
-          if (generation !== sessionGeneration.current) return;
-          // Recorded for the panel, then rethrown unchanged. Every existing
-          // caller keeps its own handling: selectAgent still rolls the
-          // selection back, createSession still reports that the session was
-          // created but could not be opened. This only adds the per-agent
-          // reason the panel needs to offer a retry.
-          const message = transcriptErrorMessage(error);
-          if (message) dispatch({ type: "transcript_error", agentId: id, message });
-          throw error;
-        }
+        if (!await hydrateAgent(id, () => generation === sessionGeneration.current)) return;
+      } else {
+        subscriptions.current.add(streamId);
+        attach(streamId);
       }
       if (generation !== sessionGeneration.current) return;
       // A call that has been superseded by a newer openAgent() must not run
@@ -1115,8 +1119,26 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [attach, detach, dispatchLoadedSnapshot, loadAgentHttp],
+    [attach, detach, hydrateAgent],
   );
+
+  const selectedId = state.selectedAgentId;
+  const selectionListed = state.catalog.agents.some((agent) => agent.id === selectedId);
+  const selectionLoaded = Boolean(selectedId && state.snapshots[selectedId]);
+  const selectionFailed = Boolean(selectedId && state.transcriptErrors[selectedId]);
+  useEffect(() => {
+    if (state.authRequired || !selectedId || !selectionListed) {
+      autoHydrated.current = null;
+      return;
+    }
+    if (autoHydrated.current === selectedId) return;
+    autoHydrated.current = selectedId;
+    if (selectionLoaded || selectionFailed || loadingAgents.current.has(selectedId)) return;
+    // Opening also claims subscription cleanup, so a previous tap's late
+    // response cannot detach the new selection while this fetch is pending.
+    // Failures stay on the transcript's Retry button, never an automatic loop.
+    void openAgent(selectedId).catch(() => {});
+  }, [selectedId, selectionListed, selectionLoaded, selectionFailed, state.authRequired, openAgent]);
 
   const selectAgent = useCallback(
     async (id: string) => {
@@ -1341,19 +1363,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       agentId,
       (csrfToken, revision) => api.deleteAgent(agentId, csrfToken, revision, confirmName),
       "Could not delete the session",
-      // Deliberately no `agent_revision` dispatch: there is no agent left to
-      // carry one. The catalog event removes the row, and the reducer moves
-      // the selection off it — this only has to reopen whatever it landed on,
-      // because a selection alone does not load a transcript.
-      async () => {
-        dispatch({ type: "evict_snapshot", agentId });
-        const next = stateRef.current.selectedAgentId;
-        if (next && next !== agentId && !stateRef.current.snapshots[next]) {
-          await openAgent(next).catch(() => {});
-        }
-      },
+      () => { dispatch({ type: "evict_snapshot", agentId }); },
     );
-  }, [guardedMutation, openAgent]);
+  }, [guardedMutation]);
 
   const rename = useCallback(async (agentId: string, name: string) => {
     await guardedMutation(
@@ -1429,20 +1441,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
      been the thing that failed. */
   const retryTranscript = useCallback(async (agentId: string) => {
     const generation = sessionGeneration.current;
-    const streamId = `agent:${agentId}`;
     dispatch({ type: "transcript_error", agentId, message: null });
-    subscriptions.current.add(streamId);
-    attach(streamId);
-    try {
-      const loaded = await loadAgentHttp(agentId);
-      if (generation !== sessionGeneration.current) return;
-      dispatchLoadedSnapshot(loaded);
-    } catch (error) {
-      if (generation !== sessionGeneration.current) return;
-      const message = transcriptErrorMessage(error);
-      if (message) dispatch({ type: "transcript_error", agentId, message });
-    }
-  }, [attach, dispatchLoadedSnapshot, loadAgentHttp]);
+    await hydrateAgent(agentId, () => generation === sessionGeneration.current).catch(() => {});
+  }, [hydrateAgent]);
 
   const value = useMemo<GatewayContextValue>(
     () => ({
