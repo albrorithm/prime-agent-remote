@@ -98,6 +98,12 @@ export class PushSubscriptionStore {
    */
   private persistRetryTimer: NodeJS.Timeout | undefined;
   private persistRetryAttempt = 0;
+  /**
+   * Disk is behind memory: a write failed and none has landed since. Memory
+   * is already right, so a later mutation that matches nothing is still the
+   * write that is owed, and `removeWhere` persists on it.
+   */
+  private pendingWrite = false;
 
   constructor(
     private readonly filePath: string,
@@ -141,6 +147,11 @@ export class PushSubscriptionStore {
     return this.records;
   }
 
+  /** Whether the file has yet to catch up with a change already made here. */
+  get hasPendingWrite(): boolean {
+    return this.pendingWrite;
+  }
+
   /**
    * Claims an endpoint for a session, replacing any existing record for it.
    *
@@ -159,7 +170,7 @@ export class PushSubscriptionStore {
 
   async removeEndpoint(endpoint: string): Promise<boolean> {
     const remaining = this.records.filter((record) => record.endpoint !== endpoint);
-    if (remaining.length === this.records.length) return false;
+    if (remaining.length === this.records.length && !this.pendingWrite) return false;
     this.records = remaining;
     await this.persist();
     return true;
@@ -191,10 +202,10 @@ export class PushSubscriptionStore {
   private async removeWhere(doomed: (record: StoredPushSubscription) => boolean): Promise<number> {
     const remaining = this.records.filter((record) => !doomed(record));
     const removed = this.records.length - remaining.length;
-    // Never persists on a miss: the CLI opens this store on a file it may not
-    // be able to read, which loads as empty, and a blind write would truncate
-    // a store that was merely unreadable.
-    if (!removed) return 0;
+    // Never persists on a miss, unless a write is already owed: the CLI opens
+    // this store on a file it may not be able to read, which loads as empty,
+    // and a blind write would truncate a store that was merely unreadable.
+    if (!removed && !this.pendingWrite) return 0;
     this.records = remaining;
     await this.persist();
     return removed;
@@ -214,6 +225,7 @@ export class PushSubscriptionStore {
   }
 
   private onPersistSucceeded(): void {
+    this.pendingWrite = false;
     this.cancelPersistRetry();
     this.persistRetryAttempt = 0;
   }
@@ -226,6 +238,7 @@ export class PushSubscriptionStore {
    * revocation right before a quiet restart falls into.
    */
   private onPersistFailed(): void {
+    this.pendingWrite = true;
     this.cancelPersistRetry();
     if (this.persistRetryAttempt >= this.persistRetryDelaysMs.length) {
       // Retries exhausted. Say plainly what that means operationally rather

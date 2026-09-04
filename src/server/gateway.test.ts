@@ -1455,15 +1455,19 @@ describe("device management routes", () => {
     await t.gateway.pushStore.upsert({ ...stored, sessionId: "session-from-a-previous-process" });
     const doomedId = (await listDevices(t, doomed)).find((device) => device.current)!.id;
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(t.gateway.pushStore, "removeDevice").mockRejectedValueOnce(new Error("disk full"));
+    // The real removal runs and drops the record from memory; the write is
+    // what fails. That is the state a retry has to be able to finish from.
+    const writer = t.gateway.pushStore as unknown as { writeAtomically: () => Promise<void> };
+    vi.spyOn(writer, "writeAtomically").mockRejectedValueOnce(new Error("disk full"));
     try {
       const first = await revokeDevice(t, keeper, doomedId);
       expect(first.status).toBe(500);
       expect(await listDevices(t, keeper)).toHaveLength(1);
-      expect(t.gateway.pushStore.list()).toHaveLength(1);
+      expect(t.gateway.pushStore.hasPendingWrite).toBe(true);
 
       const retry = await revokeDevice(t, keeper, doomedId);
       expect(retry.status).toBe(200);
+      expect(t.gateway.pushStore.hasPendingWrite).toBe(false);
       expect(t.gateway.pushStore.list()).toEqual([]);
     } finally {
       quiet.mockRestore();

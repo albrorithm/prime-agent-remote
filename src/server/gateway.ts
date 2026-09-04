@@ -608,6 +608,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       // The session pass covers records from before they carried a device id.
       // Tried for a device that is already gone, too: a revoke whose push write
       // failed is retried by revoking the same id again.
+      // A revoke whose write failed left memory right and disk behind; the
+      // same id revoked again is the retry, and matches nothing by then.
+      const retryingWrite = pushStore.hasPendingWrite;
       let pushDropped = 0;
       let pushFailure: unknown;
       try {
@@ -620,7 +623,7 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         pushFailure = error;
         console.error("Could not persist push revocation on device revoke", error);
       }
-      if (!reaped && !pushDropped && !pushFailure) { problem(res, 404, "No such device"); return true; }
+      if (!reaped && !pushDropped && !pushFailure && !retryingWrite) { problem(res, 404, "No such device"); return true; }
       const sockets = (reaped ?? []).flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       if (revokingSelf) auth.clearCredentials(res);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Device revoked");

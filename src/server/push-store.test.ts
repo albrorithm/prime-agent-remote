@@ -184,6 +184,28 @@ describe("PushSubscriptionStore", () => {
     expect(unreadable.list()).toEqual([]);
   });
 
+  /* After a failed write, memory has already dropped the record and disk has
+     not. The next mutation is the retry, whether or not it matches anything;
+     without this, a revoke retried after the disk came back found nothing to
+     do and left the stale record to wake the phone until a restart. */
+  it("treats a miss on a store whose last write failed as the write it still owes", async () => {
+    const blocker = path.join(path.dirname(storePath), "blocker");
+    const blocked = path.join(blocker, "store.json");
+    await mkdir(path.dirname(blocker), { recursive: true });
+    await writeFile(blocker, "a file where the directory has to go", "utf8");
+    const store = new PushSubscriptionStore(blocked, []);
+    await store.load();
+    await expect(store.upsert(subscription({ endpoint: "https://push.example.test/phone", deviceId: "device-a" }))).rejects.toThrow();
+    expect(store.hasPendingWrite).toBe(true);
+    await expect(store.removeDevice("device-a")).rejects.toThrow();
+    expect(store.list()).toEqual([]);
+
+    await rm(blocker);
+    expect(await store.removeDevice("device-a")).toBe(0);
+    expect(store.hasPendingWrite).toBe(false);
+    expect(JSON.parse(await readFile(blocked, "utf8")).subscriptions).toEqual([]);
+  });
+
   it("never persists when nothing matched, so an unreadable store is not truncated", async () => {
     await mkdir(path.dirname(storePath), { recursive: true });
     await writeFile(storePath, "{ not json", "utf8");
