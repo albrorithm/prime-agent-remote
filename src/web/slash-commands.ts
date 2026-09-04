@@ -1,22 +1,29 @@
 import {
   SESSION_SLASH_COMMAND_NAMES,
+  SESSION_SLASH_COMMAND_METADATA,
   type SlashCommandCatalog,
   type SlashCommandCatalogEntry,
   type SlashCommandResult,
 } from "../protocol";
 
-const FALLBACK_METADATA: Record<typeof SESSION_SLASH_COMMAND_NAMES[number], Omit<SlashCommandCatalogEntry, "name">> = {
-  compact: { description: "Compact session context", argumentHint: "[instructions]", source: "session", availability: "available", takesArguments: true },
-  refine: { description: "Refine continual harness", argumentHint: "[--global] [instructions]", source: "session", availability: "available", takesArguments: true },
-  goal: { description: "Manage persistent goal", argumentHint: "[status|pause|resume|clear|objective]", source: "session", availability: "available", takesArguments: true },
-  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", availability: "available", takesArguments: true },
-};
-
+/**
+ * What the composer suggests before the real catalog arrives.
+ *
+ * The descriptions come from protocol.ts rather than being restated here: this
+ * stands in for the gateway's catalog for a moment, and a fallback that
+ * described a command differently from the thing replacing it would be worse
+ * than no fallback. Availability is added rather than shared — see the note on
+ * SESSION_SLASH_COMMAND_METADATA.
+ */
 export const FALLBACK_SLASH_COMMAND_CATALOG: SlashCommandCatalog = {
   agentId: "",
   agentRevision: 0,
   partial: true,
-  commands: SESSION_SLASH_COMMAND_NAMES.map((name) => ({ name, ...FALLBACK_METADATA[name] })),
+  commands: SESSION_SLASH_COMMAND_NAMES.map((name) => ({
+    name,
+    ...SESSION_SLASH_COMMAND_METADATA[name],
+    availability: "available" as const,
+  })),
 };
 
 export interface SlashCommandSuggestion {

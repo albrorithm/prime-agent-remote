@@ -31,6 +31,31 @@ export interface SlashCommandCatalogEntry {
   options?: SlashCommandOption[];
 }
 
+export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
+
+/**
+ * What the four session commands are, for both sides of the wire.
+ *
+ * Here rather than in either consumer because both need it and this is the one
+ * module they both compile: the gateway builds the real catalog from it, and
+ * the browser falls back to it while the catalog is still loading. Written out
+ * twice, the fallback the user sees before the catalog arrives could describe a
+ * command differently from the catalog that replaces it a moment later.
+ *
+ * Availability is deliberately absent. It is not a property of a command but of
+ * an agent — the gateway decides it per session, and the browser's fallback
+ * assumes availability because a command it cannot run is not worth suggesting.
+ */
+export const SESSION_SLASH_COMMAND_METADATA: Record<
+  SessionSlashCommandName,
+  Pick<SlashCommandCatalogEntry, "description" | "argumentHint" | "source" | "takesArguments">
+> = {
+  compact: { description: "Compact session context", argumentHint: "[instructions]", source: "session", takesArguments: true },
+  refine: { description: "Refine continual harness", argumentHint: "[--global] [instructions]", source: "session", takesArguments: true },
+  goal: { description: "Manage persistent goal", argumentHint: "[status|pause|resume|clear|objective]", source: "session", takesArguments: true },
+  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", takesArguments: true },
+};
+
 export interface SlashCommandCatalog {
   agentId: string;
   agentRevision: number;

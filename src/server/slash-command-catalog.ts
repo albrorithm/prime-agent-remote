@@ -1,16 +1,17 @@
 import {
   DIRECT_SLASH_COMMAND_NAMES,
   SESSION_SLASH_COMMAND_NAMES,
+  SESSION_SLASH_COMMAND_METADATA,
   type DirectSlashCommandName,
   type SlashCommandCatalogEntry,
   type SlashCommandOption,
 } from "../protocol.js";
 
 const METADATA: Record<string, Pick<SlashCommandCatalogEntry, "description" | "argumentHint" | "source" | "takesArguments">> = {
-  compact: { description: "Compact session context", argumentHint: "[instructions]", source: "session", takesArguments: true },
-  refine: { description: "Refine continual harness", argumentHint: "[--global] [instructions]", source: "session", takesArguments: true },
-  goal: { description: "Manage persistent goal", argumentHint: "[status|pause|resume|clear|objective]", source: "session", takesArguments: true },
-  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", takesArguments: true },
+  // The session four come from protocol.ts, so the browser's pre-catalog
+  // fallback cannot describe a command differently from the catalog it is
+  // standing in for. The adapter commands below have no browser-side copy.
+  ...SESSION_SLASH_COMMAND_METADATA,
   model: { description: "Show or select the session model", argumentHint: "[provider/model]", source: "adapter", takesArguments: true },
   effort: { description: "Show or select the thinking level", argumentHint: "[level]", source: "adapter", takesArguments: true },
   name: { description: "Show or set the session name", argumentHint: "[name]", source: "adapter", takesArguments: true },
