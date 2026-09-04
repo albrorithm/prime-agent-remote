@@ -722,13 +722,11 @@ export const attachFrameSchema = z.object({
   type: z.literal("attach"),
   version: z.literal(PROTOCOL_VERSION),
   streamId: z.string().min(1).max(160),
-  since: z
-    .object({
-      epoch: z.string().min(1).max(128),
-      seq: z.number().int().nonnegative(),
-    })
-    .nullable()
-    .optional(),
+  // The same shape the server stamps on every frame it sends, not a second
+  // copy of it: this is the cursor coming back, and a resume where the two
+  // definitions had drifted would fail validation for reasons neither side
+  // could see.
+  since: streamCursorSchema.nullable().optional(),
 });
 
 export const detachFrameSchema = z.object({

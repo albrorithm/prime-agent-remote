@@ -470,6 +470,17 @@ function socketUrl(): string {
   return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/v1/events`;
 }
 
+/** What an HTTP snapshot fetch yields: the snapshot, and whether the reducer may accept it at an unchanged revision. */
+interface LoadedAgent {
+  snapshot: AgentSnapshot;
+  /**
+   * True when no realtime update touched this stream while the fetch was in
+   * flight. A snapshot at the same revision is then still the newest thing
+   * known; otherwise the socket has already said something more recent.
+   */
+  allowEqualRevision: boolean;
+}
+
 export function GatewayProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const pendingPreviewUrlsRef = useRef(new Set<string>());
@@ -573,7 +584,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     realtimeVersions.current.set(streamId, (realtimeVersions.current.get(streamId) ?? 0) + 1);
   }, []);
 
-  const loadAgentHttp = useCallback(async (agentId: string, options?: api.ApiRequestOptions) => {
+  const loadAgentHttp = useCallback(async (agentId: string, options?: api.ApiRequestOptions): Promise<LoadedAgent> => {
     const streamId = `agent:${agentId}`;
     const baseline = realtimeVersions.current.get(streamId) ?? 0;
     const snapshot = await api.loadAgent(agentId, options);
@@ -581,6 +592,23 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       snapshot,
       allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === baseline,
     };
+  }, []);
+
+  /**
+   * Hand a fetched snapshot to the reducer.
+   *
+   * Every caller reassembled the same action out of `loadAgentHttp`'s two
+   * fields, which is the only part of those call sites that was ever the same —
+   * each one's generation guard differs, and that difference is the thing worth
+   * reading.
+   */
+  const dispatchLoadedSnapshot = useCallback((loaded: LoadedAgent) => {
+    dispatch({
+      type: "snapshot",
+      value: loaded.snapshot,
+      source: "http",
+      allowEqualRevision: loaded.allowEqualRevision,
+    });
   }, []);
 
   const updateSocketPhase = useCallback(() => {
@@ -876,12 +904,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         try {
           const loaded = await loadAgentHttp(first.id, { signal: controller.signal });
           if (generation !== initializationGeneration.current || controller.signal.aborted) return;
-          dispatch({
-            type: "snapshot",
-            value: loaded.snapshot,
-            source: "http",
-            allowEqualRevision: loaded.allowEqualRevision,
-          });
+          dispatchLoadedSnapshot(loaded);
         } catch (error) {
           if (generation !== initializationGeneration.current || controller.signal.aborted) return;
           // This is the path that produced the endless spinner: the agent is
@@ -955,7 +978,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     } finally {
       if (lifecycleAbort.current === controller) lifecycleAbort.current = null;
     }
-  }, [attach, connect, loadAgentHttp, resetForUnauthorized, showError, updateSocketPhase]);
+  }, [attach, connect, dispatchLoadedSnapshot, loadAgentHttp, resetForUnauthorized, showError, updateSocketPhase]);
 
   // Written from an effect (not during render) so a discarded StrictMode /
   // concurrent render can never leave a stale `initialize` behind — the retry
@@ -1074,12 +1097,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
           // snapshot is still worth caching, and dispatching it here is what
           // lets the *newer* call's own cleanup below see this agent already
           // has a snapshot instead of wrongly detaching it.
-          dispatch({
-            type: "snapshot",
-            value: loaded.snapshot,
-            source: "http",
-            allowEqualRevision: loaded.allowEqualRevision,
-          });
+          dispatchLoadedSnapshot(loaded);
         } catch (error) {
           if (generation !== sessionGeneration.current) return;
           // Recorded for the panel, then rethrown unchanged. Every existing
@@ -1104,7 +1122,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [attach, detach, loadAgentHttp],
+    [attach, detach, dispatchLoadedSnapshot, loadAgentHttp],
   );
 
   const selectAgent = useCallback(
@@ -1143,18 +1161,13 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (!(error instanceof ApiError) || error.status !== 409) throw error;
         const loaded = await loadAgentHttp(agentId);
         if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
-        dispatch({
-          type: "snapshot",
-          value: loaded.snapshot,
-          source: "http",
-          allowEqualRevision: loaded.allowEqualRevision,
-        });
+        dispatchLoadedSnapshot(loaded);
         const result = await run(loaded.snapshot.revision);
         if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
         return result;
       }
     },
-    [loadAgentHttp],
+    [dispatchLoadedSnapshot, loadAgentHttp],
   );
 
   const createSession = useCallback(
@@ -1274,111 +1287,87 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     if (existing) return existing.revision;
     const loaded = await loadAgentHttp(agentId);
     if (generation !== sessionGeneration.current) throw new DOMException("Session changed", "AbortError");
-    dispatch({
-      type: "snapshot",
-      value: loaded.snapshot,
-      source: "http",
-      allowEqualRevision: loaded.allowEqualRevision,
-    });
+    dispatchLoadedSnapshot(loaded);
     return loaded.snapshot.revision;
-  }, [loadAgentHttp]);
+  }, [dispatchLoadedSnapshot, loadAgentHttp]);
 
-  const abort = useCallback(async (agentId?: string) => {
-    const current = stateRef.current;
-    const generation = sessionGeneration.current;
-    const id = agentId ?? current.selectedAgentId;
-    if (!id) throw new Error("No agent selected");
-    try {
-      const revision = await loadedRevision(id, generation);
-      const result = await runMutation(
-        id,
-        (next) => api.abortAgent(id, current.csrfToken, next),
-        revision,
-      );
-      if (generation !== sessionGeneration.current) return;
-      dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
-      showError(null);
-    } catch (error) {
-      if (generation === sessionGeneration.current) {
-        showError(humanizeError(error, "Stop failed"));
-      }
-      throw error;
-    }
-  }, [loadedRevision, runMutation, showError]);
-
-  const stop = useCallback(async (agentId: string) => {
-    const current = stateRef.current;
+  /**
+   * The shared body of an agent mutation: resolve the revision it must be
+   * applied against, run it, and either record the new revision or report the
+   * failure — all of it guarded on the session generation, so a mutation that
+   * lands after a sign-out or a re-bootstrap neither dispatches nor shows an
+   * error into a store that has moved on.
+   *
+   * `onSuccess` defaults to recording the new revision, which is what a
+   * mutation means. Only deletion opts out, because there is no agent left to
+   * carry one.
+   */
+  const guardedMutation = useCallback(async <T extends MutationAccepted,>(
+    agentId: string,
+    call: (csrfToken: string, revision: number) => Promise<T>,
+    errorMessage: string,
+    onSuccess?: (result: T) => void | Promise<void>,
+  ): Promise<void> => {
+    const { csrfToken } = stateRef.current;
     const generation = sessionGeneration.current;
     try {
       const revision = await loadedRevision(agentId, generation);
-      const result = await runMutation(
-        agentId,
-        (next) => api.stopAgent(agentId, current.csrfToken, next),
-        revision,
-      );
+      const result = await runMutation(agentId, (next) => call(csrfToken, next), revision);
       if (generation !== sessionGeneration.current) return;
-      dispatch({ type: "agent_revision", agentId, revision: result.revision });
+      if (onSuccess) await onSuccess(result);
+      else dispatch({ type: "agent_revision", agentId, revision: result.revision });
       showError(null);
     } catch (error) {
       if (generation === sessionGeneration.current) {
-        showError(humanizeError(error, "Could not end the session"));
+        showError(humanizeError(error, errorMessage));
       }
       throw error;
     }
   }, [loadedRevision, runMutation, showError]);
+
+  const abort = useCallback(async (agentId?: string) => {
+    const id = agentId ?? stateRef.current.selectedAgentId;
+    if (!id) throw new Error("No agent selected");
+    await guardedMutation(id, (csrfToken, revision) => api.abortAgent(id, csrfToken, revision), "Stop failed");
+  }, [guardedMutation]);
+
+  const stop = useCallback(async (agentId: string) => {
+    await guardedMutation(
+      agentId,
+      (csrfToken, revision) => api.stopAgent(agentId, csrfToken, revision),
+      "Could not end the session",
+    );
+  }, [guardedMutation]);
 
   // Irreversible, so it is the one mutation that names what it believes it is
   // deleting: the gateway refuses if `confirmName` is not the session's
   // current name.
   const deleteSession = useCallback(async (agentId: string, confirmName: string) => {
-    const current = stateRef.current;
-    const generation = sessionGeneration.current;
-    try {
-      const revision = await loadedRevision(agentId, generation);
-      await runMutation(
-        agentId,
-        (next) => api.deleteAgent(agentId, current.csrfToken, next, confirmName),
-        revision,
-      );
-      if (generation !== sessionGeneration.current) return;
+    await guardedMutation(
+      agentId,
+      (csrfToken, revision) => api.deleteAgent(agentId, csrfToken, revision, confirmName),
+      "Could not delete the session",
       // Deliberately no `agent_revision` dispatch: there is no agent left to
       // carry one. The catalog event removes the row, and the reducer moves
       // the selection off it — this only has to reopen whatever it landed on,
       // because a selection alone does not load a transcript.
-      dispatch({ type: "evict_snapshot", agentId });
-      const next = stateRef.current.selectedAgentId;
-      if (next && next !== agentId && !stateRef.current.snapshots[next]) {
-        await openAgent(next).catch(() => {});
-      }
-      showError(null);
-    } catch (error) {
-      if (generation === sessionGeneration.current) {
-        showError(humanizeError(error, "Could not delete the session"));
-      }
-      throw error;
-    }
-  }, [loadedRevision, openAgent, runMutation, showError]);
+      async () => {
+        dispatch({ type: "evict_snapshot", agentId });
+        const next = stateRef.current.selectedAgentId;
+        if (next && next !== agentId && !stateRef.current.snapshots[next]) {
+          await openAgent(next).catch(() => {});
+        }
+      },
+    );
+  }, [guardedMutation, openAgent]);
 
   const rename = useCallback(async (agentId: string, name: string) => {
-    const current = stateRef.current;
-    const generation = sessionGeneration.current;
-    try {
-      const revision = await loadedRevision(agentId, generation);
-      const result = await runMutation(
-        agentId,
-        (next) => api.renameAgent(agentId, current.csrfToken, next, name),
-        revision,
-      );
-      if (generation !== sessionGeneration.current) return;
-      dispatch({ type: "agent_revision", agentId, revision: result.revision });
-      showError(null);
-    } catch (error) {
-      if (generation === sessionGeneration.current) {
-        showError(humanizeError(error, "Rename failed"));
-      }
-      throw error;
-    }
-  }, [loadedRevision, runMutation, showError]);
+    await guardedMutation(
+      agentId,
+      (csrfToken, revision) => api.renameAgent(agentId, csrfToken, revision, name),
+      "Rename failed",
+    );
+  }, [guardedMutation]);
 
   const respond = useCallback(
     async (attentionId: string, revision: number, optionId: string) => {
@@ -1453,18 +1442,13 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     try {
       const loaded = await loadAgentHttp(agentId);
       if (generation !== sessionGeneration.current) return;
-      dispatch({
-        type: "snapshot",
-        value: loaded.snapshot,
-        source: "http",
-        allowEqualRevision: loaded.allowEqualRevision,
-      });
+      dispatchLoadedSnapshot(loaded);
     } catch (error) {
       if (generation !== sessionGeneration.current) return;
       const message = transcriptErrorMessage(error);
       if (message) dispatch({ type: "transcript_error", agentId, message });
     }
-  }, [attach, loadAgentHttp]);
+  }, [attach, dispatchLoadedSnapshot, loadAgentHttp]);
 
   const value = useMemo<GatewayContextValue>(
     () => ({
