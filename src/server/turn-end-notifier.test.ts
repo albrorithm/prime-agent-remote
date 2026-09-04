@@ -198,6 +198,23 @@ describe("TurnEndNotifier", () => {
     expect(h.sent).toEqual([]);
   });
 
+  // Work asked of a child is news about its root, the only agent watched.
+  it("arms the root when a subagent is the one asked for work", () => {
+    const h = harness();
+    h.set([
+      agent({ id: "root", ...WORKING }),
+      agent({ id: "child", parentId: "root", rootId: "root", depth: 1, ...WORKING }),
+    ]);
+    h.notifier.arm("child");
+    h.advance(1_000);
+    h.set([
+      agent({ id: "root", ...IDLE }),
+      agent({ id: "child", parentId: "root", rootId: "root", depth: 1, ...IDLE }),
+    ]);
+    h.advance(50_000);
+    expect(h.sent).toEqual([{ agentId: "root", outcome: "complete" }]);
+  });
+
   it("reports a failed turn as failed", () => {
     const h = harness();
     h.set([agent({ id: "root", ...WORKING })]);

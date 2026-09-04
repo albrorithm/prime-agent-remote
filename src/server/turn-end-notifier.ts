@@ -90,10 +90,11 @@ export class TurnEndNotifier {
   /**
    * Something asked this agent for work: the browser sent it a message, or
    * answered a question it was blocked on. Either way a notification is owed
-   * when it next goes quiet.
+   * when it next goes quiet. Asked of a child, it is owed by the root, since
+   * only roots are watched and a child's state is dropped on the next tick.
    */
   arm(agentId: string): void {
-    const state = this.stateFor(agentId);
+    const state = this.stateFor(this.rootOf(agentId));
     state.armed = true;
   }
 
@@ -103,8 +104,23 @@ export class TurnEndNotifier {
    * specific; a "finished" behind it would be noise about the same moment.
    */
   disarm(agentId: string): void {
-    const state = this.states.get(agentId);
+    const state = this.states.get(this.rootOf(agentId));
     if (state) state.armed = false;
+  }
+
+  /** The watched agent this one rolls up into: itself when it is a root, or unknown. */
+  private rootOf(agentId: string): string {
+    const byId = new Map(this.options.catalog().agents.map((agent) => [agent.id, agent]));
+    let current = byId.get(agentId);
+    if (!current) return agentId;
+    const seen = new Set<string>();
+    while (current.parentId !== null && !seen.has(current.id)) {
+      seen.add(current.id);
+      const parent = byId.get(current.parentId);
+      if (!parent) break;
+      current = parent;
+    }
+    return current.id;
   }
 
   /** Reads the catalog and sends whatever is now due. Cheap; call it often. */
