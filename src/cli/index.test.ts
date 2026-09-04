@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeviceStore } from "../server/device-store.js";
+import { PushSubscriptionStore } from "../server/push-store.js";
 import { applyRevocation, connectableHost, gatewayOrigin, isProgramEntry, localHostname, parseArguments, readCliCheck, waitForOurGateway } from "./index.js";
 
 /* Every npm `bin` is a symlink, so this is the ordinary case, not an edge one:
@@ -250,23 +251,80 @@ describe("applyRevocation", () => {
 
   it("removes one device and leaves the others paired", async () => {
     const [phone] = await pair("iPhone", "iPad");
-    expect(await applyRevocation(storePath, phone.device.id)).toEqual({ kind: "revoked", id: phone.device.id });
+    expect(await applyRevocation(storePath, phone.device.id)).toEqual({ kind: "revoked", id: phone.device.id, pushDropped: 0 });
     expect(await remaining()).toEqual(["iPad"]);
   });
 
   it("reports an id that is not there rather than claiming a revocation", async () => {
     await pair("iPhone");
-    expect(await applyRevocation(storePath, "not-a-device")).toEqual({ kind: "unknown", id: "not-a-device" });
+    expect(await applyRevocation(storePath, "not-a-device")).toEqual({ kind: "unknown", id: "not-a-device", pushDropped: 0 });
     expect(await remaining()).toEqual(["iPhone"]);
   });
 
   it("counts what `all` actually removed", async () => {
     await pair("iPhone", "iPad", "Android");
-    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 3 });
+    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 3, pushDropped: 0 });
     expect(await remaining()).toEqual([]);
   });
 
   it("says zero rather than failing when there is nothing paired", async () => {
-    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 0 });
+    expect(await applyRevocation(storePath, "all")).toEqual({ kind: "revoked-all", count: 0, pushDropped: 0 });
+  });
+
+  /* The offline path docs/security.md names for a phone you no longer hold. No
+     session is live, so only the device binding can reach the push record. */
+  describe("with a push store", () => {
+    const pushStorePath = () => join(directory, "push-subscriptions.json");
+
+    async function subscribe(...devices: (string | undefined)[]) {
+      const store = new PushSubscriptionStore(pushStorePath());
+      await store.load();
+      for (const [index, deviceId] of devices.entries()) {
+        await store.upsert({
+          endpoint: `https://push.example.test/${index}`,
+          p256dh: "BJrkVFj8uQz9pOn8Bj7cKAsZnhgsB6EuzJyY0oH4zjxU",
+          auth: "3v0fHqQhH3xQ1r6mB3dOsg",
+          sessionId: "session-that-died-with-the-process",
+          deviceId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+      }
+    }
+
+    async function endpoints() {
+      const store = new PushSubscriptionStore(pushStorePath());
+      await store.load();
+      return store.list().map((record) => record.endpoint);
+    }
+
+    // An unreadable store loads as empty in the gateway, deliberately. Here it
+    // would read as "nothing to drop" and the revocation would be reported as
+    // applied over a file that still wakes the phone.
+    it("refuses to revoke anything when the push store cannot be read", async () => {
+      const [phone] = await pair("iPhone");
+      await mkdir(pushStorePath());
+      await expect(applyRevocation(storePath, phone.device.id, pushStorePath())).rejects.toThrow(/push subscription store/);
+      expect(await remaining()).toEqual(["iPhone"]);
+    });
+
+    it("drops push records by device, none for an unknown id, and every one on `all`", async () => {
+      const [phone, tablet] = await pair("iPhone", "iPad");
+      // The third record is from before subscriptions carried a device id; the
+      // fourth is what a revoke that wrote the device store and then failed on
+      // the push store leaves behind.
+      await subscribe(phone.device.id, tablet.device.id, undefined, "ghost");
+
+      expect(await applyRevocation(storePath, "not-a-device", pushStorePath())).toMatchObject({ kind: "unknown", pushDropped: 0 });
+      expect(await endpoints()).toHaveLength(4);
+
+      expect(await applyRevocation(storePath, "ghost", pushStorePath())).toMatchObject({ kind: "unknown", pushDropped: 1 });
+      expect(await endpoints()).toHaveLength(3);
+
+      expect(await applyRevocation(storePath, phone.device.id, pushStorePath())).toMatchObject({ kind: "revoked", pushDropped: 1 });
+      expect(await endpoints()).toEqual(["https://push.example.test/1", "https://push.example.test/2"]);
+
+      expect(await applyRevocation(storePath, "all", pushStorePath())).toMatchObject({ kind: "revoked-all", count: 1, pushDropped: 2 });
+      expect(await endpoints()).toEqual([]);
+    });
   });
 });

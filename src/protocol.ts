@@ -418,6 +418,9 @@ const agentSummarySchema = z.object({
   parentId: z.string().nullable(),
   depth: z.number().int().nonnegative(),
   name: z.string(),
+  /* Zod strips what it does not declare: without this the gateway set it and
+     the browser's parse deleted it before anything could read it. */
+  notificationLabel: z.string().optional(),
   description: z.string().optional(),
   cwd: z.string().optional(),
   lifecycle: z.enum(["starting", "live", "inactive", "stopped", "failed"]),
@@ -741,10 +744,8 @@ export const attachFrameSchema = z.object({
   type: z.literal("attach"),
   version: z.literal(PROTOCOL_VERSION),
   streamId: z.string().min(1).max(160),
-  // The same shape the server stamps on every frame it sends, not a second
-  // copy of it: this is the cursor coming back, and a resume where the two
-  // definitions had drifted would fail validation for reasons neither side
-  // could see.
+  // The cursor coming back, so the same schema the server stamps on frames:
+  // two copies could drift and fail a resume for a reason neither side sees.
   since: streamCursorSchema.nullable().optional(),
 });
 

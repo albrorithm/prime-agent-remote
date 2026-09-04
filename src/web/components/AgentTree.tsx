@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import { ChevronDown, ChevronRight, SlidersHorizontal, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 import { agentStatus } from "./agent-status";
-import { buildVisibleAgents } from "./agent-tree-utils";
+import { buildVisibleAgents, indexChildren } from "./agent-tree-utils";
 import { hasSessionActions } from "./SessionActions";
 
 interface Props {
@@ -48,16 +48,16 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
   const visible = useMemo(() => buildVisibleAgents(agents, expanded), [agents, expanded]);
-  const childrenByParent = useMemo(() => {
-    const result = new Map<string, AgentSummary[]>();
-    for (const item of agents) {
-      if (!item.parentId) continue;
-      const list = result.get(item.parentId) ?? [];
-      list.push(item);
-      result.set(item.parentId, list);
-    }
-    return result;
-  }, [agents]);
+  /* The sorted index `buildVisibleAgents` descends through, so ArrowRight lands
+     on the first child on screen. Position is a different question: rows whose
+     parent is missing reach the screen through that function's arrival-order
+     fallback, so what a row announces comes from the rows themselves. */
+  const childrenByParent = useMemo(() => indexChildren(agents), [agents]);
+  const siblingsByParent = useMemo(() => {
+    const byParent = new Map<string | null, AgentSummary[]>();
+    for (const item of visible) byParent.set(item.parentId, [...(byParent.get(item.parentId) ?? []), item]);
+    return byParent;
+  }, [visible]);
   const rovingFocusId = visible.some((item) => item.id === focusId)
     ? focusId
     : visible.find((item) => item.id === selectedId)?.id ?? visible[0]?.id ?? null;
@@ -176,7 +176,7 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
     <div className="agent-tree" role="tree" aria-label="Agents">
       {visible.map((agent, index) => {
         const children = childrenByParent.get(agent.id) ?? [];
-        const siblingList = agent.parentId ? childrenByParent.get(agent.parentId) ?? [] : agents.filter((item) => item.parentId === null);
+        const siblingList = siblingsByParent.get(agent.parentId) ?? [];
         return (
           <div
             key={agent.id}

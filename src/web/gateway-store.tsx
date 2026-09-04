@@ -830,10 +830,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       replayingStreams.current.clear();
       const closeEvent = event as CloseEvent;
       // 1008 also carries "Invalid protocol frame", which must keep retrying,
-      // so the reason is load-bearing. These two strings are the gateway's
-      // auth-loss closes (src/server/gateway.ts): expiry, and sign-out — which
-      // reaches every tab sharing the session, not just the one that signed out.
-      if (closeEvent.code === 1008 && /session expired|signed out/i.test(closeEvent.reason)) {
+      // so the reason is load-bearing. These are the gateway's three auth-loss
+      // closes, and for a revoked device this frame is the only notice it gets.
+      if (closeEvent.code === 1008 && /session expired|signed out|device revoked/i.test(closeEvent.reason)) {
         resetForUnauthorized();
         return;
       }
@@ -963,7 +962,11 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         resetForUnauthorized();
         return;
       }
-      dispatch({ type: "connection", value: "offline" });
+      /* A failed bootstrap says nothing about the transport. "offline" is a
+         claim only a re-attach can retract, so on an open socket it would leave
+         a banner offering a Reconnect that tears down a healthy connection. */
+      if (socketRef.current?.readyState === WebSocket.OPEN) updateSocketPhase();
+      else dispatch({ type: "connection", value: "offline" });
       showError(humanizeError(error, "Could not start the app"));
     } finally {
       if (lifecycleAbort.current === controller) lifecycleAbort.current = null;
@@ -1125,7 +1128,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (selection === selectionGeneration.current) showError(null);
       } catch (error) {
         if (selection !== selectionGeneration.current) return;
-        dispatch({ type: "select", value: previous });
+        // Only back to an agent that is still there. A catalog event arriving
+        // while the fetch was in flight may already have dropped it and
+        // repointed the selection, and rolling back would select a ghost.
+        if (previous == null || stateRef.current.catalog.agents.some((agent) => agent.id === previous)) {
+          dispatch({ type: "select", value: previous });
+        }
         if (!(error instanceof ApiError && error.status === 401)) {
           showError(humanizeError(error, "Could not open agent"));
         }

@@ -100,6 +100,8 @@ export interface Gateway {
   hub: EventHub;
   auth: AuthService;
   pushStore: PushSubscriptionStore;
+  /** Null unless push is configured. Exposed, like `pushStore`, so a test can see whether a route armed a turn. */
+  turnEnd: TurnEndNotifier | null;
   shutdown(): Promise<void>;
 }
 
@@ -279,6 +281,9 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       : value;
     return `${scope}:${createHash("sha256").update(stableStringify(semanticValue)).digest("base64url")}`;
   }
+
+  /** Devices whose revocation is done except for the push write. In memory only: after a restart the record is back on disk, and a revoke of the same id drops it as an ordinary miss on the device store. */
+  const failedPushRevocations = new Set<string>();
 
   async function deduplicated<T>(
     session: AuthenticatedSession,
@@ -495,11 +500,15 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`message:${agentId}`, parsed.data),
-        () => backend.sendMessage({ agentId, ...parsed.data, images }),
+        async () => {
+          const accepted = await backend.sendMessage({ agentId, ...parsed.data, images });
+          // Somebody asked this agent for work, so its next quiet is a finished
+          // turn. Inside the operation, not after it: a retried request id is
+          // answered from the cache without prompting the agent again.
+          turnEnd?.arm(agentId);
+          return accepted;
+        },
       );
-      // Somebody asked this agent for work, so its next quiet is a finished
-      // turn rather than a session that was already idle.
-      turnEnd?.arm(agentId);
       json(res, 202, result);
       return true;
     }
@@ -512,7 +521,16 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
         session,
         parsed.data.requestId,
         mutationBinding(`command:${agentId}`, parsed.data),
-        () => backend.executeSlashCommand({ agentId, ...parsed.data }),
+        async () => {
+          const executed = await backend.executeSlashCommand({ agentId, ...parsed.data });
+          // Session and experimental commands prompt the agent like a message
+          // does, so their next quiet is a finished turn. Direct commands start
+          // no turn, and a cached retry (see the message route) prompts nothing.
+          if (executed.result.kind === "session_accepted" || executed.result.kind === "experimental_accepted") {
+            turnEnd?.arm(agentId);
+          }
+          return executed;
+        },
       );
       json(res, 202, result);
       return true;
@@ -584,16 +602,42 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       const { deviceId } = parsed.data;
       const revokingSelf = auth.deviceIdFor(session) === deviceId;
       const reaped = await auth.revokeDevice(deviceId);
-      if (!reaped) { problem(res, 404, "No such device"); return true; }
       // Everything sign-out does, because this is sign-out aimed elsewhere: the
       // wake capability and the live socket both outlive the credential unless
       // they are taken too.
-      await Promise.all(reaped.map((id) => pushStore.removeSession(id).catch((error: unknown) => {
+      //
+      // By device first: `reaped` holds only sessions live in memory, and the
+      // phone that matters is asleep or was paired before the last restart.
+      // The session pass covers records from before they carried a device id.
+      // Tried for a device that is already gone, too: a revoke whose push write
+      // failed is retried by revoking the same id again.
+      // A revoke whose write failed left memory right and disk behind; the
+      // same id revoked again is the retry, and matches nothing by then.
+      const retryingWrite = failedPushRevocations.has(deviceId);
+      let pushDropped = 0;
+      let pushFailure: unknown;
+      try {
+        const dropped = await Promise.all([
+          pushStore.removeDevice(deviceId),
+          ...(reaped ?? []).map((id) => pushStore.removeSession(id)),
+        ]);
+        pushDropped = dropped.reduce((sum, count) => sum + count, 0);
+      } catch (error) {
+        pushFailure = error;
         console.error("Could not persist push revocation on device revoke", error);
-      })));
-      const sockets = reaped.flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
+      }
+      if (pushFailure) failedPushRevocations.add(deviceId);
+      else failedPushRevocations.delete(deviceId);
+      if (!reaped && !pushDropped && !pushFailure && !retryingWrite) { problem(res, 404, "No such device"); return true; }
+      const sockets = (reaped ?? []).flatMap((id) => [...(sessionSockets.get(id) ?? [])]);
       if (revokingSelf) auth.clearCredentials(res);
       for (const ws of sockets) closeWebSocket(ws, 1008, "Device revoked");
+      if (pushFailure) {
+        // The credential is gone whatever happens next. What has not happened
+        // is durable, and a 200 would say it had.
+        problem(res, 500, "Device revoked, but its push subscriptions could not be dropped", "Revoke it again to retry.");
+        return true;
+      }
       json(res, 200, { revoked: true, self: revokingSelf });
       return true;
     }
@@ -621,6 +665,8 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
               p256dh: request.subscription.keys.p256dh,
               auth: request.subscription.keys.auth,
               sessionId: session.id,
+              // What outlives the session, and so what a revocation can still find.
+              deviceId: auth.deviceIdFor(session),
               createdAt: new Date().toISOString(),
               // Sent on every subscribe, including the one the app makes on
               // each launch to re-claim its record. A subscribe that omitted it
@@ -976,5 +1022,5 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     for (const client of wss.clients) client.terminate();
   }
 
-  return { requestListener, upgradeListener, backend, hub, auth, pushStore, shutdown };
+  return { requestListener, upgradeListener, backend, hub, auth, pushStore, turnEnd, shutdown };
 }

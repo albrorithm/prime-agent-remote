@@ -38,6 +38,54 @@ describe("AgentTree", () => {
     expect(items.filter((item) => item.tabIndex === 0)).toHaveLength(1);
   });
 
+  /* Rows render in priority order. An index built in arrival order had a
+     screen reader reading the tree back to front and ArrowRight skipping the
+     first visible child whenever activity, the sort key, changed. */
+  it("reports position and descends in the order the rows are actually rendered", async () => {
+    const reordered = [
+      makeAgent("root", null, 0),
+      // Arrives first, sorts second: idle loses to working.
+      makeAgent("idle-child", "root", 1),
+      { ...makeAgent("working-child", "root", 1), activity: "working" as const },
+    ];
+    const onSelect = vi.fn();
+    render(<AgentTree agents={reordered} selectedId="root" onSelect={onSelect} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(3));
+
+    const items = screen.getAllByRole("treeitem");
+    const rendered = items.map((item) => item.textContent);
+    expect(rendered[1]).toContain("working-child");
+    expect(rendered[2]).toContain("idle-child");
+    // What each row announces has to match where it actually is.
+    expect(items.slice(1).map((item) => item.getAttribute("aria-posinset"))).toEqual(["1", "2"]);
+    expect(items.slice(1).map((item) => item.getAttribute("aria-setsize"))).toEqual(["2", "2"]);
+
+    items[0].focus();
+    fireEvent.keyDown(items[0], { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole("treeitem")[1]));
+    expect(document.activeElement?.textContent).toContain("working-child");
+  });
+
+  /* Rows whose parent is missing reach the screen through the arrival-order
+     fallback in buildVisibleAgents, not through the sorted index. Position has
+     to follow the rows, whichever path put them there. */
+  it("announces orphaned rows in the order they are rendered", async () => {
+    const orphans = [
+      makeAgent("root", null, 0),
+      makeAgent("idle-orphan", "gone", 1),
+      { ...makeAgent("working-orphan", "gone", 1), activity: "working" as const },
+    ];
+    render(<AgentTree agents={orphans} selectedId="root" onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(3));
+
+    const rows = screen.getAllByRole("treeitem").slice(1);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("idle-orphan"),
+      expect.stringContaining("working-orphan"),
+    ]);
+    expect(rows.map((row) => row.getAttribute("aria-posinset"))).toEqual(["1", "2"]);
+  });
+
   it("hides descendants of collapsed nodes instead of flattening them", async () => {
     const onSelect = vi.fn();
     render(<AgentTree agents={agents} selectedId="root" onSelect={onSelect} />);

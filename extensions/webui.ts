@@ -83,9 +83,21 @@ export default function (pi: ExtensionAPI) {
 				try {
 					return await pi.exec(CLI, argv, { timeout: 120_000 });
 				} catch (error) {
-					return { stdout: "", stderr: error instanceof Error ? error.message : String(error), code: 127 };
+					// `pi.exec` throws only for a stale extension context. The message
+					// keeps this out of `couldNotRun` and on the generic error path.
+					return { stdout: "", stderr: error instanceof Error ? error.message : String(error), code: 1, killed: false };
 				}
 			};
+
+			/**
+			 * Whether the CLI could not be run at all. There is no exit code for
+			 * it: `pi.exec` spawns without a shell, so a missing binary is ENOENT
+			 * on the child, which the host reports as code 1 with both streams
+			 * empty, never the 127 a shell would give. Every failure path in the
+			 * CLI itself prints something, so silence plus non-zero is the sign.
+			 */
+			const couldNotRun = (result: { code: number; stdout: string; stderr: string; killed?: boolean }) =>
+				result.code !== 0 && !result.killed && !result.stdout.trim() && !result.stderr.trim();
 
 			// Everything after the action forwards verbatim — `--port`, `--demo`,
 			// `--rotate`, whatever the CLI itself understands for that subcommand.
@@ -93,7 +105,7 @@ export default function (pi: ExtensionAPI) {
 			const passthrough = requested.slice(1);
 			let result = await run([action, ...passthrough]);
 
-			if (result.code === 127) {
+			if (couldNotRun(result)) {
 				ctx.ui.notify(
 					`/webui: \`${CLI}\` is not on PATH. Install the mobile web UI, or run its CLI from its checkout.`,
 					"error",

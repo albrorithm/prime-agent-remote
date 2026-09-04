@@ -22,6 +22,12 @@ export interface StoredPushSubscription {
   auth: string;
   /** The gateway session that most recently claimed this endpoint. */
   sessionId: string;
+  /**
+   * The paired device the claiming session descended from. Sessions die with
+   * the process and the subscription does not, so the wake capability is
+   * bound to the one credential a later revocation can still reach.
+   */
+  deviceId?: string;
   createdAt: string;
   /**
    * Whether this device also asked to be told when an agent finishes its turn,
@@ -37,6 +43,13 @@ const storedSubscriptionSchema = z.object({
   p256dh: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   sessionId: z.string().min(1).max(256),
+  /* Optional for the same reason `turnEnd` is, below: records written before
+     this field existed lack it, and a required field would drop every one of
+     them on upgrade. Those legacy records stay reachable through
+     `removeSession` while their device is live, and re-acquire a `deviceId`
+     the next time the app re-claims its endpoint — which it does on every new
+     session. `removeAll` is what covers them when no device is live at all. */
+  deviceId: z.string().min(1).max(256).optional(),
   createdAt: z.string().min(1).max(64),
   /* Optional, and that is load-bearing rather than lax. Every record written
      before this field existed lacks it, `.strict()` rejects what it does not
@@ -85,6 +98,12 @@ export class PushSubscriptionStore {
    */
   private persistRetryTimer: NodeJS.Timeout | undefined;
   private persistRetryAttempt = 0;
+  /**
+   * Disk is behind memory: a write failed and none has landed since. Memory
+   * is already right, so a later mutation that matches nothing is still the
+   * write that is owed, and `removeWhere` persists on it.
+   */
+  private pendingWrite = false;
 
   constructor(
     private readonly filePath: string,
@@ -97,12 +116,15 @@ export class PushSubscriptionStore {
    * localStorage — fall back to empty — because a gateway that will not start
    * because of its notification file is worse than one that cannot notify.
    */
-  async load(): Promise<void> {
+  async load(options: { strict?: boolean } = {}): Promise<void> {
     this.records = [];
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
-    } catch {
+    } catch (error) {
+      // Absent is empty. Unreadable is unknown, and a strict caller (the CLI,
+      // about to report a revocation as applied) must not take it for empty.
+      if (options.strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return;
     }
     if (raw.length > MAX_PUSH_STORE_BYTES) return;
@@ -125,6 +147,11 @@ export class PushSubscriptionStore {
     return this.records;
   }
 
+  /** Whether the file has yet to catch up with a change already made here. */
+  get hasPendingWrite(): boolean {
+    return this.pendingWrite;
+  }
+
   /**
    * Claims an endpoint for a session, replacing any existing record for it.
    *
@@ -143,7 +170,7 @@ export class PushSubscriptionStore {
 
   async removeEndpoint(endpoint: string): Promise<boolean> {
     const remaining = this.records.filter((record) => record.endpoint !== endpoint);
-    if (remaining.length === this.records.length) return false;
+    if (remaining.length === this.records.length && !this.pendingWrite) return false;
     this.records = remaining;
     await this.persist();
     return true;
@@ -151,9 +178,34 @@ export class PushSubscriptionStore {
 
   /** Sign-out revocation. Expiry deliberately has no equivalent. */
   async removeSession(sessionId: string): Promise<number> {
-    const remaining = this.records.filter((record) => record.sessionId !== sessionId);
+    return this.removeWhere((record) => record.sessionId === sessionId);
+  }
+
+  /**
+   * Device revocation. Unlike `removeSession` this reaches records whose
+   * session is long gone, which is the ordinary case for a phone that is
+   * asleep, or was paired before the last restart.
+   */
+  async removeDevice(deviceId: string): Promise<number> {
+    return this.removeWhere((record) => record.deviceId === deviceId);
+  }
+
+  /**
+   * Drops every record. For `devices --revoke all`, where the intent is that
+   * no device may be woken and legacy records carrying no `deviceId` must go
+   * too.
+   */
+  async removeAll(): Promise<number> {
+    return this.removeWhere(() => true);
+  }
+
+  private async removeWhere(doomed: (record: StoredPushSubscription) => boolean): Promise<number> {
+    const remaining = this.records.filter((record) => !doomed(record));
     const removed = this.records.length - remaining.length;
-    if (!removed) return 0;
+    // Never persists on a miss, unless a write is already owed: the CLI opens
+    // this store on a file it may not be able to read, which loads as empty,
+    // and a blind write would truncate a store that was merely unreadable.
+    if (!removed && !this.pendingWrite) return 0;
     this.records = remaining;
     await this.persist();
     return removed;
@@ -173,6 +225,7 @@ export class PushSubscriptionStore {
   }
 
   private onPersistSucceeded(): void {
+    this.pendingWrite = false;
     this.cancelPersistRetry();
     this.persistRetryAttempt = 0;
   }
@@ -185,6 +238,7 @@ export class PushSubscriptionStore {
    * revocation right before a quiet restart falls into.
    */
   private onPersistFailed(): void {
+    this.pendingWrite = true;
     this.cancelPersistRetry();
     if (this.persistRetryAttempt >= this.persistRetryDelaysMs.length) {
       // Retries exhausted. Say plainly what that means operationally rather

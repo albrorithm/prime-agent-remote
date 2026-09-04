@@ -108,17 +108,23 @@ export function useComposerDrafts(id: string): ComposerDrafts {
       setDraftsState((current) => {
         const synced = syncedRef.current;
         const next: Record<string, string> = { ...current };
-        let changed = false;
+        const adopted: Record<string, string> = {};
         for (const agentId of new Set([...Object.keys(current), ...Object.keys(incoming)])) {
           const incomingValue = incoming[agentId] ?? "";
           const currentValue = current[agentId] ?? "";
           const syncedValue = synced[agentId] ?? "";
           if (incomingValue === currentValue || currentValue !== syncedValue) continue;
           next[agentId] = incomingValue;
-          changed = true;
+          adopted[agentId] = incomingValue;
         }
-        if (!changed) return current;
-        syncedRef.current = next;
+        if (Object.keys(adopted).length === 0) return current;
+        /* Only the ids actually adopted advance the baseline. Assigning `next`
+           wholesale marked every id as in sync, including the ones the loop had
+           just skipped for being locally edited — so a remote write to a
+           different agent quietly made this tab's own unsent draft look
+           untouched, and the next write to it clobbered mid-typing. Which is
+           precisely what the conflict rule above exists to prevent. */
+        syncedRef.current = { ...synced, ...adopted };
         return next;
       });
     }

@@ -26,7 +26,7 @@ The gateway currently permits these live operations:
 - list directory names for the new-session picker;
 - register and revoke a browser push subscription for this device;
 - list the paired devices — id, name, pairing time, last use, and which one is asking. No part of a credential is returned, not the secret and not its hash;
-- revoke one paired device by its id, including its own. This does everything sign-out does, aimed at another device: the credential is dropped, every session descended from it is deleted, their push subscriptions are removed, and their live sockets are closed, so a revoked device stops receiving immediately rather than at the end of its session TTL. Revoking the requesting device also clears that browser's own cookies;
+- revoke one paired device by its id, including its own. This does everything sign-out does, aimed at another device: the credential is dropped, every session descended from it is deleted, every push subscription bound to it is removed, and its live sockets are closed, so a revoked device stops receiving immediately rather than at the end of its session TTL. Revoking the requesting device also clears that browser's own cookies;
 - explicitly sign out, invalidating the session, clearing its cookie, and revoking that session's push subscriptions.
 
 Experimental detected extension commands can run with the local capabilities already granted to Prime Agent, while detected prompt and skill commands can create model turns. This expands the paired browser's trust boundary and retains a catalog-reload race that may turn command text into a model prompt.
@@ -82,7 +82,10 @@ maximum age, which is the ceiling browsers enforce anyway.
   that restart, and every device except the revoked one restores itself from
   its credential without the setup token. If the gateway cannot be stopped,
   nothing is revoked and the command reports that, rather than reporting a
-  revocation it did not actually apply.
+  revocation it did not actually apply. It writes the push store as well as the
+  device store, and says how many subscriptions it dropped: a credential is one
+  capability and the ability to wake the phone is another, and the recovery
+  path is worth nothing if it takes only the first.
 
 ### Sessions
 
@@ -110,8 +113,10 @@ before it makes any request, and it does the same for a link that arrives at an
 already-open app, but by then the URL has already been through that phone: the
 browser's history, its address-bar suggestions, and any screenshot of the
 screen. **A pairing link is exactly as sensitive as the token inside it**, and
-it stays valid until the token is rotated (`prime-agent-remote token
---rotate`), because it *is* the token. A link is spent at most once per app
+it stays valid until the token is rotated (`prime-agent-remote token --rotate`)
+*and the gateway is restarted*, because it *is* the token and the running
+process holds the value it booted with — nothing re-reads the token file.
+Rotating without restarting leaves a leaked link working. A link is spent at most once per app
 launch whatever its outcome, so a stale one cannot repeatedly consume the
 shared pairing budget, and a fragment that is not shaped like a token is not
 spent at all.
@@ -149,7 +154,9 @@ A push subscription is a long-lived capability to wake a device, and it intentio
 - Payloads carry a session label, an attention kind, opaque agent and attention ids, and a count. They never carry prompt text, transcript text, dialog titles or messages, or option labels. Agent output does not reach a lock screen. A test builds a payload from an attention request whose every daemon-authored field is a sentinel and asserts none survive. The label is `AgentSummary.notificationLabel`, not the display name: a display name falls back to the session's first user message and then to the daemon's recap, both of which are conversation text, so the label is drawn only from a name a person typed or the session's own directory, and is absent when neither exists. A second test pins that a session titled by its first message pushes its directory instead.
 - Push fires on an authoritative `AttentionRequest`, and never on `needsInput`, which the protocol documents as an advisory daemon guess and never a queue.
 - A device may additionally opt in to being told when an agent finishes its turn. This is off unless asked for, stored per subscription, and carried on every subscribe — including the silent one the app makes each launch, so the preference cannot be reset by a reclaim. A finished turn carries the same two facts as any other payload: which session, and that it ended (or ended in error). "Finished" and "stopped with an error" are words the gateway chose, not anything the model wrote, so this widens what reaches a lock screen by no content at all.
+- A record carries the device it was claimed by as well as the session. The session is what claimed the endpoint, but sessions are in memory and die with the process, while the subscription is written to disk exactly so that it does not — so a record bound only to a session becomes unreachable from a revocation the moment the gateway restarts or the twelve-hour session expires. The device credential outlives both, and is what a revocation matches on. Records written before subscriptions carried a device id have none; they stay reachable through their session while that device is live, and acquire one the next time the app re-claims its endpoint, which it does on every new session.
 - Sign-out revokes: the logout route drops every record bound to that session, and the browser drops its own subscription before the request. Session expiry revokes nothing. A device re-registers its existing subscription on each new session so that sign-out can always find it.
+- Revoking a device drops every subscription bound to that device, whether or not it currently holds a live session, and whether the revocation came from the app or from the CLI. `prime-agent-remote devices --revoke all` clears the store outright, because a record predating the device id has none to match and "revoke all" means no device may be woken. If dropping them fails, the route says so instead of reporting success, and revoking the same id again retries the drop; the CLI refuses to revoke anything at all over a push store it cannot read.
 - A record is otherwise removed only by an explicit unsubscribe or by a push service reporting the endpoint permanently gone (`404`/`410`); it is never removed for being old.
 - Endpoints are device identifiers and are never written to logs.
 - Rotating the VAPID keypair invalidates every existing subscription; each device must turn notifications on again.
@@ -189,9 +196,8 @@ Before a broad deployment:
   are still not separable;
 - validate all Prime extension UI request shapes before adding free-text responses;
 - perform a physical-device and reverse-proxy security test, including a real push delivered to an installed PWA with the app closed;
-- list and revoke individual push subscriptions. Revoking a device drops every
-  subscription belonging to its sessions, so a lost phone stops being woken; a
-  single subscription still cannot be revoked without revoking the device or
-  signing out the session that made it.
+- list and revoke individual push subscriptions. A single subscription cannot
+  be revoked without revoking the device that made it or signing out the
+  session that claimed it.
 
 Privacy-minimal push is now implemented against authoritative attention transitions, and its payload boundary is stated above. What remains is operational rather than a design question: subscriptions survive gateway restarts by design, so the store file is a credential-bearing artifact that belongs in the same backup and disposal policy as any other.

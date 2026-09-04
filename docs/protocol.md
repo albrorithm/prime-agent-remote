@@ -73,7 +73,7 @@ Mutations use HTTP instead of WebSocket. Every request includes:
 - a UUID `requestId`;
 - an `expectedRevision` precondition (except where noted below).
 
-Accepted request IDs are cached briefly so network retries do not duplicate prompts or approvals. Message and session-command mutations use Prime Agent's standard steering delivery when a run is active. Prime Agent applies the session's configured steering queue mode. A mutation route also enforces the session mutation rate limit (`docs/security.md`); sign-out is the one documented exception, since revoking a session must never be the one request that session cannot make.
+Accepted request IDs are cached briefly so network retries do not duplicate prompts or approvals. Message and session-command mutations use Prime Agent's standard steering delivery when a run is active. Prime Agent applies the session's configured steering queue mode. A mutation route also enforces the session mutation rate limit (`docs/security.md`); sign-out is the one documented exception, since revoking a session must never be the one request that session cannot make. Sign-out and device revocation are also the two routes that carry neither a `requestId` nor an `expectedRevision`: neither is replayable in a way a cache would help, and neither targets an agent whose revision could have moved.
 
 ## REST routes
 
@@ -112,10 +112,15 @@ The mutation routes above return `202` with a `MutationAccepted` body, `{ accept
 
 ### Push
 
-- `POST /api/v1/push/subscribe` — `{ requestId, subscription: { endpoint, keys: { p256dh, auth } } }`. `503` if the gateway has no VAPID keys configured.
+- `POST /api/v1/push/subscribe` — `{ requestId, subscription: { endpoint, keys: { p256dh, auth } }, turnEnd? }`. `503` if the gateway has no VAPID keys configured. `turnEnd` asks to be woken when an agent finishes a turn, not only when one needs an answer. It is per device, absent means off, and the gateway stores whatever arrives on every subscribe — including the silent re-claim the app makes on each launch — so a subscribe that omits it turns the preference off.
 - `POST /api/v1/push/unsubscribe` — `{ requestId, endpoint }`. Succeeds even for an endpoint the gateway never had, since that is the goal state either way.
 
 Both return `202 { accepted: true, requestId }`.
+
+### Devices
+
+- `GET /api/v1/devices` — authenticated, no CSRF (it is a read). `200 { devices: [{ id, name, createdAt, lastSeenAt, current }] }`. `current` marks the device making the request. No part of a credential is returned, not the secret and not its hash.
+- `POST /api/v1/devices/revoke` — `{ deviceId }`. Origin- and CSRF-checked and rate limited, but carries neither `requestId` nor `expectedRevision`, so it is not deduplicated and does not return a `MutationAccepted` body. `200 { revoked: true, self }`, where `self` is true when a device revoked its own credential — in which case its cookies are cleared too. `404` for an unknown id. Revoking drops the credential, deletes every session descended from it, removes every push subscription bound to that device, and closes the sockets of the sessions it reaped.
 
 ### Attention
 

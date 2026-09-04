@@ -217,8 +217,12 @@ interface PrimeDaemonClient {
   connect(timeoutMs?: number): Promise<void>;
   request(command: Record<string, unknown>, timeoutMs?: number): Promise<PrimeResponse>;
   close(): void;
-  /** Newer daemon builds expose an emitter surface; older ones only fail requests. */
-  on?(event: string, listener: (...args: unknown[]) => void): unknown;
+  /**
+   * 0.9 clients register a close listener and hand back an unsubscribe. Not an
+   * emitter: `DaemonClient` is a plain class with `onMessage`/`onClose` and has
+   * never had `on`. Optional because an older build may only fail requests.
+   */
+  onClose?(listener: (error: Error) => void): () => void;
 }
 
 interface PrimeModule {
@@ -295,11 +299,25 @@ const MAX_STORED_REFINES = 20;
 const MAX_DASHBOARD_REFINES = 20;
 const CONTEXT_STATS_MIN_INTERVAL_MS = 20_000;
 /**
- * The daemon `list` is a cheap control-plane round trip that reads state the
+ * A bare daemon `list` is a cheap control-plane round trip that reads state the
  * daemon already holds, so it shares the budget the socket connect above it
  * uses: a daemon silent for five seconds is stalled, not slow.
+ *
+ * This is the roster-only budget. `list all` is a different request entirely —
+ * see below.
  */
 export const PRIME_LIST_TIMEOUT_MS = 5_000;
+/**
+ * `list all` is not the roster round trip: the supervisor scans the session
+ * archive in a child process, one transcript read per saved session, and
+ * budgets itself five minutes for it. Transcript-proportional work, like the
+ * snapshot, so a large archive or a cold cache is slow without being stalled.
+ *
+ * Thirty seconds rather than the daemon's five minutes because the mutation
+ * routes await a catalog refresh: this is also the worst case a phone spends
+ * waiting on rename, delete or stop.
+ */
+export const PRIME_CATALOG_LIST_TIMEOUT_MS = 30_000;
 /**
  * Attaching to an already-running agent session is another control-plane
  * handshake against a live daemon, so it gets the same five seconds. It is not
@@ -1518,6 +1536,8 @@ export class PrimeBackend implements AgentBackend {
   private readonly attentionListeners: AttentionListener[] = [];
   private module!: PrimeModule;
   private client!: PrimeDaemonClient;
+  /** Unsubscribes the current client's close listener; see observeClientDisconnect. */
+  private clientCloseUnsubscribe: (() => void) | undefined;
   private catalogState: CatalogSnapshot = { revision: 0, agents: [] };
   private rawSummaries = new Map<string, PrimeSessionSummary>();
   private publicBySession = new Map<string, string>();
@@ -1591,17 +1611,25 @@ export class PrimeBackend implements AgentBackend {
     }, this.catalogPollIntervalMs);
   }
 
+  /**
+   * Notices a dropped socket at the moment it drops, rather than up to one
+   * poll interval later when the next catalog refresh fails. The poll is the
+   * dependable detector; this only makes it prompt.
+   */
   private observeClientDisconnect(client: PrimeDaemonClient): void {
-    if (typeof client.on !== "function") return;
-    const dropped = () => {
-      if (!this.closed && this.client === client) this.noteDaemonFailure();
-    };
-    // Subscribing to "error" also keeps an emitter-based client from crashing
-    // the process on an unhandled error event.
+    this.releaseClientCloseListener();
+    if (typeof client.onClose !== "function") return;
     try {
-      client.on("close", dropped);
-      client.on("error", dropped);
-    } catch { /* Emitter surface is optional. */ }
+      this.clientCloseUnsubscribe = client.onClose(() => {
+        if (!this.closed && this.client === client) this.noteDaemonFailure();
+      });
+    } catch { /* Close-listener surface is optional. */ }
+  }
+
+  /** So a superseded client's listener does not outlive the client. */
+  private releaseClientCloseListener(): void {
+    try { this.clientCloseUnsubscribe?.(); } catch { /* Best-effort cleanup. */ }
+    this.clientCloseUnsubscribe = undefined;
   }
 
   private noteDaemonFailure(): void {
@@ -1650,7 +1678,10 @@ export class PrimeBackend implements AgentBackend {
       // other list: an unbounded probe against a daemon that accepts sockets
       // but answers nothing would park here forever and stop the ladder from
       // ever reaching its next rung.
-      const probe = await replacement.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
+      //
+      // Roster-only: `all` would make the liveness probe proportional to how
+      // much history is on disk, not to whether the daemon is answering.
+      const probe = await replacement.request({ type: "list" }, PRIME_LIST_TIMEOUT_MS);
       if (!probe.success) throw new Error("Prime daemon list failed");
     } catch {
       try { replacement.close(); } catch { /* Best-effort cleanup. */ }
@@ -2221,6 +2252,7 @@ export class PrimeBackend implements AgentBackend {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.releaseClientCloseListener();
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
@@ -2262,7 +2294,7 @@ export class PrimeBackend implements AgentBackend {
   private async loadCatalogOnce(): Promise<void> {
     let response: PrimeResponse;
     try {
-      response = await this.client.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
+      response = await this.client.request({ type: "list", all: true }, PRIME_CATALOG_LIST_TIMEOUT_MS);
     } catch {
       throw new Error("Prime daemon list failed");
     }
@@ -2354,15 +2386,21 @@ export class PrimeBackend implements AgentBackend {
     const failed = summary.workerState === "failed" || summary.statusLabel === "failed";
     const recovering = summary.workerState === "starting" || summary.workerState === "recovering"
       || summary.statusLabel === "recovering";
+    /* A "stopping" worker (daemon schema 16) is being torn down and not coming
+       back, so "stopped" rather than "starting". That also puts it outside
+       ANSWERABLE_ATTENTION_LIFECYCLES, so it stops badging the app. */
+    const stopping = summary.workerState === "stopping";
     const lifecycle = queued
       ? "starting"
       : !summary.activeSessionId
         ? "inactive"
         : failed
           ? "failed"
-          : summary.lifecycle === "draft" || recovering
-            ? "starting"
-            : "live";
+          : stopping
+            ? "stopped"
+            : summary.lifecycle === "draft" || recovering
+              ? "starting"
+              : "live";
     /* The daemon's own summarizer writes `summary` — a present-tense clause of at
        most twelve words describing what this agent is doing. It is the best title
        material available and it re-runs as the work moves on, so it is the
@@ -2398,8 +2436,10 @@ export class PrimeBackend implements AgentBackend {
       updatedAt: toIso(summary.lastActivityAt || summary.modified || summary.created),
       capabilities: {
         ...defaultCapabilities,
-        send: Boolean(summary.activeSessionId),
-        abort: Boolean(summary.activeSessionId && working),
+        // A stopping worker still names an active session, and is not one to
+        // send to, answer, or stop again.
+        send: Boolean(summary.activeSessionId) && !stopping,
+        abort: Boolean(summary.activeSessionId && working) && !stopping,
         resume: !summary.activeSessionId && typeof summary.sessionFile === "string" && Boolean(summary.sessionFile),
         // Structural, not probed: capabilities are stamped from the daemon's
         // `list` output with no connection in hand. A live session renames
@@ -2409,13 +2449,13 @@ export class PrimeBackend implements AgentBackend {
         rename: Boolean(summary.activeSessionId) || Boolean(summary.sessionFile),
         // Only a live session has something to end. `kill` takes an
         // activeSessionId, so a saved one has nothing to name.
-        stop: Boolean(summary.activeSessionId),
+        stop: Boolean(summary.activeSessionId) && !stopping,
         // The mirror image: `delete_saved_session` deletes a file, so a live
         // session has to be stopped before it can be deleted. That two-step is
         // deliberate — it is one more thing between a phone and an
         // irreversible loss.
         delete: !summary.activeSessionId && Boolean(summary.sessionFile),
-        respond: Boolean(summary.activeSessionId),
+        respond: Boolean(summary.activeSessionId) && !stopping,
         images: summary.model?.input?.includes("image") === true,
       },
     };

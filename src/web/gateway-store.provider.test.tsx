@@ -335,7 +335,13 @@ describe("GatewayProvider recovery and state ownership", () => {
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
-  it("turns an expired-session websocket close into centralized auth reset", async () => {
+  /* Three close reasons mean the credential is gone, and for a revoked device
+     this frame is the only word it gets: the revoking device runs signOut()
+     locally, every other tab bound to the reaped sessions sees nothing but the
+     1008. Unmatched, a reason read as an ordinary drop and the app stayed
+     interactive through a backoff and a wasted socket attempt while every
+     mutation 401'd. */
+  it.each(["Session expired", "Device revoked", "Signed out"])("turns a %s websocket close into centralized auth reset", async (reason) => {
     apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
     apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
     const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
@@ -343,11 +349,37 @@ describe("GatewayProvider recovery and state ownership", () => {
     const socket = MockWebSocket.instances[0];
     act(() => socket.open());
 
-    act(() => socket.close(1008, "Session expired"));
+    act(() => socket.close(1008, reason));
 
     expect(result.current.authRequired).toBe(true);
     expect(result.current.snapshots).toEqual({});
     expect(result.current.catalog.agents).toEqual([]);
+  });
+
+  /* "offline" is a claim about the transport, and nothing but a re-attach can
+     retract it — plain event frames never touch the socket phase. So a
+     transcript that would not load used to leave a live socket behind a
+     "Connection lost" banner offering a Reconnect that would close it. */
+  it("keeps the connection live when the first transcript fails but the socket is open", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(408, "Request timed out"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    await waitFor(() => expect(result.current.error).toBeTruthy());
+
+    expect(result.current.connection).toBe("live");
+  });
+
+  it("still reports offline when the transcript fails and the socket never opened", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(408, "Request timed out"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+
+    await waitFor(() => expect(result.current.error).toBeTruthy());
+
+    expect(result.current.connection).toBe("offline");
   });
 
   it("blocks blind retries after an oversized server frame but allows manual retry", async () => {

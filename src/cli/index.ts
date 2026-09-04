@@ -11,6 +11,7 @@ import { type GatewayConfig, loadConfig } from "../server/config.js";
 import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
 import { resolvePrimeModule } from "../server/prime-module.js";
+import { PushSubscriptionStore } from "../server/push-store.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
 import { type ExposureMode, defaultExposureMode, resolveExposure, type Exposure } from "./exposure.js";
 import { isPrimeWebGatewayResponse } from "./gateway-identity.js";
@@ -598,17 +599,45 @@ async function token(options: Options): Promise<number> {
 }
 
 export type RevocationOutcome =
-  | { kind: "revoked"; id: string }
-  | { kind: "revoked-all"; count: number }
-  | { kind: "unknown"; id: string };
+  | { kind: "revoked"; id: string; pushDropped: number }
+  | { kind: "revoked-all"; count: number; pushDropped: number }
+  | { kind: "unknown"; id: string; pushDropped: number };
 
-/** Applies a revocation to the store on disk. The caller owns the printing. */
-export async function applyRevocation(storePath: string, revoke: string): Promise<RevocationOutcome> {
+/**
+ * Applies a revocation to both stores on disk; the caller owns the printing.
+ * The push record is the one that survives a restart, so skipping it would
+ * leave the phone still being woken. `all` clears the push store outright:
+ * records from before subscriptions carried a device id have nothing to match,
+ * and "revoke all" means no device may be woken. Safe because the caller has
+ * already stopped the gateway, as `revokeDevices` explains.
+ */
+export async function applyRevocation(
+  storePath: string,
+  revoke: string,
+  pushStorePath?: string,
+): Promise<RevocationOutcome> {
   const store = new DeviceStore(storePath);
   await store.load();
-  if (revoke === "all") return { kind: "revoked-all", count: await store.revokeAll() };
-  if (await store.revoke(revoke)) return { kind: "revoked", id: revoke };
-  return { kind: "unknown", id: revoke };
+
+  const pushStore = pushStorePath ? new PushSubscriptionStore(pushStorePath) : undefined;
+  try {
+    await pushStore?.load({ strict: true });
+  } catch (error) {
+    // Before any write: a store that cannot be read cannot be revoked from,
+    // and reporting the credential revoked would hide the phone still woken.
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not read the push subscription store at ${pushStorePath}; nothing was revoked. ${reason}`);
+  }
+
+  if (revoke === "all") {
+    return { kind: "revoked-all", count: await store.revokeAll(), pushDropped: (await pushStore?.removeAll()) ?? 0 };
+  }
+  // The push record is tried whether or not the device record is still there:
+  // a retry after a failed push write finds the device already gone, and the
+  // record it came for is the one still able to wake the phone.
+  const revoked = await store.revoke(revoke);
+  const pushDropped = (await pushStore?.removeDevice(revoke)) ?? 0;
+  return { kind: revoked ? "revoked" : "unknown", id: revoke, pushDropped };
 }
 
 /**
@@ -673,7 +702,37 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     line();
   }
 
-  const outcome = await applyRevocation(config.deviceStorePath, revoke);
+  const restart = async (): Promise<number> => {
+    line();
+    line("Starting it again...");
+    line();
+    const restarted = await start({
+      command: "start",
+      mode: running!.mode as ExposureMode,
+      port: running!.port,
+      demo: running!.backend === "demo",
+      foreground: false,
+      rotate: false,
+      noServe: false,
+      qr: false,
+    });
+    if (restarted !== 0) {
+      line();
+      line("The revocation is applied, but the gateway did not come back up.");
+      line("Start it again with `prime-agent-remote start`.");
+    }
+    return restarted;
+  };
+
+  let outcome: RevocationOutcome;
+  try {
+    outcome = await applyRevocation(config.deviceStorePath, revoke, config.webPushStorePath);
+  } catch (error) {
+    // The gateway was stopped for this write. A store that would not take it
+    // is the caller's to report; it is not a reason to leave the gateway down.
+    if (running) await restart();
+    throw error;
+  }
   if (outcome.kind === "revoked-all") {
     line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
   } else if (outcome.kind === "revoked") {
@@ -681,28 +740,15 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
   } else {
     line(`No device with id ${outcome.id}.`);
   }
+  // The half of a revocation an operator cannot otherwise see.
+  if (outcome.pushDropped > 0) {
+    const plural = outcome.pushDropped === 1 ? "" : "s";
+    line(`Dropped ${outcome.pushDropped} push subscription${plural}. Those devices stop being woken.`);
+  }
 
   if (!running) return outcome.kind === "unknown" ? 1 : 0;
-
-  line();
-  line("Starting it again...");
-  line();
-  const restarted = await start({
-    command: "start",
-    mode: running.mode as ExposureMode,
-    port: running.port,
-    demo: running.backend === "demo",
-    foreground: false,
-    rotate: false,
-    noServe: false,
-    qr: false,
-  });
-  if (restarted !== 0) {
-    line();
-    line("The revocation is applied, but the gateway did not come back up.");
-    line("Start it again with `prime-agent-remote start`.");
-    return restarted;
-  }
+  const restarted = await restart();
+  if (restarted !== 0) return restarted;
   return outcome.kind === "unknown" ? 1 : 0;
 }
 

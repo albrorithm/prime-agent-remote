@@ -163,6 +163,24 @@ export async function reclaimPushSubscription(
 }
 
 /**
+ * Changes the turn-end preference on the subscription this device already has.
+ *
+ * Not `enablePush`: that unsubscribes and re-mints, which is right when turning
+ * notifications on (the old subscription may be bound to a rotated VAPID key)
+ * and wrong for a preference flip. A failed re-subscribe left the device with
+ * no subscription at all, and each flip orphaned an endpoint in a bounded store.
+ *
+ * Asks for no permission: the toggle only renders once notifications are on.
+ */
+export async function updatePushPreference(csrfToken: string, turnEnd: boolean): Promise<PushState> {
+  const subscription = await currentPushSubscription();
+  const body = subscription && requestBody(subscription);
+  if (!body) return "off";
+  await api.subscribeToPush(csrfToken, body, turnEnd);
+  return "on";
+}
+
+/**
  * Resolves the control's state without asking for anything, so the panel can
  * render honestly on open.
  */

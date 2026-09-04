@@ -118,8 +118,10 @@ describe("TurnEndNotifier", () => {
 
   it("treats work that runs long as a new turn worth its own notification", () => {
     const h = harness();
-    h.set([agent({ id: "root", ...IDLE })]);
+    h.set([agent({ id: "root", ...WORKING })]);
     h.notifier.arm("root");
+    h.advance(POLL_MS);
+    h.set([agent({ id: "root", ...IDLE })]);
     h.advance(50_000);
     expect(h.sent).toHaveLength(1);
 
@@ -196,6 +198,55 @@ describe("TurnEndNotifier", () => {
     ]);
     h.advance(120_000);
     expect(h.sent).toEqual([]);
+  });
+
+  /* Arming says work was asked for. Whether any happened is the catalog's to
+     say: a settings read or an extension that answers directly starts no turn,
+     and "finished" for one of those is a notification about nothing. */
+  it("announces nothing for an armed agent that was never seen working", () => {
+    const h = harness();
+    h.set([agent({ id: "root", ...IDLE })]);
+    h.notifier.arm("root");
+    h.advance(120_000);
+    expect(h.sent).toEqual([]);
+  });
+
+  it("counts the quiet from the request, and only work after it", () => {
+    const h = harness();
+    h.set([agent({ id: "root", ...WORKING })]);
+    h.advance(10_000);
+    h.set([agent({ id: "root", ...IDLE })]);
+    // A turn nobody asked this notifier about, long over.
+    h.advance(600_000);
+
+    h.notifier.arm("root");
+    h.advance(120_000);
+    expect(h.sent).toEqual([]);
+
+    h.set([agent({ id: "root", ...WORKING })]);
+    h.advance(POLL_MS);
+    h.set([agent({ id: "root", ...IDLE })]);
+    h.advance(40_000);
+    expect(h.sent).toEqual([]);
+    h.advance(10_000);
+    expect(h.sent).toEqual([{ agentId: "root", outcome: "complete" }]);
+  });
+
+  // Work asked of a child is news about its root, the only agent watched.
+  it("arms the root when a subagent is the one asked for work", () => {
+    const h = harness();
+    h.set([
+      agent({ id: "root", ...WORKING }),
+      agent({ id: "child", parentId: "root", rootId: "root", depth: 1, ...WORKING }),
+    ]);
+    h.notifier.arm("child");
+    h.advance(1_000);
+    h.set([
+      agent({ id: "root", ...IDLE }),
+      agent({ id: "child", parentId: "root", rootId: "root", depth: 1, ...IDLE }),
+    ]);
+    h.advance(50_000);
+    expect(h.sent).toEqual([{ agentId: "root", outcome: "complete" }]);
   });
 
   it("reports a failed turn as failed", () => {

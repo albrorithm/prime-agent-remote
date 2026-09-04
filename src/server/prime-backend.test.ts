@@ -10,6 +10,7 @@ import { validateImageAttachments } from "./image-attachments.js";
 import {
   PRIME_ATTACH_TIMEOUT_MS,
   PRIME_INITIAL_SNAPSHOT_TIMEOUT_MS,
+  PRIME_CATALOG_LIST_TIMEOUT_MS,
   PRIME_LIST_TIMEOUT_MS,
   PrimeBackend,
   projectPrimeTranscript,
@@ -44,6 +45,7 @@ interface FixtureState {
   deletes: Array<Record<string, unknown>>;
   deleteError?: string;
   listener: ((event: unknown) => void) | null;
+  closeListeners: Set<(error: Error) => void>;
   createError?: string;
   listError: boolean;
   connectError: boolean;
@@ -55,7 +57,7 @@ interface FixtureState {
   listDelayMs: number;
   listCalls: number;
   /** Timeout arguments the backend passed to the daemon client, in order. */
-  requestTimeouts: Array<{ type: unknown; timeoutMs: number }>;
+  requestTimeouts: Array<{ type: unknown; timeoutMs: number; all?: boolean }>;
   activeListRequests: number;
   maxConcurrentListRequests: number;
   snapshotCalls: number;
@@ -154,6 +156,7 @@ const fixture: FixtureState = {
   kills: [],
   deletes: [],
   listener: null,
+  closeListeners: new Set<(error: Error) => void>(),
   listError: false,
   connectError: false,
   snapshotError: false,
@@ -181,7 +184,10 @@ export class DaemonClient {
   // waiting on a stalled socket forever; a fixture that ignored timeoutMs could
   // not produce the state the bounded call exists for.
   async request(command, timeoutMs) {
-    if (typeof timeoutMs === "number") state.requestTimeouts.push({ type: command.type, timeoutMs });
+    // Whether "all" was asked for is recorded too: it picks the daemon branch, and so the deadline.
+    if (typeof timeoutMs === "number") {
+      state.requestTimeouts.push({ type: command.type, timeoutMs, ...(command.all === true ? { all: true } : {}) });
+    }
     const work = this.dispatch(command);
     if (typeof timeoutMs !== "number") return await work;
     let timer;
@@ -251,7 +257,8 @@ export class DaemonClient {
       saved.sessionName = command.name;
       return { success: true, data: {} };
     }
-    if (command.type !== "list" || command.all !== true) return { success: false, error: "unexpected command" };
+    // Both daemon branches: a bare list answers the roster; only "all" scans the archive.
+    if (command.type !== "list") return { success: false, error: "unexpected command" };
     state.listCalls += 1;
     state.activeListRequests += 1;
     state.maxConcurrentListRequests = Math.max(state.maxConcurrentListRequests, state.activeListRequests);
@@ -263,6 +270,11 @@ export class DaemonClient {
     } finally {
       state.activeListRequests -= 1;
     }
+  }
+  // Shaped like the real 0.9 client: a close listener in, an unsubscribe back.
+  onClose(listener) {
+    state.closeListeners.add(listener);
+    return () => { state.closeListeners.delete(listener); };
   }
   close() { state.clientsClosed += 1; }
 }
@@ -1088,7 +1100,7 @@ describe("PrimeBackend", () => {
     }
   });
 
-  it("reads the supervisor roster's own labels for queued, recovering, and failed rows", async () => {
+  it("reads the supervisor roster's own labels for queued, recovering, failed and stopping rows", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     const originalSessions = fixture.sessions;
     fixture.sessions = [
@@ -1127,6 +1139,18 @@ describe("PrimeBackend", () => {
         workerState: "ready",
         statusLabel: "failed",
       },
+      // Daemon schema revision 16. Unhandled, this fell through to "live" and
+      // the row read as a session you could send to while it was being torn
+      // down.
+      {
+        id: "stopping-row",
+        sessionId: "private-stopping-session",
+        activeSessionId: "private-stopping-active",
+        sessionName: "Stopping worker",
+        lifecycle: "live",
+        activity: "idle",
+        workerState: "stopping",
+      },
     ];
     const backend = new PrimeBackend(moduleSpecifier());
     const hub = new EventHub();
@@ -1139,6 +1163,10 @@ describe("PrimeBackend", () => {
       expect(queued?.capabilities).toMatchObject({ send: false, abort: false, resume: false });
       expect(agents.find((agent) => agent.name === "Quiet worker")).toMatchObject({ lifecycle: "starting" });
       expect(agents.find((agent) => agent.name === "Dead worker")).toMatchObject({ lifecycle: "failed" });
+      expect(agents.find((agent) => agent.name === "Stopping worker")).toMatchObject({
+        lifecycle: "stopped",
+        capabilities: { send: false, abort: false, stop: false, respond: false },
+      });
     } finally {
       fixture.sessions = originalSessions;
       hub.close();
@@ -2752,16 +2780,80 @@ describe("PrimeBackend", () => {
       // The daemon accepts the call and then never answers it.
       fixture.listDelayMs = 10 * 60_000;
       const refresh = settlement(Reflect.get(backend, "refreshCatalog").call(backend, false) as Promise<void>);
-      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS - 1);
+      await vi.advanceTimersByTimeAsync(PRIME_CATALOG_LIST_TIMEOUT_MS - 1);
       expect(refresh.outcome).toBeUndefined();
       await vi.advanceTimersByTimeAsync(2);
       expect(refresh.outcome).toBe("rejected: Prime daemon list failed");
-      expect(fixture.requestTimeouts).toContainEqual({ type: "list", timeoutMs: PRIME_LIST_TIMEOUT_MS });
+      // The archive-scan budget, and carrying `all` is what earns it.
+      expect(fixture.requestTimeouts).toContainEqual({ type: "list", timeoutMs: PRIME_CATALOG_LIST_TIMEOUT_MS, all: true });
     } finally {
       fixture.listDelayMs = 0;
       // Anything still parked on the fake clock has to finish before real
       // timers return, or an assertion failure would surface as a hung
       // close() instead of the assertion.
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  /* Registered with `client.on("close")` before, which DaemonClient has never
+     had, so this never armed and only the 2s poll noticed a dropped socket. */
+  it("starts reconnecting the moment the daemon socket closes, not at the next poll", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.closeListeners.clear();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    // Long enough that a poll cannot be what noticed.
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      expect(fixture.closeListeners.size).toBe(1);
+
+      for (const listener of [...fixture.closeListeners]) listener(new Error("socket closed"));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(error).toHaveBeenCalledWith("Prime daemon connection lost; reconnecting with backoff");
+      expect(Reflect.get(backend, "daemonState")).toBe("reconnecting");
+    } finally {
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      vi.useRealTimers();
+      error.mockRestore();
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  // See PRIME_CATALOG_LIST_TIMEOUT_MS: for an archive scan, slow is not stalled.
+  it("gives the archive scan a budget the roster-only deadline would have failed", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.listDelayMs = 0;
+    fixture.requestTimeouts = [];
+    vi.useFakeTimers();
+    const backend = new PrimeBackend(moduleSpecifier());
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+
+      // Slower than a control-plane round trip, faster than a stalled daemon.
+      fixture.listDelayMs = PRIME_LIST_TIMEOUT_MS * 2;
+      const refresh = settlement(Reflect.get(backend, "refreshCatalog").call(backend, false) as Promise<void>);
+      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS + 1);
+      expect(refresh.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(PRIME_LIST_TIMEOUT_MS + 10);
+      expect(refresh.outcome).toBe("resolved");
+    } finally {
+      fixture.listDelayMs = 0;
       await vi.advanceTimersByTimeAsync(15 * 60_000);
       vi.useRealTimers();
       hub.close();
@@ -2897,7 +2989,11 @@ describe("PrimeBackend", () => {
       await vi.advanceTimersByTimeAsync(20);
       expect(fixture.clientsClosed).toBeGreaterThan(closed);
       expect(fixture.clientsCreated).toBeGreaterThan(created);
+      /* Roster-only, and deliberately: `all` would make the liveness probe
+         proportional to how much history is on disk, so a large archive could
+         keep the ladder from ever succeeding against a daemon that was fine. */
       expect(fixture.requestTimeouts).toContainEqual({ type: "list", timeoutMs: PRIME_LIST_TIMEOUT_MS });
+      expect(fixture.requestTimeouts.filter((r) => r.timeoutMs === PRIME_LIST_TIMEOUT_MS).every((r) => r.all !== true)).toBe(true);
 
       // And the ladder is still live: once the daemon answers, it reconnects.
       fixture.listDelayMs = 0;

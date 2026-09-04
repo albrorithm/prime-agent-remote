@@ -632,6 +632,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                       turnId={item.turnId}
                       rows={item.rows}
                       recap={item.key === lastTurnKey ? sessionRecap : undefined}
+                      agentName={selectedAgent.name}
                       renderRow={(message) => (
                         <TranscriptEntry key={message.id} message={message} agentName={selectedAgent.name} showAuthor={authorIds.has(message.id)} onImageLoad={handleTranscriptImageLoad} />
                       )}

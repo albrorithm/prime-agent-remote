@@ -941,6 +941,60 @@ describe("gateway API routes", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  /* Session and experimental commands prompt the agent like a message does, so
+     their next quiet is a finished turn. Direct commands read or set something
+     and start no turn, so arming there would announce a settings read. */
+  it("arms the turn-end notifier for commands that prompt the agent, and only those", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.send)?.id;
+    if (!agentId) throw new Error("No sendable demo agent");
+    const notifier = t.gateway.turnEnd;
+    if (!notifier) throw new Error("Push is configured, so the notifier should exist");
+    const armed = () =>
+      (Reflect.get(notifier, "states") as Map<string, { armed: boolean }>).get(agentId)?.armed === true;
+
+    async function runCommand(name: string, args = "") {
+      const revision = await agentRevision(t, client, agentId!);
+      const response = await fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId!)}/commands`, {
+        method: "POST",
+        headers: mutationHeaders(client),
+        body: JSON.stringify({ requestId: randomUUID(), name, args, expectedRevision: revision }),
+      });
+      expect(response.status).toBe(202);
+      return (await response.json()) as { result: { kind: string } };
+    }
+
+    // A settings read: no turn, so nothing to announce the end of.
+    const direct = await runCommand("model");
+    expect(direct.result.kind).toBe("model");
+    expect(armed()).toBe(false);
+
+    const session = await runCommand("compact");
+    expect(session.result.kind).toBe("session_accepted");
+    expect(armed()).toBe(true);
+
+    notifier.disarm(agentId);
+    const experimental = await runCommand("demo-extension");
+    expect(experimental.result.kind).toBe("experimental_accepted");
+    expect(armed()).toBe(true);
+
+    // A retry with the same request id is answered from the cache without
+    // prompting the agent again, so it owes no notification: the turn it names
+    // may already have ended and been announced.
+    const revision = await agentRevision(t, client, agentId);
+    const headers = mutationHeaders(client);
+    const body = JSON.stringify({ requestId: randomUUID(), name: "compact", args: "", expectedRevision: revision });
+    const post = () => fetch(`${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/commands`, { method: "POST", headers, body });
+    notifier.disarm(agentId);
+    expect((await post()).status).toBe(202);
+    expect(armed()).toBe(true);
+    notifier.disarm(agentId);
+    expect((await post()).status).toBe(202);
+    expect(armed()).toBe(false);
+  });
+
   it("renames an agent, rejects a malformed name, and maps a refused capability to 403", async () => {
     const t = await startGateway();
     const client = await pairClient(t);
@@ -1368,6 +1422,60 @@ describe("device management routes", () => {
     // A wake capability that outlived the credential would keep buzzing a phone
     // that can no longer open what it is being woken for.
     expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  /* The ordinary case: the record outlives the session that claimed it, so a
+     revoke that reaped only live sessions would leave this phone being woken. */
+  it("drops the subscription of a device whose session died with an earlier process", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+
+    const stored = t.gateway.pushStore.list()[0];
+    expect(stored.deviceId).toBeDefined();
+    // What a restart leaves behind: the record survives, its session does not.
+    await t.gateway.pushStore.upsert({ ...stored, sessionId: "session-from-a-previous-process" });
+
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)?.id;
+    expect((await revokeDevice(t, keeper, doomedId!)).status).toBe(200);
+    expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+
+  /* The credential is gone the moment the device store says so; the wake
+     capability is gone only once the push store has written. A write that did
+     not land is reported, and the same revoke retried drops what it missed. */
+  it("reports a push cleanup that did not land, and drops it on the retry", async () => {
+    const t = await startGateway({ config: { webPush: VAPID } });
+    const keeper = await pairClient(t);
+    const doomed = await pairClient(t);
+    expect((await pushRequest(t, doomed, "subscribe", subscriptionBody())).status).toBe(202);
+    // Bound to a session that is gone, so only the device pass can reach it.
+    const stored = t.gateway.pushStore.list()[0];
+    await t.gateway.pushStore.upsert({ ...stored, sessionId: "session-from-a-previous-process" });
+    const doomedId = (await listDevices(t, doomed)).find((device) => device.current)!.id;
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The real removal runs and drops the record from memory; the write is
+    // what fails. That is the state a retry has to be able to finish from.
+    const writer = t.gateway.pushStore as unknown as { writeAtomically: () => Promise<void> };
+    vi.spyOn(writer, "writeAtomically").mockRejectedValueOnce(new Error("disk full"));
+    try {
+      const first = await revokeDevice(t, keeper, doomedId);
+      expect(first.status).toBe(500);
+      expect(await listDevices(t, keeper)).toHaveLength(1);
+      expect(t.gateway.pushStore.hasPendingWrite).toBe(true);
+
+      // The pending write is that device's to retry, not a licence for any
+      // id to answer "revoked".
+      expect((await revokeDevice(t, keeper, "never-existed")).status).toBe(404);
+
+      const retry = await revokeDevice(t, keeper, doomedId);
+      expect(retry.status).toBe(200);
+      expect(t.gateway.pushStore.hasPendingWrite).toBe(false);
+      expect(t.gateway.pushStore.list()).toEqual([]);
+    } finally {
+      quiet.mockRestore();
+    }
   });
 
   it("says so when a device revokes itself, and clears its own cookies", async () => {

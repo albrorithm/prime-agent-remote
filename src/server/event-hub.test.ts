@@ -103,6 +103,29 @@ describe("EventHub", () => {
   });
 
 
+  /* The epoch names the process, not a stream generation, so a cursor from
+     before an unregister/register of the same id passes the epoch check. It
+     must get a snapshot, not a replay of whatever sits above its old seq, and
+     that holds even when the new generation has published nothing yet. */
+  it.each([
+    ["has published since", true, 4],
+    ["is still silent", false, 3],
+  ])("answers a cursor from before a re-registration with a snapshot when the new stream %s", (_case, publishes, expected) => {
+    const hub = new EventHub();
+    hub.register("catalog", catalog(1));
+    hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(2) }, catalog(2));
+    const staleCursor = { epoch: hub.epoch, seq: 1 };
+    hub.unregister("catalog");
+
+    hub.register("catalog", catalog(3));
+    if (publishes) hub.publish("catalog", { kind: "catalog.replaced", payload: catalog(4) }, catalog(4));
+
+    const resumed = hub.attach("catalog", staleCursor, vi.fn());
+    expect(resumed?.initial.type).toBe("snapshot");
+    if (resumed?.initial.type === "snapshot") expect(resumed.initial.snapshot).toEqual(catalog(expected));
+    resumed?.detach();
+  });
+
   it("keeps stale detach tokens from retaining or detaching a replacement stream", () => {
     const hub = new EventHub();
     const listener = vi.fn();

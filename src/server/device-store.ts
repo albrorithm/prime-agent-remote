@@ -159,7 +159,19 @@ export class DeviceStore {
     if (!device || !secretMatches(parsed.secret, device.secretHash)) return null;
     device.lastSeenAt = now.toISOString();
     await this.persist();
-    return device;
+    /* Re-checked after the write, not before it. `revoke` removes the device
+       from this array synchronously and only then awaits its own write, so a
+       revocation landing while this one is in flight leaves the device gone
+       from the store but still held here. Returning it anyway minted a session
+       for a credential that no longer existed — and because the revoke handler
+       had already collected its list of sessions to reap, that session was
+       reachable by nothing: the device is absent from the device list, so
+       revoking it again answers 404, and it kept full access until the session
+       TTL expired or the gateway restarted.
+
+       Identity, not id: revoke rebuilds the array while keeping the surviving
+       objects, so this asks exactly "is this still paired". */
+    return this.devices.includes(device) ? device : null;
   }
 
   /** Revocation is removal: there is nothing a revoked record would be for. */

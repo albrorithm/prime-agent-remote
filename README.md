@@ -74,8 +74,8 @@ npm 11 only runs a git dependency's `prepare` script with explicit approval,
 and skips it silently otherwise, which leaves the CLI unbuilt with no error.
 If `prime-agent-remote help` prints nothing right after installing this way,
 that is what happened: approve the script and reinstall. `install-command`
-checks for this case and reports it instead of installing a `/webui` that
-cannot run. None of this applies to the published package above, which needs
+checks for this case and says so, rather than reporting a clean install of a
+`/webui` that cannot run. None of this applies to the published package above, which needs
 no build step.
 
 ```
@@ -119,7 +119,9 @@ token into the pairing form does the same thing, if a camera is not to hand.
 already running.
 
 A pairing link is as sensitive as the token it carries, and lasts as long —
-until `prime-agent-remote token --rotate`. Treat it like the token.
+until `prime-agent-remote token --rotate` **and the gateway is restarted**. A
+running gateway holds the token it booted with and does not re-read the file,
+so rotation alone does not invalidate a leaked link. Treat it like the token.
 
 Either way the browser is then issued its own device credential, so it stays
 paired across gateway restarts and never needs the token again. Signing out

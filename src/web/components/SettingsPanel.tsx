@@ -5,7 +5,7 @@ import * as api from "../api";
 import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 import { DRAFTS_KEY } from "../hooks/useComposerDrafts";
-import { disablePush, enablePush, readPushState, type PushState } from "../push";
+import { disablePush, enablePush, readPushState, updatePushPreference, type PushState } from "../push";
 import { SETTINGS_KEY, TEXT_SCALES, useSettings, type Settings } from "../settings";
 
 interface SettingsPanelProps {
@@ -270,7 +270,7 @@ function NotificationsGroup() {
     setBusy(true);
     setError(null);
     try {
-      setState(await enablePush(push?.publicKey ?? "", csrfToken, value));
+      setState(await updatePushPreference(csrfToken, value));
       setSetting("turnEndNotifications", value);
     } catch (caught) {
       setError(humanizeError(caught, "Could not change what you are notified about"));

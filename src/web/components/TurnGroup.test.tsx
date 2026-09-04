@@ -182,18 +182,18 @@ describe("TurnGroup", () => {
   }
 
   it("keeps a live turn's work open, then auto-collapses exactly when the answer lands", () => {
-    const view = render(<TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
     const details = () => view.container.querySelector<HTMLDetailsElement>("details.turn-work")!;
     expect(details().open).toBe(true);
     expect(screen.getByText("Working… · 2 steps")).toBeInTheDocument();
 
-    view.rerender(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     expect(details().open).toBe(false);
     expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
   });
 
   it("mounts no work rows while a settled turn is collapsed", () => {
-    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     expect(view.container.querySelector("details.turn-work")!.hasAttribute("open")).toBe(false);
     expect(view.container.querySelector("[data-row='t1']")).toBeNull();
     expect(view.container.querySelector("[data-row='p1']")).toBeNull();
@@ -203,7 +203,7 @@ describe("TurnGroup", () => {
 
   it("mounts work rows on first expand and keeps them after re-collapsing", async () => {
     const user = userEvent.setup();
-    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     expect(view.container.querySelector("[data-row='t1']")).toBeNull();
 
     await user.click(screen.getByText("2 steps · 1m 30s"));
@@ -216,13 +216,13 @@ describe("TurnGroup", () => {
   });
 
   it("mounts a live turn's work rows immediately", () => {
-    const view = render(<TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
     expect(view.container.querySelector("[data-row='t1']")).not.toBeNull();
   });
 
   it("keeps the prompt and answer outside the collapsible work region", () => {
     // Opened, because a collapsed turn deliberately mounts no work rows at all.
-    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />, { turnsCollapsed: false });
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />, { turnsCollapsed: false });
     const details = view.container.querySelector("details.turn-work")!;
     expect(details.querySelector("[data-row='t1']")).not.toBeNull();
     expect(details.querySelector("[data-row='p1']")).not.toBeNull();
@@ -238,7 +238,7 @@ describe("TurnGroup", () => {
       pythonRow("p1", "u1", "failed", 90),
       row("e1", { turnId: "u1", state: "failed", presentation: { kind: "error", label: "Turn failed" }, text: "The response failed." }),
     ];
-    const view = render(<TurnGroup turnId="u1" rows={rows} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={rows} renderRow={renderPlainRow} />);
     const details = view.container.querySelector<HTMLDetailsElement>("details.turn-work")!;
     expect(details.open).toBe(false);
     expect(details.querySelector("[data-row='e1']")).toBeNull();
@@ -247,87 +247,100 @@ describe("TurnGroup", () => {
 
   it("renders no collapsible region when a turn has no work rows", () => {
     const rows = [prompt("u1", "u1"), answer("a1", "u1")];
-    const view = render(<TurnGroup turnId="u1" rows={rows} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={rows} renderRow={renderPlainRow} />);
     expect(view.container.querySelector("details")).toBeNull();
   });
 
   it("reports the turn's wall clock, not the python time inside it", () => {
-    render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
     expect(screen.queryByText("2 steps · 420ms")).toBeNull();
   });
 
   it("omits the duration when no work row carries one", () => {
     const rows = [prompt("u1", "u1"), thinkingRow("t1", "u1"), answer("a1", "u1")];
-    render(<TurnGroup turnId="u1" rows={rows} renderRow={renderPlainRow} />);
+    render(<TurnGroup agentName="Agent" turnId="u1" rows={rows} renderRow={renderPlainRow} />);
     expect(screen.getByText("1 step")).toBeInTheDocument();
   });
 
   it("prefers the session recap for a settled turn's summary, keeping the counts as meta", () => {
-    render(<TurnGroup turnId="u1" rows={settledRows()} recap="Refactored the cell renderer" renderRow={renderPlainRow} />);
+    render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} recap="Refactored the cell renderer" renderRow={renderPlainRow} />);
     expect(screen.getByText("Refactored the cell renderer")).toBeInTheDocument();
     expect(screen.getByText("2 steps · 1m 30s")).toBeInTheDocument();
   });
 
   it("ignores the recap while the turn is still live", () => {
-    render(<TurnGroup turnId="u1" rows={liveRows()} recap="Still working" renderRow={renderPlainRow} />);
+    render(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} recap="Still working" renderRow={renderPlainRow} />);
     expect(screen.queryByText("Still working")).not.toBeInTheDocument();
     expect(screen.getByText("Working… · 2 steps")).toBeInTheDocument();
   });
 
   it("lets the user re-expand a settled turn, persisting across re-renders", async () => {
     const user = userEvent.setup();
-    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />);
     const details = () => view.container.querySelector<HTMLDetailsElement>("details.turn-work")!;
     expect(details().open).toBe(false);
 
     await user.click(view.container.querySelector("summary.turn-summary")!);
     expect(details().open).toBe(true);
 
-    view.rerender(<TurnGroup turnId="u1" rows={settledRows().map((r) => ({ ...r }))} renderRow={renderPlainRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows().map((r) => ({ ...r }))} renderRow={renderPlainRow} />);
     expect(details().open).toBe(true);
   });
 
   it("lets the user collapse a live turn, overriding the auto-open", async () => {
     const user = userEvent.setup();
-    const view = render(<TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />);
     const details = () => view.container.querySelector<HTMLDetailsElement>("details.turn-work")!;
     expect(details().open).toBe(true);
 
     await user.click(view.container.querySelector("summary.turn-summary")!);
     expect(details().open).toBe(false);
 
-    view.rerender(<TurnGroup turnId="u1" rows={liveRows().map((r) => ({ ...r }))} renderRow={renderPlainRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows().map((r) => ({ ...r }))} renderRow={renderPlainRow} />);
     expect(details().open).toBe(false);
   });
 
   it("skips re-rendering a settled turn when a new array carries identical content", () => {
     const renderRow = vi.fn(renderPlainRow);
-    const view = render(<TurnGroup turnId="u1" rows={settledRows()} renderRow={renderRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderRow} />);
     const callsAfterMount = renderRow.mock.calls.length;
     expect(callsAfterMount).toBeGreaterThan(0);
 
-    view.rerender(<TurnGroup turnId="u1" rows={settledRows().map((r) => ({ ...r }))} renderRow={renderRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={settledRows().map((r) => ({ ...r }))} renderRow={renderRow} />);
     expect(renderRow.mock.calls.length).toBe(callsAfterMount);
 
     const changed = settledRows();
     changed[changed.length - 1] = { ...changed[changed.length - 1], text: "answer a1 (edited)" };
-    view.rerender(<TurnGroup turnId="u1" rows={changed} renderRow={renderRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={changed} renderRow={renderRow} />);
+    expect(renderRow.mock.calls.length).toBeGreaterThan(callsAfterMount);
+  });
+
+  /* renderRow closes over the agent's name, and no comparator can see inside a
+     closure. Renaming a session used to leave every settled turn rendering the
+     old name — author lines and message-action labels alike — next to live
+     turns rendering the new one, until an agent switch remounted them. */
+  it("rebuilds a settled turn's rows when the agent is renamed", () => {
+    const renderRow = vi.fn(renderPlainRow);
+    const view = render(<TurnGroup agentName="Old name" turnId="u1" rows={settledRows()} renderRow={renderRow} />);
+    const callsAfterMount = renderRow.mock.calls.length;
+
+    view.rerender(<TurnGroup agentName="New name" turnId="u1" rows={settledRows()} renderRow={renderRow} />);
     expect(renderRow.mock.calls.length).toBeGreaterThan(callsAfterMount);
   });
 
   it("always re-renders a live turn so streaming updates come through", () => {
     const renderRow = vi.fn(renderPlainRow);
-    const view = render(<TurnGroup turnId="u1" rows={liveRows()} renderRow={renderRow} />);
+    const view = render(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} renderRow={renderRow} />);
     const callsAfterMount = renderRow.mock.calls.length;
 
-    view.rerender(<TurnGroup turnId="u1" rows={liveRows().map((r) => ({ ...r }))} renderRow={renderRow} />);
+    view.rerender(<TurnGroup agentName="Agent" turnId="u1" rows={liveRows().map((r) => ({ ...r }))} renderRow={renderRow} />);
     expect(renderRow.mock.calls.length).toBeGreaterThan(callsAfterMount);
   });
 
   it("leaves a settled turn expanded when turnsCollapsed is off", () => {
     const view = render(
-      <TurnGroup turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />,
+      <TurnGroup agentName="Agent" turnId="u1" rows={settledRows()} renderRow={renderPlainRow} />,
       { turnsCollapsed: false },
     );
     expect(view.container.querySelector<HTMLDetailsElement>("details.turn-work")!.open).toBe(true);
@@ -335,7 +348,7 @@ describe("TurnGroup", () => {
 
   it("keeps a live turn open whichever way turnsCollapsed is set", () => {
     const view = render(
-      <TurnGroup turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />,
+      <TurnGroup agentName="Agent" turnId="u1" rows={liveRows()} renderRow={renderPlainRow} />,
       { turnsCollapsed: true },
     );
     expect(view.container.querySelector<HTMLDetailsElement>("details.turn-work")!.open).toBe(true);
@@ -346,8 +359,8 @@ describe("TurnGroup", () => {
     const view = render(
       <>
         <TurnsCollapsedToggle />
-        <TurnGroup turnId="u1" rows={settledRows("u1")} renderRow={renderPlainRow} />
-        <TurnGroup turnId="u2" rows={settledRows("u2")} renderRow={renderPlainRow} />
+        <TurnGroup agentName="Agent" turnId="u1" rows={settledRows("u1")} renderRow={renderPlainRow} />
+        <TurnGroup agentName="Agent" turnId="u2" rows={settledRows("u2")} renderRow={renderPlainRow} />
       </>,
       { turnsCollapsed: true },
     );
@@ -489,7 +502,7 @@ describe("substantive prose is never collapsed", () => {
       row("final", { turnId: "t", text: "Done." }),
     ];
     render(
-      <TurnGroup turnId="t" rows={rows} renderRow={(m) => <p key={m.id}>{m.text}</p>} />,
+      <TurnGroup agentName="Agent" turnId="t" rows={rows} renderRow={(m) => <p key={m.id}>{m.text}</p>} />,
       { turnsCollapsed: true },
     );
     const summaries = screen.getAllByRole("group").map((d) => d.querySelector(".turn-summary-text")?.textContent);
@@ -506,7 +519,7 @@ describe("substantive prose is never collapsed", () => {
       row("final", { turnId: "t", text: "Done." }),
     ];
     render(
-      <TurnGroup turnId="t" rows={rows} renderRow={(m) => <p key={m.id} data-testid={m.id}>{m.text}</p>} />,
+      <TurnGroup agentName="Agent" turnId="t" rows={rows} renderRow={(m) => <p key={m.id} data-testid={m.id}>{m.text}</p>} />,
       { turnsCollapsed: true },
     );
     // Present, and not inside a <details> — the thing the bug got wrong.
