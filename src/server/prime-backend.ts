@@ -295,11 +295,32 @@ const MAX_STORED_REFINES = 20;
 const MAX_DASHBOARD_REFINES = 20;
 const CONTEXT_STATS_MIN_INTERVAL_MS = 20_000;
 /**
- * The daemon `list` is a cheap control-plane round trip that reads state the
+ * A bare daemon `list` is a cheap control-plane round trip that reads state the
  * daemon already holds, so it shares the budget the socket connect above it
  * uses: a daemon silent for five seconds is stalled, not slow.
+ *
+ * This is the roster-only budget. `list all` is a different request entirely —
+ * see below.
  */
 export const PRIME_LIST_TIMEOUT_MS = 5_000;
+/**
+ * `list all` is not the same round trip. The supervisor answers the roster from
+ * memory and returns early, but `all` sends it off to scan the session archive
+ * in a child process — one sequential transcript read per saved session — which
+ * the daemon itself budgets five minutes for. So this is transcript-proportional
+ * work like the snapshot, not control-plane work, and holding it to five seconds
+ * meant a large archive or a cold page cache failed a healthy daemon.
+ *
+ * That failure was not a slow catalog: `initialize` awaits the first refresh, so
+ * the gateway would not start at all, and once running the reconnect ladder
+ * probed with the same request, so a daemon too slow to answer in five seconds
+ * could never satisfy the probe that would have declared it healthy again.
+ *
+ * Thirty seconds rather than the daemon's own five minutes, because the mutation
+ * routes await a catalog refresh: this budget is also the worst case a phone
+ * spends waiting on rename, delete or stop.
+ */
+export const PRIME_CATALOG_LIST_TIMEOUT_MS = 30_000;
 /**
  * Attaching to an already-running agent session is another control-plane
  * handshake against a live daemon, so it gets the same five seconds. It is not
@@ -1650,7 +1671,13 @@ export class PrimeBackend implements AgentBackend {
       // other list: an unbounded probe against a daemon that accepts sockets
       // but answers nothing would park here forever and stop the ladder from
       // ever reaching its next rung.
-      const probe = await replacement.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
+      //
+      // Deliberately roster-only. `all` would send the supervisor off to scan
+      // the whole session archive, making the liveness probe proportional to
+      // how much history is on disk rather than to whether the daemon is
+      // answering — so a big archive could keep the ladder from ever
+      // succeeding against a daemon that was fine.
+      const probe = await replacement.request({ type: "list" }, PRIME_LIST_TIMEOUT_MS);
       if (!probe.success) throw new Error("Prime daemon list failed");
     } catch {
       try { replacement.close(); } catch { /* Best-effort cleanup. */ }
@@ -2262,7 +2289,7 @@ export class PrimeBackend implements AgentBackend {
   private async loadCatalogOnce(): Promise<void> {
     let response: PrimeResponse;
     try {
-      response = await this.client.request({ type: "list", all: true }, PRIME_LIST_TIMEOUT_MS);
+      response = await this.client.request({ type: "list", all: true }, PRIME_CATALOG_LIST_TIMEOUT_MS);
     } catch {
       throw new Error("Prime daemon list failed");
     }
