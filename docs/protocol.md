@@ -112,7 +112,7 @@ The mutation routes above return `202` with a `MutationAccepted` body, `{ accept
 
 ### Push
 
-- `POST /api/v1/push/subscribe` — `{ requestId, subscription: { endpoint, keys: { p256dh, auth } }, turnEnd? }`. `503` if the gateway has no VAPID keys configured. `turnEnd` asks to be woken when an agent finishes a turn, not only when one needs an answer. It is per device, absent means off, and the gateway stores whatever arrives on every subscribe — including the silent re-claim the app makes on each launch — so a subscribe that omits it turns the preference off.
+- `POST /api/v1/push/subscribe` — `{ requestId, subscription: { endpoint, keys: { p256dh, auth } }, turnEnd? }`. `503` if the gateway has no VAPID keys configured. `turnEnd` asks to be woken when an agent finishes a turn, not only when one needs an answer. It is per device, absent means off, and the gateway stores whatever arrives on every subscribe — including the silent re-claim the app makes on each launch using its saved notification preference — so a subscribe that omits it turns the preference off.
 - `POST /api/v1/push/unsubscribe` — `{ requestId, endpoint }`. Succeeds even for an endpoint the gateway never had, since that is the goal state either way.
 
 Both return `202 { accepted: true, requestId }`.

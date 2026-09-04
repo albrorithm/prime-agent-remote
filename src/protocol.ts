@@ -9,7 +9,6 @@ export type AttentionKind = "dialog" | "question" | "error";
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
 export const DIRECT_SLASH_COMMAND_NAMES = ["model", "effort", "name", "context", "heartbeat"] as const;
 export type DirectSlashCommandName = typeof DIRECT_SLASH_COMMAND_NAMES[number];
-export const EXECUTABLE_SLASH_COMMAND_NAMES = [...SESSION_SLASH_COMMAND_NAMES, ...DIRECT_SLASH_COMMAND_NAMES] as const;
 
 export interface SlashCommandOption {
   value: string;
@@ -26,7 +25,7 @@ export interface SlashCommandCatalogEntry {
   argumentHint?: string;
   source: SlashCommandSource;
   availability: SlashCommandAvailability;
-  unavailableReason?: "inactive_agent" | "adapter_missing" | "not_supported_on_mobile";
+  unavailableReason?: "inactive_agent" | "adapter_missing";
   takesArguments: boolean;
   options?: SlashCommandOption[];
 }
@@ -451,7 +450,7 @@ const slashCommandCatalogEntrySchema = z.object({
   argumentHint: z.string().optional(),
   source: z.enum(["session", "adapter", "extension", "prompt", "skill"]),
   availability: z.enum(["available", "experimental", "unavailable"]),
-  unavailableReason: z.enum(["inactive_agent", "adapter_missing", "not_supported_on_mobile"]).optional(),
+  unavailableReason: z.enum(["inactive_agent", "adapter_missing"]).optional(),
   takesArguments: z.boolean(),
   options: z.array(slashCommandOptionSchema).optional(),
 });
@@ -771,7 +770,7 @@ export type ClientFrame = z.infer<typeof clientFrameSchema>;
 export const pairRequestSchema = z.object({
   deviceName: z.string().trim().min(1).max(64).optional(),
   token: z.string().min(1).max(512),
-});
+}).strict();
 
 const imageAttachmentRequestSchema = z.object({
   type: z.literal("image"),
@@ -784,7 +783,7 @@ export const sendMessageRequestSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   text: z.string().trim().max(100_000),
   images: z.array(imageAttachmentRequestSchema).max(MAX_IMAGE_ATTACHMENTS).default([]),
-}).superRefine((value, context) => {
+}).strict().superRefine((value, context) => {
   if (!value.text && value.images.length === 0) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "A message or image is required" });
   }
@@ -809,12 +808,12 @@ export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
   optionId: z.string().min(1).max(160),
-});
+}).strict();
 
 export const abortRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
-});
+}).strict();
 
 export const MAX_PUSH_ENDPOINT_CHARS = 1024;
 export const MAX_PUSH_KEY_CHARS = 256;
@@ -864,7 +863,7 @@ export const slashCommandResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("session_accepted") }),
   z.object({ kind: z.literal("experimental_accepted"), source: z.enum(["extension", "prompt", "skill"]) }),
   z.object({ kind: z.literal("model"), provider: z.string().optional(), modelId: z.string().optional() }),
-  z.object({ kind: z.literal("effort"), level: z.string().optional(), availableLevels: z.array(z.string()) }),
+  z.object({ kind: z.literal("effort"), level: z.string().optional(), availableLevels: z.array(z.string()).optional() }),
   z.object({ kind: z.literal("name"), name: z.string().optional() }),
   z.object({
     kind: z.literal("context_usage"),
@@ -956,7 +955,7 @@ export const createSessionRequestSchema = z.object({
   requestId: z.string().uuid(),
   cwd: z.string().min(1).max(1024),
   name: sessionNameSchema.optional(),
-});
+}).strict();
 
 export const renameAgentRequestSchema = z.object({
   requestId: z.string().uuid(),

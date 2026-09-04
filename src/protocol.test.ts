@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   sessionNameSchema,
+  catalogSnapshotSchema,
+  slashCommandCatalogSchema,
+  slashCommandResultSchema,
+  sendMessageRequestSchema,
+  attentionResponseSchema,
+  abortRequestSchema,
+  createSessionRequestSchema,
+  pairRequestSchema,
   agentSnapshotSchema,
   attentionAgentCount,
   buildPairingUrl,
@@ -260,5 +268,85 @@ describe("pairing links", () => {
 
   it("finds the token beside other fragment parameters", () => {
     expect(readPairingFragment(`#state=1&pair=${TOKEN}`)).toBe(TOKEN);
+  });
+});
+
+describe("catalog snapshot schema", () => {
+  it("preserves notificationLabel through a client-side parse", () => {
+    const parsed = catalogSnapshotSchema.parse({
+      revision: 1,
+      agents: [summary({ id: "a", notificationLabel: "release-planning" })],
+    });
+    expect(parsed.agents[0].notificationLabel).toBe("release-planning");
+  });
+
+  it("leaves notificationLabel absent when the agent carries none", () => {
+    const parsed = catalogSnapshotSchema.parse({ revision: 1, agents: [summary({ id: "a" })] });
+    expect(parsed.agents[0].notificationLabel).toBeUndefined();
+  });
+});
+
+describe("slash command catalog entry schema", () => {
+  it("no longer accepts not_supported_on_mobile as an unavailableReason", () => {
+    const catalog = {
+      agentId: "agent-1",
+      agentRevision: 1,
+      partial: false,
+      commands: [{
+        name: "context",
+        description: "Context usage",
+        source: "adapter",
+        availability: "unavailable",
+        unavailableReason: "not_supported_on_mobile",
+        takesArguments: false,
+      }],
+    };
+    expect(slashCommandCatalogSchema.safeParse(catalog).success).toBe(false);
+    expect(slashCommandCatalogSchema.safeParse({
+      ...catalog,
+      commands: [{ ...catalog.commands[0], unavailableReason: "adapter_missing" }],
+    }).success).toBe(true);
+  });
+});
+
+describe("slash command result schema", () => {
+  it("no longer requires availableLevels on an effort result", () => {
+    const result = slashCommandResultSchema.parse({ kind: "effort", level: "high" });
+    expect(result).toEqual({ kind: "effort", level: "high" });
+    expect(slashCommandResultSchema.safeParse({ kind: "effort" }).success).toBe(true);
+    expect(slashCommandResultSchema.parse({ kind: "effort", level: "high", availableLevels: ["low", "high"] }))
+      .toEqual({ kind: "effort", level: "high", availableLevels: ["low", "high"] });
+  });
+});
+
+describe("strict mutation request schemas", () => {
+  it("rejects an unknown field on sendMessageRequestSchema", () => {
+    const base = { requestId: crypto.randomUUID(), expectedRevision: 1, text: "hi" };
+    expect(sendMessageRequestSchema.safeParse(base).success).toBe(true);
+    expect(sendMessageRequestSchema.safeParse({ ...base, extra: true }).success).toBe(false);
+  });
+
+  it("rejects an unknown field on attentionResponseSchema", () => {
+    const base = { requestId: crypto.randomUUID(), expectedRevision: 1, optionId: "confirm" };
+    expect(attentionResponseSchema.safeParse(base).success).toBe(true);
+    expect(attentionResponseSchema.safeParse({ ...base, extra: true }).success).toBe(false);
+  });
+
+  it("rejects an unknown field on abortRequestSchema", () => {
+    const base = { requestId: crypto.randomUUID(), expectedRevision: 1 };
+    expect(abortRequestSchema.safeParse(base).success).toBe(true);
+    expect(abortRequestSchema.safeParse({ ...base, extra: true }).success).toBe(false);
+  });
+
+  it("rejects an unknown field on createSessionRequestSchema", () => {
+    const base = { requestId: crypto.randomUUID(), cwd: "/projects/example" };
+    expect(createSessionRequestSchema.safeParse(base).success).toBe(true);
+    expect(createSessionRequestSchema.safeParse({ ...base, extra: true }).success).toBe(false);
+  });
+
+  it("rejects an unknown field on pairRequestSchema", () => {
+    const base = { token: TOKEN };
+    expect(pairRequestSchema.safeParse(base).success).toBe(true);
+    expect(pairRequestSchema.safeParse({ ...base, extra: true }).success).toBe(false);
   });
 });
