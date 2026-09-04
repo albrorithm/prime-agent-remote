@@ -1459,10 +1459,11 @@ describe("device management routes", () => {
     // The real removal runs and drops the record from memory; the write is
     // what fails. That is the state a retry has to be able to finish from.
     const write = atomicFile.writeSecretFileAtomically;
+    // Keep the disk unavailable until the test restores it. A busy runner
+    // may let a background retry fire before we inspect the failed request.
     let failPushWrite = true;
     const writer = vi.spyOn(atomicFile, "writeSecretFileAtomically").mockImplementation((filePath, body) => {
       if (failPushWrite && filePath === join(t.tmpDir, "push-subscriptions.json")) {
-        failPushWrite = false;
         return Promise.reject(new Error("disk full"));
       }
       return write(filePath, body);
@@ -1473,8 +1474,11 @@ describe("device management routes", () => {
       expect(await listDevices(t, keeper)).toHaveLength(1);
       expect(t.gateway.pushStore.hasPendingWrite).toBe(true);
 
-      // The pending write is that device's to retry, not a licence for any
-      // id to answer "revoked".
+      // The disk comes back, but the owed write does not make this device's
+      // failure anyone else's: the pending write is that device's to retry,
+      // not a licence for any id to answer "revoked". Restored first because
+      // while the disk is still down every revoke owes a write and fails.
+      failPushWrite = false;
       expect((await revokeDevice(t, keeper, "never-existed")).status).toBe(404);
 
       const retry = await revokeDevice(t, keeper, doomedId);
@@ -1641,26 +1645,34 @@ describe("push subscription routes", () => {
   // The asymmetry that makes push worth having: a TTL lapse must leave the
   // subscription alive, or push stops working overnight.
   it("revokes on sign-out but not on session expiry", async () => {
-    const t = await startGateway({ config: { webPush: VAPID, sessionTtlMs: 150 } });
-    const expiring = await pairClient(t);
-    await pushRequest(t, expiring, "subscribe", subscriptionBody("https://push.example.test/overnight"));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: expiring.cookie } })).status).toBe(401);
-    expect(t.gateway.pushStore.list()).toHaveLength(1);
+    // Move only the authentication clock: HTTP and persistence keep real
+    // timers, while runner speed cannot expire a newly paired session.
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const sessionTtlMs = 60_000;
+    try {
+      const t = await startGateway({ config: { webPush: VAPID, sessionTtlMs } });
+      const expiring = await pairClient(t);
+      expect((await pushRequest(t, expiring, "subscribe", subscriptionBody("https://push.example.test/overnight"))).status).toBe(202);
+      now += sessionTtlMs;
+      expect((await fetch(`${t.baseUrl}/api/v1/bootstrap`, { headers: { Cookie: expiring.cookie } })).status).toBe(401);
+      expect(t.gateway.pushStore.list()).toHaveLength(1);
 
-    // The device re-registers under its new session, which is what lets the
-    // sign-out below find a record the expired session originally created.
-    const client = await pairClient(t);
-    await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/overnight"));
-    await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/second-device"));
+      // Re-register under a new session so sign-out reaches the old record.
+      const client = await pairClient(t);
+      expect((await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/overnight"))).status).toBe(202);
+      expect((await pushRequest(t, client, "subscribe", subscriptionBody("https://push.example.test/second-device"))).status).toBe(202);
 
-    const signOut = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
-      method: "POST",
-      headers: mutationHeaders(client),
-      body: "{}",
-    });
-    expect(signOut.status).toBe(200);
-    expect(t.gateway.pushStore.list()).toEqual([]);
+      const signOut = await fetch(`${t.baseUrl}/api/v1/auth/logout`, {
+        method: "POST",
+        headers: mutationHeaders(client),
+        body: "{}",
+      });
+      expect(signOut.status).toBe(200);
+      expect(t.gateway.pushStore.list()).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("leaves another session's subscriptions alone on sign-out", async () => {
