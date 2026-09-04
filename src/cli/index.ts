@@ -693,7 +693,37 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     line();
   }
 
-  const outcome = await applyRevocation(config.deviceStorePath, revoke, config.webPushStorePath);
+  const restart = async (): Promise<number> => {
+    line();
+    line("Starting it again...");
+    line();
+    const restarted = await start({
+      command: "start",
+      mode: running!.mode as ExposureMode,
+      port: running!.port,
+      demo: running!.backend === "demo",
+      foreground: false,
+      rotate: false,
+      noServe: false,
+      qr: false,
+    });
+    if (restarted !== 0) {
+      line();
+      line("The revocation is applied, but the gateway did not come back up.");
+      line("Start it again with `prime-agent-remote start`.");
+    }
+    return restarted;
+  };
+
+  let outcome: RevocationOutcome;
+  try {
+    outcome = await applyRevocation(config.deviceStorePath, revoke, config.webPushStorePath);
+  } catch (error) {
+    // The gateway was stopped for this write. A store that would not take it
+    // is the caller's to report; it is not a reason to leave the gateway down.
+    if (running) await restart();
+    throw error;
+  }
   if (outcome.kind === "revoked-all") {
     line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
   } else if (outcome.kind === "revoked") {
@@ -708,26 +738,8 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
   }
 
   if (!running) return outcome.kind === "unknown" ? 1 : 0;
-
-  line();
-  line("Starting it again...");
-  line();
-  const restarted = await start({
-    command: "start",
-    mode: running.mode as ExposureMode,
-    port: running.port,
-    demo: running.backend === "demo",
-    foreground: false,
-    rotate: false,
-    noServe: false,
-    qr: false,
-  });
-  if (restarted !== 0) {
-    line();
-    line("The revocation is applied, but the gateway did not come back up.");
-    line("Start it again with `prime-agent-remote start`.");
-    return restarted;
-  }
+  const restarted = await restart();
+  if (restarted !== 0) return restarted;
   return outcome.kind === "unknown" ? 1 : 0;
 }
 

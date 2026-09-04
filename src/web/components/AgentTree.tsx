@@ -48,14 +48,16 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
   const visible = useMemo(() => buildVisibleAgents(agents, expanded), [agents, expanded]);
-  /* The same index `buildVisibleAgents` renders from, rather than a second one
-     built here. This used to be a local copy without the sort, so the position
-     a row announced and the child ArrowRight descended to came from arrival
-     order while the screen showed priority order — a screen reader could read
-     the tree back to front, and ArrowRight could skip the first visible child.
-     The two disagreed exactly when the daemon changed an agent's activity or
-     attention, which is what the sort key is. */
+  /* The sorted index `buildVisibleAgents` descends through, so ArrowRight lands
+     on the first child on screen. Position is a different question: rows whose
+     parent is missing reach the screen through that function's arrival-order
+     fallback, so what a row announces comes from the rows themselves. */
   const childrenByParent = useMemo(() => indexChildren(agents), [agents]);
+  const siblingsByParent = useMemo(() => {
+    const byParent = new Map<string | null, AgentSummary[]>();
+    for (const item of visible) byParent.set(item.parentId, [...(byParent.get(item.parentId) ?? []), item]);
+    return byParent;
+  }, [visible]);
   const rovingFocusId = visible.some((item) => item.id === focusId)
     ? focusId
     : visible.find((item) => item.id === selectedId)?.id ?? visible[0]?.id ?? null;
@@ -174,7 +176,7 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
     <div className="agent-tree" role="tree" aria-label="Agents">
       {visible.map((agent, index) => {
         const children = childrenByParent.get(agent.id) ?? [];
-        const siblingList = childrenByParent.get(agent.parentId) ?? [];
+        const siblingList = siblingsByParent.get(agent.parentId) ?? [];
         return (
           <div
             key={agent.id}

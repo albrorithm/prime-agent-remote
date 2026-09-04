@@ -66,6 +66,26 @@ describe("AgentTree", () => {
     expect(document.activeElement?.textContent).toContain("working-child");
   });
 
+  /* Rows whose parent is missing reach the screen through the arrival-order
+     fallback in buildVisibleAgents, not through the sorted index. Position has
+     to follow the rows, whichever path put them there. */
+  it("announces orphaned rows in the order they are rendered", async () => {
+    const orphans = [
+      makeAgent("root", null, 0),
+      makeAgent("idle-orphan", "gone", 1),
+      { ...makeAgent("working-orphan", "gone", 1), activity: "working" as const },
+    ];
+    render(<AgentTree agents={orphans} selectedId="root" onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getAllByRole("treeitem")).toHaveLength(3));
+
+    const rows = screen.getAllByRole("treeitem").slice(1);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("idle-orphan"),
+      expect.stringContaining("working-orphan"),
+    ]);
+    expect(rows.map((row) => row.getAttribute("aria-posinset"))).toEqual(["1", "2"]);
+  });
+
   it("hides descendants of collapsed nodes instead of flattening them", async () => {
     const onSelect = vi.fn();
     render(<AgentTree agents={agents} selectedId="root" onSelect={onSelect} />);
