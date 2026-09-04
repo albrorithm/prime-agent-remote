@@ -1,13 +1,6 @@
 import { ChevronDown, Clock3, Gauge, Target } from "lucide-react";
 import type { AgentGoal } from "../../protocol";
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
+import { formatCoarseDuration } from "../duration";
 
 function statusLabel(status: AgentGoal["status"]): string {
   return status === "budget_limited" ? "Budget limited" : status[0].toUpperCase() + status.slice(1);
@@ -36,7 +29,7 @@ export function GoalStrip({ goal }: { goal?: AgentGoal }) {
             <div role="progressbar" aria-label="Goal token budget used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           </div>
         )}
-        <span><Clock3 aria-hidden="true" /> {formatDuration(goal.timeUsedSeconds)}</span>
+        <span><Clock3 aria-hidden="true" /> {formatCoarseDuration(goal.timeUsedSeconds)}</span>
         <span>{goal.continuationsUsed} continuation{goal.continuationsUsed === 1 ? "" : "s"}</span>
         {goal.lastReason && <p>{goal.lastReason}</p>}
         {goal.lastError && <p className="goal-error">{goal.lastError}</p>}

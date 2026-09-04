@@ -7,11 +7,9 @@ export type AgentActivityState = "working" | "idle" | "blocked";
 export type AttentionKind = "dialog" | "question" | "error";
 
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
-export type SessionSlashCommandName = typeof SESSION_SLASH_COMMAND_NAMES[number];
 export const DIRECT_SLASH_COMMAND_NAMES = ["model", "effort", "name", "context", "heartbeat"] as const;
 export type DirectSlashCommandName = typeof DIRECT_SLASH_COMMAND_NAMES[number];
 export const EXECUTABLE_SLASH_COMMAND_NAMES = [...SESSION_SLASH_COMMAND_NAMES, ...DIRECT_SLASH_COMMAND_NAMES] as const;
-export type ExecutableSlashCommandName = typeof EXECUTABLE_SLASH_COMMAND_NAMES[number];
 
 export interface SlashCommandOption {
   value: string;
@@ -789,8 +787,6 @@ export const executeSlashCommandRequestSchema = z.object({
   args: z.string().trim().max(4_000).refine((value) => !/[\r\n\u2028\u2029]/u.test(value), "Command arguments must be one line"),
 }).strict();
 
-export type ExecuteSlashCommandRequest = z.infer<typeof executeSlashCommandRequestSchema>;
-
 export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
@@ -817,8 +813,6 @@ export const pushSubscriptionSchema = z.object({
     auth: z.string().min(1).max(MAX_PUSH_KEY_CHARS),
   }).strict(),
 }).strict();
-
-export type PushSubscriptionInput = z.infer<typeof pushSubscriptionSchema>;
 
 export const pushSubscribeRequestSchema = z.object({
   requestId: z.string().uuid(),

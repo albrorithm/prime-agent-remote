@@ -16,7 +16,8 @@ export interface SlashCommandMenu {
   draftCommandEntry: SlashCommandCatalogEntry | undefined;
   experimentalCommandDraft: boolean;
   slashCommands: readonly SlashCommandSuggestion[];
-  selectableSlashIndexes: number[];
+  /** Whether the menu has anything the arrow keys can move between. */
+  slashSelectable: boolean;
   slashMenuOpen: boolean;
   activeSlashCommandIndex: number;
   activeSlashCommand: SlashCommandSuggestion | undefined;
@@ -91,15 +92,15 @@ export function useSlashCommandMenu({
   const draftCommandEntry = commandDraft ? commandEntry(draft.trim(), slashCatalog) : undefined;
   const experimentalCommandDraft = draftCommandEntry?.availability === "experimental";
   const slashCommands = matchingSlashCommandSuggestions(draft, slashCatalog);
-  const selectableSlashIndexes = slashCatalogReady ? slashCommands.map((_, index) => index) : [];
+  const slashSelectable = slashCatalogReady && slashCommands.length > 0;
   const slashMenuOpen = slashCommands.length > 0
     && dismissedSlashDraft !== draft
     && !optionsOpen
     && !sending
     && canSend;
-  const activeSlashCommandIndex = selectableSlashIndexes.includes(slashCommandIndex)
+  const activeSlashCommandIndex = slashSelectable && slashCommandIndex < slashCommands.length
     ? slashCommandIndex
-    : selectableSlashIndexes[0] ?? 0;
+    : 0;
   const activeSlashCommand = slashCommands[activeSlashCommandIndex];
 
   function selectSlashCommand(suggestion: SlashCommandSuggestion) {
@@ -127,13 +128,11 @@ export function useSlashCommandMenu({
       setDismissedSlashDraft(draft);
       return true;
     }
-    if (slashMenuOpen && activeSlashCommand && selectableSlashIndexes.length > 0) {
+    if (slashMenuOpen && activeSlashCommand && slashSelectable) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         const direction = event.key === "ArrowDown" ? 1 : -1;
-        const position = Math.max(0, selectableSlashIndexes.indexOf(activeSlashCommandIndex));
-        const next = (position + direction + selectableSlashIndexes.length) % selectableSlashIndexes.length;
-        setSlashCommandIndex(selectableSlashIndexes[next]);
+        setSlashCommandIndex((activeSlashCommandIndex + direction + slashCommands.length) % slashCommands.length);
         return true;
       }
       if (event.key === "Tab" && activeSlashCommand.command.availability !== "unavailable") {
@@ -160,7 +159,7 @@ export function useSlashCommandMenu({
     draftCommandEntry,
     experimentalCommandDraft,
     slashCommands,
-    selectableSlashIndexes,
+    slashSelectable,
     slashMenuOpen,
     activeSlashCommandIndex,
     activeSlashCommand,

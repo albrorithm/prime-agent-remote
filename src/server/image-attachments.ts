@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { crc32 } from "node:zlib";
 import {
   IMAGE_MIME_TYPES,
   MAX_IMAGE_ATTACHMENTS as SHARED_MAX_IMAGE_ATTACHMENTS,
@@ -51,12 +52,6 @@ const PNG_ALLOWED_BIT_DEPTHS = new Map<number, Set<number>>([
   [4, new Set([8, 16])],
   [6, new Set([8, 16])],
 ]);
-const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
-  let value = index;
-  for (let bit = 0; bit < 8; bit += 1) value = (value & 1) ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-  return value >>> 0;
-});
-
 function fail(message: string): never {
   throw new ImageAttachmentValidationError(message);
 }
@@ -141,14 +136,6 @@ function jpegDimensions(bytes: Buffer): ImageDimensions | null {
   return null;
 }
 
-function crc32(bytes: Buffer, start: number, end: number): number {
-  let crc = 0xffffffff;
-  for (let index = start; index < end; index += 1) {
-    crc = CRC32_TABLE[(crc ^ bytes[index]!) & 0xff]! ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
 function pngDimensions(bytes: Buffer): ImageDimensions | null {
   if (bytes.length < 57 || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return null;
   let offset = PNG_SIGNATURE.length;
@@ -164,7 +151,10 @@ function pngDimensions(bytes: Buffer): ImageDimensions | null {
     if (!Number.isSafeInteger(chunkEnd) || chunkEnd > bytes.length) return null;
     const type = bytes.toString("ascii", offset + 4, offset + 8);
     if (!PNG_CHUNK_TYPE.test(type) || (bytes[offset + 6]! & 0x20) !== 0) return null;
-    if (crc32(bytes, offset + 4, offset + 8 + length) !== bytes.readUInt32BE(offset + 8 + length)) return null;
+    // PNG chunk CRCs are the same CRC-32 zlib computes, which node:zlib has
+    // exposed since 22.2 — the generated table and loop this replaced were a
+    // reimplementation of a platform primitive.
+    if (crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== bytes.readUInt32BE(offset + 8 + length)) return null;
 
     if (!imageDimensions) {
       if (type !== "IHDR" || length !== 13) return null;
