@@ -1107,7 +1107,7 @@ describe("PrimeBackend", () => {
     }
   });
 
-  it("reads the supervisor roster's own labels for queued, recovering, and failed rows", async () => {
+  it("reads the supervisor roster's own labels for queued, recovering, failed and stopping rows", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     const originalSessions = fixture.sessions;
     fixture.sessions = [
@@ -1146,6 +1146,18 @@ describe("PrimeBackend", () => {
         workerState: "ready",
         statusLabel: "failed",
       },
+      // Daemon schema revision 16. Unhandled, this fell through to "live" and
+      // the row read as a session you could send to while it was being torn
+      // down.
+      {
+        id: "stopping-row",
+        sessionId: "private-stopping-session",
+        activeSessionId: "private-stopping-active",
+        sessionName: "Stopping worker",
+        lifecycle: "live",
+        activity: "idle",
+        workerState: "stopping",
+      },
     ];
     const backend = new PrimeBackend(moduleSpecifier());
     const hub = new EventHub();
@@ -1158,6 +1170,7 @@ describe("PrimeBackend", () => {
       expect(queued?.capabilities).toMatchObject({ send: false, abort: false, resume: false });
       expect(agents.find((agent) => agent.name === "Quiet worker")).toMatchObject({ lifecycle: "starting" });
       expect(agents.find((agent) => agent.name === "Dead worker")).toMatchObject({ lifecycle: "failed" });
+      expect(agents.find((agent) => agent.name === "Stopping worker")).toMatchObject({ lifecycle: "stopped" });
     } finally {
       fixture.sessions = originalSessions;
       hub.close();

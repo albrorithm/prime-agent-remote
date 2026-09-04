@@ -1,10 +1,10 @@
 ---
 name: primea-ui-harness
-description: Runs and extends the local Playwright browser harness for primeA-mobile-ui. Use when changing web UI components, Markdown or math rendering, mobile layout, scrolling, streaming behavior, CSS, browser accessibility, safe links, tables, or when a direct screenshot and DOM report would improve verification.
-compatibility: Requires the repository-local ignored .ui-harness directory, Node.js, and Playwright Chromium.
+description: Runs and extends the local Playwright browser harness for prime-agent-remote. Use when changing web UI components, Markdown or math rendering, mobile layout, scrolling, streaming behavior, CSS, browser accessibility, safe links, tables, or when a direct screenshot and DOM report would improve verification.
+compatibility: Requires the repository-local ignored .ui-harness directory, Node.js, and Playwright WebKit. Chromium is secondary.
 ---
 
-# primeA UI harness
+# prime-agent-remote UI harness
 
 Use this project-scoped workflow to verify browser-visible changes directly. The harness renders real application components and production CSS at a mobile viewport without connecting to a real gateway.
 
@@ -23,7 +23,7 @@ Confirm the local harness exists:
 test -f .ui-harness/package.json
 ```
 
-If dependencies or Chromium are missing:
+If dependencies or browsers are missing:
 
 ```bash
 cd .ui-harness
@@ -31,9 +31,18 @@ npm install
 npm run install-browser
 ```
 
-Do not reinstall when the existing setup works.
+Install WebKit; install Chromium too if the harness runs both. Do not reinstall
+when the existing setup works.
 
 ## Standard verification
+
+WebKit is the engine that decides here. This ships as an installed iOS PWA, so
+Chromium agreeing proves nothing on its own — see CLAUDE.md's "Use WebKit",
+which records a change Chromium alone reported as harmless and WebKit did not.
+Run the WebKit project; `.ui-harness/README.md` names the projects.
+
+Headless WebKit is still not an iPhone: safe-area insets are zero and there is
+no real-device text inflation, so anything resting on those needs the phone.
 
 Run all browser cases:
 

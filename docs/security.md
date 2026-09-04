@@ -113,8 +113,10 @@ before it makes any request, and it does the same for a link that arrives at an
 already-open app, but by then the URL has already been through that phone: the
 browser's history, its address-bar suggestions, and any screenshot of the
 screen. **A pairing link is exactly as sensitive as the token inside it**, and
-it stays valid until the token is rotated (`prime-agent-remote token
---rotate`), because it *is* the token. A link is spent at most once per app
+it stays valid until the token is rotated (`prime-agent-remote token --rotate`)
+*and the gateway is restarted*, because it *is* the token and the running
+process holds the value it booted with — nothing re-reads the token file.
+Rotating without restarting leaves a leaked link working. A link is spent at most once per app
 launch whatever its outcome, so a stale one cannot repeatedly consume the
 shared pairing budget, and a fragment that is not shaped like a token is not
 spent at all.

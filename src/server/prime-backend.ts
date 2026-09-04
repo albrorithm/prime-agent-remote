@@ -2400,15 +2400,24 @@ export class PrimeBackend implements AgentBackend {
     const failed = summary.workerState === "failed" || summary.statusLabel === "failed";
     const recovering = summary.workerState === "starting" || summary.workerState === "recovering"
       || summary.statusLabel === "recovering";
+    /* Daemon schema revision 16 added a fifth worker state that is neither live
+       nor on its way back: a worker being torn down. Unhandled, it fell through
+       to "live" and the row read as a session you could send to. "stopped"
+       rather than "starting", because it is not coming back — and because
+       "stopped" is outside ANSWERABLE_ATTENTION_LIFECYCLES, so a stopping row
+       also stops badging the app with an attention the daemon would refuse. */
+    const stopping = summary.workerState === "stopping";
     const lifecycle = queued
       ? "starting"
       : !summary.activeSessionId
         ? "inactive"
         : failed
           ? "failed"
-          : summary.lifecycle === "draft" || recovering
-            ? "starting"
-            : "live";
+          : stopping
+            ? "stopped"
+            : summary.lifecycle === "draft" || recovering
+              ? "starting"
+              : "live";
     /* The daemon's own summarizer writes `summary` — a present-tense clause of at
        most twelve words describing what this agent is doing. It is the best title
        material available and it re-runs as the work moves on, so it is the
