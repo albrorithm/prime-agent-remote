@@ -17,6 +17,7 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
   const [showHidden, setShowHidden] = useState(false);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const crumbsRef = useRef<HTMLElement>(null);
   const mountedRef = useRef(true);
   const loadVersionRef = useRef(0);
   const createVersionRef = useRef(0);
@@ -63,6 +64,25 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
     }
   }
 
+  /* Same fade the conversation header's lineage uses: once the trail is wider
+     than its box the last crumb is cut mid-word, and with the toggle pinned
+     beside it a hard edge reads as the icon sitting on top of the text.
+     Re-measured on path change too — the content can outgrow a box that never
+     changed size, which a ResizeObserver alone would not see. */
+  useEffect(() => {
+    const element = crumbsRef.current;
+    if (!element) return;
+    const measure = () => {
+      if (element.scrollWidth > element.clientWidth + 1) element.setAttribute("data-overflowing", "true");
+      else element.removeAttribute("data-overflowing");
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [listing?.path]);
+
   const visibleEntries = listing?.entries.filter((entry) => showHidden || !entry.hidden) ?? [];
 
   return (
@@ -78,21 +98,35 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
         <button className="icon-button" onClick={onClose} aria-label="Close new session"><X /></button>
       </header>
 
-      <nav className="directory-crumbs" aria-label="Directory ancestry">
-        {listing?.crumbs.map((crumb, index) => (
-          <span className="crumb-item" key={crumb.path}>
-            {index > 0 && <ChevronRight className="crumb-separator" aria-hidden="true" />}
-            <button
-              onClick={() => void load(crumb.path)}
-              title={crumb.path}
-              className={index === (listing.crumbs.length - 1) ? "current" : ""}
-            >
-              {index === 0 ? <Home aria-hidden="true" /> : null}
-              {crumb.name}
-            </button>
-          </span>
-        ))}
-      </nav>
+      {/* The toggle filters the list below, so it sits with the crumb trail
+          rather than in the form. It has to stay outside the `<nav>`: that box
+          scrolls horizontally, and a control inside it would slide out of
+          reach on a deep path. */}
+      <div className="directory-bar">
+        <nav className="directory-crumbs" aria-label="Directory ancestry" ref={crumbsRef}>
+          {listing?.crumbs.map((crumb, index) => (
+            <span className="crumb-item" key={crumb.path}>
+              {index > 0 && <ChevronRight className="crumb-separator" aria-hidden="true" />}
+              <button
+                onClick={() => void load(crumb.path)}
+                title={crumb.path}
+                className={index === (listing.crumbs.length - 1) ? "current" : ""}
+              >
+                {index === 0 ? <Home aria-hidden="true" /> : null}
+                {crumb.name}
+              </button>
+            </span>
+          ))}
+        </nav>
+        <button
+          className="icon-button"
+          onClick={() => setShowHidden((value) => !value)}
+          aria-label={showHidden ? "Hide hidden folders" : "Show hidden folders"}
+          aria-pressed={showHidden}
+        >
+          {showHidden ? <EyeOff /> : <Eye />}
+        </button>
+      </div>
 
       <div className="panel-scroll directory-scroll">
         {loading ? (
@@ -114,17 +148,6 @@ export function NewSessionPanel({ onClose, onCreated }: NewSessionPanelProps) {
       </div>
 
       <div className="new-session-form" data-gesture-exclusion>
-        <div className="new-session-path">
-          <code title={listing?.path}>{listing?.path ?? "…"}</code>
-          <button
-            className="icon-button"
-            onClick={() => setShowHidden((value) => !value)}
-            aria-label={showHidden ? "Hide hidden folders" : "Show hidden folders"}
-            aria-pressed={showHidden}
-          >
-            {showHidden ? <EyeOff /> : <Eye />}
-          </button>
-        </div>
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}

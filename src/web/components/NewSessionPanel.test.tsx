@@ -100,13 +100,26 @@ describe("NewSessionPanel", () => {
     expect(screen.getByRole("button", { name: /Start session here/ })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: /^home$/ }));
 
-    const home: DirectoryListing = { ...homeListing, path: "/home", entries: [] };
-    const projects: DirectoryListing = { ...homeListing, path: "/home/dev/projects", entries: [] };
+    // The crumb trail is what identifies the winning listing on screen, so the
+    // two responses need trails that can be told apart.
+    const home: DirectoryListing = {
+      ...homeListing,
+      path: "/home",
+      crumbs: homeListing.crumbs.slice(0, 2),
+      entries: [],
+    };
+    const projects: DirectoryListing = {
+      ...homeListing,
+      path: "/home/dev/projects",
+      crumbs: [...homeListing.crumbs, { name: "projects", path: "/home/dev/projects", hidden: false }],
+      entries: [],
+    };
     await act(async () => { resolveHome(home); });
-    expect(screen.getByText("/home")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^home$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^projects$/ })).not.toBeInTheDocument();
     await act(async () => { resolveProjects(projects); });
-    expect(screen.getByText("/home")).toBeInTheDocument();
-    expect(screen.queryByText("/home/dev/projects")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^home$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^projects$/ })).not.toBeInTheDocument();
   });
 
   it("disables session creation while loading and after a directory error", async () => {

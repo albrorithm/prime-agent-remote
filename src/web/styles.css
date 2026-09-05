@@ -693,8 +693,11 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .new-session-fab svg { width: 22px; height: 22px; }
 .agents-panel { position: relative; }
 .agents-panel > .new-session-panel { width: 100%; min-height: 0; flex: 1; }
-.directory-crumbs { display: flex; flex: 0 0 auto; align-items: center; overflow-x: auto; padding: 8px 12px; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+.directory-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; padding-right: 8px; border-bottom: 1px solid var(--border); }
+.directory-bar .icon-button { width: 32px; height: 32px; flex: 0 0 32px; }
+.directory-crumbs { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; overflow-x: auto; padding: 8px 12px; scrollbar-width: none; }
 .directory-crumbs::-webkit-scrollbar { display: none; }
+.directory-crumbs[data-overflowing="true"] { mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 14px), transparent 100%); }
 .crumb-item { display: inline-flex; min-width: 0; flex: 0 0 auto; align-items: center; }
 .crumb-separator { width: 12px; height: 12px; flex: 0 0 auto; color: var(--separator); }
 .directory-crumbs button { display: inline-flex; max-width: 160px; align-items: center; gap: 4px; overflow: hidden; padding: 5px 4px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: .6875rem; text-overflow: ellipsis; white-space: nowrap; }
@@ -709,9 +712,6 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .directory-row span { overflow: hidden; font-size: .8125rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .directory-row.hidden-entry span { color: var(--muted); font-weight: 500; }
 .new-session-form { display: grid; flex: 0 0 auto; gap: 8px; padding: 10px 12px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border-soft); background: var(--overlay-panel); }
-.new-session-path { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
-.new-session-path code { overflow: hidden; color: var(--muted); font: 500 .625rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.new-session-path .icon-button { width: 32px; height: 32px; flex: 0 0 32px; }
 .new-session-form input { width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg); }
 .new-session-form input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
 .new-session-form input::placeholder { color: var(--muted-2); }
