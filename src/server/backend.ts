@@ -90,19 +90,6 @@ export class BackendNotFoundError extends Error {}
 export class BackendCapabilityError extends Error {}
 
 /**
- * Whether a backend projects a daemon's text requests (`input`, `editor`) as
- * attention, or cancels them on arrival as it always has.
- *
- * Transient. The backend can carry a text request end to end, but the
- * attention card cannot yet answer one, and a card with nothing but Cancel on
- * it would leave the extension hanging where today it gets its fallback at
- * once. The default flips, and this constant goes, in the change that gives
- * the card a field. Tests pass the option explicitly so the path is covered
- * either way.
- */
-export const TEXT_ATTENTION_PROJECTION_DEFAULT = false;
-
-/**
  * How many of the newest projected rows a snapshot carries. Measured in the
  * UI harness on 2026-09-05, headless WebKit at 390px: mounting 200 rows took
  * 64 ms, 1,000 rows 169 ms, 2,000 rows 303 ms, and a phone is several times

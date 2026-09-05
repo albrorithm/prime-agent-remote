@@ -1911,7 +1911,8 @@ describe("attention fan-out to push", () => {
         body: "Waiting on your decision",
         agentId: "child-review",
         attentionId: "attention-9",
-        badge: 1,
+        // Three demo agents wait on the user now: a dialog, a line, a document.
+        badge: 3,
       });
     } finally {
       await rm(storeDir, { recursive: true, force: true });

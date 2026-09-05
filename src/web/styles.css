@@ -530,10 +530,24 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .conversation-empty p { margin: 0 0 16px; font-size: .8125rem; }
 .conversation-empty button { min-height: 40px; padding: 8px 14px; border: 1px solid var(--accent); border-radius: 99px; color: var(--on-accent); background: var(--accent); font-weight: 700; }
 .attention-card { margin: 0 0 20px; padding: 14px; border: 1px solid var(--tone-attention-soft); border-radius: var(--radius); background: var(--panel-raised); }
-.attention-heading { display: flex; align-items: center; gap: 10px; }
+.attention-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+/* The title takes the room; a deadline pill that no longer fits beside it drops to its own line rather than squeezing the title into single words. */
+.attention-heading > div { flex: 1 1 180px; min-width: 0; }
 .attention-heading > svg { width: 19px; height: 19px; flex: 0 0 auto; color: var(--tone-attention); }
 .attention-heading h3 { margin: 2px 0 0; font-size: .875rem; }
 .attention-card > p { margin: 12px 0; color: var(--text-soft); font-size: .8125rem; line-height: 1.5; }
+.attention-heading .attention-expiry { margin-left: auto; align-self: flex-start; flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font: 600 .6875rem ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+.attention-heading .attention-expiry.urgent { border-color: var(--tone-attention-soft); color: var(--tone-attention); }
+.attention-form { margin: 12px 0 0; }
+.attention-field { display: block; width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; color: var(--text); background: var(--bg); font: inherit; font-size: 1rem; line-height: 1.45; }
+textarea.attention-field { min-height: 88px; max-height: 280px; resize: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875rem; }
+.attention-field:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
+.attention-field::placeholder { color: var(--muted-2); }
+.attention-field:disabled { opacity: .6; }
+.attention-hint { margin: 6px 0 0; color: var(--muted); font-size: .6875rem; }
+.attention-terminal { margin: 12px 0 0; color: var(--muted); font-size: .8125rem; }
+.attention-card-expired { border-style: dashed; }
+.attention-card-text .attention-actions { margin-top: 12px; }
 .attention-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .attention-action { min-height: 40px; padding: 7px 12px; border: 1px solid var(--border-bright); border-radius: 9px; background: var(--panel-raised-3); font-size: .75rem; font-weight: 700; }
 .attention-action.safe { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }

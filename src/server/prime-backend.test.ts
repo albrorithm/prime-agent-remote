@@ -767,7 +767,9 @@ describe("PrimeBackend", () => {
     };
     fixture.listener = null;
 
-    const backend = new PrimeBackend(moduleSpecifier());
+    // Built with text projection off: this test pins the legacy path where a
+    // text dialog is cancelled on arrival; projection has its own tests.
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: false });
     const hub = new EventHub();
     await backend.initialize(hub);
     try {
@@ -2299,12 +2301,14 @@ describe("PrimeBackend", () => {
      TEXT_ATTENTION_PROJECTION_DEFAULT — so both sides of that switch are
      covered here rather than only the one the default happens to pick. */
 
-  it("cancels a daemon text request on arrival unless the backend was built to project one", async () => {
+  it("cancels a daemon text request on arrival when built not to project one", async () => {
     (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
     fixture.listError = false;
     fixture.snapshotDelayMs = 0;
     fixture.responses = [];
-    const backend = new PrimeBackend(moduleSpecifier());
+    // The old behaviour, kept for a deployment whose phones must not be asked
+    // for free text; the default is to project.
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: false });
     const hub = new EventHub();
     await backend.initialize(hub);
     try {
@@ -2329,6 +2333,29 @@ describe("PrimeBackend", () => {
       ]);
       expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
       expect(backend.catalog().agents[0].attention).toBeNull();
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("projects text requests by default", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({ type: "extension_ui_request", request: { id: "text-default", method: "input", payload: { title: "Name the branch" } } });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      expect(fixture.responses).toEqual([]);
+      expect((await backend.agentSnapshot(agentId))?.attention[0]).toMatchObject({ id: "text-default", reply: { kind: "text", multiline: false } });
     } finally {
       fixture.responses = [];
       hub.close();

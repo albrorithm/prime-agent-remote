@@ -57,7 +57,6 @@ import {
   BackendConflictError,
   BackendNotFoundError,
   CoalescedRefreshQueue,
-  TEXT_ATTENTION_PROJECTION_DEFAULT,
   TRANSCRIPT_WINDOW_ROWS,
   uniqueSessionName,
   withSerialLock,
@@ -320,9 +319,10 @@ interface PendingExtension {
 
 export interface PrimeBackendOptions {
   /**
-   * Project `input`/`editor` requests as attention instead of cancelling them
-   * on arrival. Defaults to TEXT_ATTENTION_PROJECTION_DEFAULT, whose doc
-   * comment explains why the default is what it is.
+   * Project `input`/`editor` requests as attention. On by default now that
+   * the card can answer one; off is the old behaviour, cancelling them on
+   * arrival so the extension takes its own fallback, kept for a deployment
+   * whose phones must not be asked for free text.
    */
   projectTextRequests?: boolean;
 }
@@ -1898,7 +1898,7 @@ export class PrimeBackend implements AgentBackend {
     private readonly socketOverride?: string,
     options: PrimeBackendOptions = {},
   ) {
-    this.projectTextRequests = options.projectTextRequests ?? TEXT_ATTENTION_PROJECTION_DEFAULT;
+    this.projectTextRequests = options.projectTextRequests ?? true;
   }
 
   onAttentionAdded(listener: AttentionListener): void {

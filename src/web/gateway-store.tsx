@@ -296,6 +296,7 @@ type Action =
   | { type: "history_loaded"; agentId: string; beforeId: string; rows: TranscriptMessage[] }
   | { type: "history_failed"; agentId: string; message: string }
   | { type: "history_clear"; agentId: string }
+  | { type: "attention_gone"; attentionId: string }
   | { type: "transcript_error"; agentId: string; message: string | null }
   | { type: "select"; value: string | null }
   | { type: "error"; value: string | null };
@@ -553,6 +554,20 @@ function reducer(state: State, action: Action): State {
     case "history_failed": {
       const buffer = state.history[action.agentId] ?? emptyHistory;
       return { ...state, history: { ...state.history, [action.agentId]: { ...buffer, loading: false, error: action.message } } };
+    }
+    case "attention_gone": {
+      // The gateway said the request is no longer held. That is authoritative
+      // where a client's own dismissal would not be, so the card goes now
+      // rather than at the next snapshot.
+      const owner = Object.values(state.snapshots).find((snapshot) => snapshot.attention.some((item) => item.id === action.attentionId));
+      if (!owner) return state;
+      return {
+        ...state,
+        snapshots: {
+          ...state.snapshots,
+          [owner.agentId]: { ...owner, attention: owner.attention.filter((item) => item.id !== action.attentionId) },
+        },
+      };
     }
     case "history_clear": {
       if (!(action.agentId in state.history)) return state;
@@ -1529,6 +1544,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
         showError(null);
       } catch (error) {
+        if (error instanceof ApiError && error.status === 404) dispatch({ type: "attention_gone", attentionId });
         if (!(error instanceof ApiError && error.status === 401)) {
           showError(humanizeError(error, "Response failed"));
         }

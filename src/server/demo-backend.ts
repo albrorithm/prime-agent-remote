@@ -130,8 +130,10 @@ const initialAgents: AgentSummary[] = [
     depth: 1,
     name: "Protocol designer",
     description: "Testing snapshot and replay semantics",
-    activity: "working",
+    activity: "blocked",
+    attention: "question",
     needsInput: true,
+    unreadCount: 1,
   }),
   agent({
     id: "child-review",
@@ -152,7 +154,9 @@ const initialAgents: AgentSummary[] = [
     name: "Research archive",
     description: "Completed UI source audit",
     cwd: "/projects/prime-agent",
-    activity: "idle",
+    activity: "blocked",
+    attention: "question",
+    unreadCount: 1,
   }),
   agent({
     id: "root-inactive",
@@ -653,7 +657,21 @@ function mobileDashboard(messages: readonly TranscriptMessage[]): SessionDashboa
 function initialSnapshot(summary: AgentSummary): AgentSnapshot {
   if (summary.id === "root-mobile") {
     const messages = buildMobileTranscript();
-    return { revision: 1, agentId: summary.id, messages, dashboard: mobileDashboard(messages), attention: [] };
+    return {
+      revision: 1,
+      agentId: summary.id,
+      messages,
+      dashboard: mobileDashboard(messages),
+      attention: [],
+      // What Prime would report for a run with instructions waiting on it, so
+      // the composer's queue strip has something to show in demo mode.
+      queue: {
+        steering: [{ text: "Keep the database schema unchanged", truncated: false }],
+        followUp: [{ text: "Then write a summary of what changed and why", truncated: false }],
+        queuedCount: 2,
+        active: { kind: "turn", phase: "running" },
+      },
+    };
   }
   const messages: TranscriptMessage[] = [
     {
@@ -671,7 +689,35 @@ function initialSnapshot(summary: AgentSummary): AgentSnapshot {
       createdAt: minutesAgo(118),
     },
   ];
-  const attention: AttentionRequest[] = summary.attention
+  const attention: AttentionRequest[] = summary.id === "child-protocol"
+    ? [{
+        id: "attention-demo-input",
+        agentId: summary.id,
+        kind: "question",
+        title: "Which branch should the release build use?",
+        revision: 1,
+        reply: { kind: "text", multiline: false, placeholder: "main" },
+        options: [{ id: "__demo_cancel__", label: "Cancel", tone: "danger" }],
+        createdAt: minutesAgo(2),
+        // Demo mode carries the deadline for the card to show; it does not enforce one.
+        expiresAt: new Date(Date.now() + 9 * 60_000).toISOString(),
+      }]
+    : summary.id === "root-research"
+    ? [{
+        id: "attention-demo-editor",
+        agentId: summary.id,
+        kind: "question",
+        title: "Edit the release notes before they are posted",
+        revision: 1,
+        reply: {
+          kind: "text",
+          multiline: true,
+          prefill: "## 0.2.0\n\n- Steer a run or queue a follow-up from the phone\n- Answer extension questions without the terminal\n- Pairing links expire after ten minutes",
+        },
+        options: [{ id: "__demo_cancel__", label: "Cancel", tone: "danger" }],
+        createdAt: minutesAgo(1),
+      }]
+    : summary.attention
     ? [
         {
           id: "attention-demo-dialog",
