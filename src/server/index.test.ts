@@ -118,10 +118,18 @@ afterEach(async () => {
 });
 
 async function pair(gateway: RunningGateway): Promise<{ cookie: string; csrfToken: string }> {
+  // A real gateway process: the grant is minted the way the CLI mints one,
+  // so this is also the one place the whole pairing path runs end to end.
+  const minted = await fetch(`${gateway.origin}/api/v1/auth/grants`, {
+    method: "POST",
+    headers: { Authorization: "Bearer transport-test-token" },
+  });
+  expect(minted.status).toBe(201);
+  const { token } = await minted.json() as { token: string };
   const response = await fetch(`${gateway.origin}/api/v1/auth/pair`, {
     method: "POST",
     headers: { Origin: gateway.origin, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: "transport-test-token" }),
+    body: JSON.stringify({ token }),
   });
   expect(response.status).toBe(200);
   const body = await response.json() as { csrfToken: string };

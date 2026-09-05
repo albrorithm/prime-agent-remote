@@ -37,8 +37,35 @@ The directory listing is intentionally narrow: absolute paths only (a relative p
 
 ## Authentication
 
-A setup token is exchanged for an in-memory gateway session, and for a device
-credential that outlives it.
+A one-time pairing grant is exchanged for an in-memory gateway session, and
+for a device credential that outlives it. The setup token no longer pairs a
+device itself: it mints grants, and it is presented only by the CLI or an
+operator at the machine, never by a browser.
+
+### Pairing grants
+
+`POST /api/v1/auth/grants`, with the setup token as a bearer, mints a grant:
+32 random bytes, held in the gateway's memory as a hash, good for ten minutes,
+spent by the first `POST /api/v1/auth/pair` that presents it whatever the
+outcome, so two clients holding the same link cannot both pair. At most 32 are
+live at once; minting past that evicts the oldest. `POST /api/v1/auth/grants/revoke`
+voids one, or all of them, at once, without a restart. Grants do not survive a
+gateway restart, and that is the intended outcome: whoever wanted one can ask
+for another. `prime-agent-remote token --rotate` voids every outstanding grant
+through that route before it replaces the setup token file, and the gateway
+reads the file on every mint request, so a rotation counts for minting at
+once; the value the process booted with is honoured until it restarts, which
+is the same caveat the file-less configuration always had.
+
+The two grant routes are not origin-checked, because the CLI sends no
+`Origin`. What guards them is the bearer, which no browser ever holds, charged
+to a grant budget of its own: five attempts per remote address per minute,
+the same size as pairing's and separate from it, so guessing the setup token
+costs what it always did while a mint followed by a pair still counts as one
+device joining rather than two attempts against a shared address. A lapsed
+grant is refused as `Pairing link expired` and a wrong one as
+`Invalid pairing token`, which tells the person holding a stale screenshot
+what to do and tells a guesser nothing they can use.
 
 ### Device credentials
 
@@ -47,16 +74,16 @@ Pairing issues one credential per browser, stored as `id.secret` in a separate
 maximum age, which is the ceiling browsers enforce anyway.
 
 - Its purpose is restarts. Sessions are in memory and die with the process, so
-  without it every restart would return every device to the setup token. That
-  in turn pushes operators toward keeping the token somewhere convenient,
-  which is the exposure it most needs protecting from.
+  without it every restart would return every device to pairing again. That
+  in turn pushes operators toward keeping a link somewhere convenient, which
+  is the exposure it most needs protecting from.
 - Only `sha256` of the secret is written to disk. Unlike the setup token,
   which may sit in an environment variable, a leaked device store does not let
   anyone become a paired device. A test asserts the secret does not appear in
   the file it was issued from.
 - `POST /api/v1/auth/resume` exchanges the credential for a new session. It is
   deliberately unauthenticated (the cookie is the credential), validates
-  `Origin`, and shares the setup token's rate limit, so that guessing a bearer
+  `Origin`, and shares pairing's rate limit, so that guessing a bearer
   credential is capped as strictly as guessing the token.
 - Sign-out revokes the credential, clears both cookies, and ends every other
   session running from that device too, sockets included: a second tab, or a
@@ -75,8 +102,8 @@ maximum age, which is the ceiling browsers enforce anyway.
   a restart before persistence succeeds can restore a revoked record. CLI
   revocations disable background retries because the restarted gateway takes
   ownership of the files again.
-- Rotating the setup token does not revoke any device. Revoking a device does
-  not affect the others.
+- Rotating the setup token voids outstanding pairing grants and does not
+  revoke any device. Revoking a device does not affect the others.
 - Devices are listed and revoked from Settings → Paired devices in the app, or
   from `prime-agent-remote devices [--revoke <id|all>]` at the machine. The
   CLI reads and writes the store directly and needs no running gateway, which
@@ -86,7 +113,7 @@ maximum age, which is the ceiling browsers enforce anyway.
   effect nor survive; so the CLI stops the gateway, applies the revocation,
   and starts it again on the same address. Every device's sessions end with
   that restart, and every device except the revoked one restores itself from
-  its credential without the setup token. If the gateway cannot be stopped,
+  its credential without pairing again. If the gateway cannot be stopped,
   nothing is revoked and the command reports that, rather than reporting a
   revocation it did not actually apply. It writes the push store as well as the
   device store, and says how many subscriptions it dropped: a credential is one
@@ -102,32 +129,30 @@ The browser receives:
 - `Secure` when configured for HTTPS;
 - a separate CSRF token returned inside authenticated JSON.
 
-### The setup token in a pairing link
+### The grant in a pairing link
 
-`start` prints the setup token twice: once as text, and once inside a QR code
-that encodes the gateway's address with the token in the URL **fragment**
-(`https://host.tailnet.ts.net/#pair=<token>`). A fragment is never sent to a
-server, so the token stays out of request lines, access logs, and `Referer`
+`start` prints a pairing grant twice: once as text, and once inside a QR code
+that encodes the gateway's address with the grant in the URL **fragment**
+(`https://host.tailnet.ts.net/#pair=<grant>`). A fragment is never sent to a
+server, so the grant stays out of request lines, access logs, and `Referer`
 headers, and it reaches the gateway only in the body of the same
-`POST /api/v1/auth/pair` a typed token uses — same route, same 5-per-minute
+`POST /api/v1/auth/pair` a typed code uses — same route, same 5-per-minute
 rate limit, same session and device credential in return. Nothing about what
 the browser can reach changes.
 
-What a link does change is where the token can come to rest. The app reads the
+What a link does change is where the grant can come to rest. The app reads the
 fragment during its first render and removes it with `history.replaceState`
 before it makes any request, and it does the same for a link that arrives at an
 already-open app, but by then the URL has already been through that phone: the
 browser's history, its address-bar suggestions, and any screenshot of the
-screen. **A pairing link is exactly as sensitive as the token inside it**, and
-it stays valid until the token is rotated (`prime-agent-remote token --rotate`)
-*and the gateway is restarted*, because it *is* the token and the running
-process holds the value it booted with — nothing re-reads the token file.
-Rotating without restarting leaves a leaked link working. A link is spent at most once per app
-launch whatever its outcome, so a stale one cannot repeatedly consume the
-shared pairing budget, and a fragment that is not shaped like a token is not
-spent at all.
+screen. That is why a link carries a grant and not the setup token: a link
+that comes to rest anywhere is worth one pairing within ten minutes, or
+nothing, and `prime-agent-remote token --rotate` voids it at once. A link is
+spent at most once per app launch whatever its outcome, so a stale one cannot
+repeatedly consume the shared pairing budget, and a fragment that is not
+shaped like a grant is not spent at all.
 
-The setup token is never stored by the browser application. Production no
+Neither the setup token nor a grant is ever stored by the browser application. Production no
 longer requires the token to be configured: an unset one is minted at 32
 random bytes and persisted at mode `0600` in the gateway's own configuration
 directory, which is stronger than a human-chosen value. Where that token ends
@@ -174,7 +199,7 @@ A push subscription is a long-lived capability to wake a device, and it intentio
 - CSP, frame denial, no-referrer, and content-type protections.
 - One MiB default HTTP request limit. Image-message requests have a separate bounded limit sized for three validated images.
 - WebSocket limits of 128 KiB per inbound message, 16 MiB per serialized outbound frame, and 32 MiB of aggregate buffered output.
-- Sliding-window rate limits: 5 pairing attempts per remote address per minute (failed attempts consume the budget, and over-limit attempts are answered like a wrong token), 30 resume attempts per verified device per minute, and 120 mutations per session per minute (`429` with `Retry-After`). Each limiter tracks at most 4,096 keys and refuses new keys at capacity. A resume is charged to its device's own budget only once its credential verifies; an unverified resume attempt (a guess) is charged to the address budget instead, the same one pairing uses, so guessing a device token costs exactly what guessing the pairing token costs. Behind a reverse proxy that terminates every connection from the same address (`tailscale serve` does this, presenting every client as `127.0.0.1`) that address budget is a single shared bucket, so pairing a new device, or a resume attempt that fails verification, can exhaust it for the whole house; more than five of either in a minute will see the next one rejected until the window rolls over. Legitimate reconnects by already-paired devices are unaffected, since each has its own per-device budget.
+- Sliding-window rate limits: 5 pairing attempts per remote address per minute (failed attempts consume the budget, and over-limit attempts are answered like a wrong token), 5 grant-minting attempts per remote address per minute on a budget of their own, 30 resume attempts per verified device per minute, and 120 mutations per session per minute (`429` with `Retry-After`). Each limiter tracks at most 4,096 keys and refuses new keys at capacity. A resume is charged to its device's own budget only once its credential verifies; an unverified resume attempt (a guess) is charged to the address budget instead, the same one pairing uses, so guessing a device token costs exactly what guessing the pairing token costs. Behind a reverse proxy that terminates every connection from the same address (`tailscale serve` does this, presenting every client as `127.0.0.1`) that address budget is a single shared bucket, so pairing a new device, or a resume attempt that fails verification, can exhaust it for the whole house; more than five of either in a minute will see the next one rejected until the window rolls over. Legitimate reconnects by already-paired devices are unaffected, since each has its own per-device budget.
 - Text rendering for transcript content; no raw HTML injection.
 - Tool, thinking, and error rows reach the browser as bounded one-line previews, scrubbed of credentials, keys, tokens, bearer headers, long opaque blobs, home directory paths, URLs, e-mail addresses, and IP addresses. They are **not** scrubbed of quoted arguments generally: a preview is the only rendering of a command the browser gets, so redacting its arguments would empty the row rather than trim it, and every reader of a transcript is the authenticated operator of the machine that ran the command. A secret passed in a shape none of those patterns match — `mysql -p'literal'` — reaches that operator's own screen. Nothing here defends a lock screen; push payloads carry no transcript text at all by construction.
 

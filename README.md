@@ -82,7 +82,7 @@ no build step.
 prime-agent-remote start      Start it in the background
 prime-agent-remote status     Show the address and whether it is running
 prime-agent-remote stop       Stop it
-prime-agent-remote token      Print the setup token (--rotate to replace it)
+prime-agent-remote token      Print a fresh pairing link (--rotate to void them all)
 prime-agent-remote devices    List paired devices (--revoke <id|all> to remove one)
 prime-agent-remote rebuild    Rebuild the UI and make it live
 prime-agent-remote install-command   Add /webui to Prime Agent
@@ -101,30 +101,33 @@ The gateway binds one of three ways, chosen when you start it:
   is printed instead. `--no-serve` never touches your Tailscale configuration.
 - `--loopback`: this machine only. A phone cannot reach it.
 - `--lan`: **experimental**. Binds every interface, so every device on your
-  network can reach it and only the setup token stops them. Without a
+  network can reach it and only a pairing link stops them. Without a
   certificate the device already trusts, plain HTTP outside `localhost` is
   not a secure context: no installable app, no service worker, no
   notifications, no app badge. Every credential that authenticates a request
-  (the setup token, a paired session's cookie, and the 400-day device
+  (a pairing code, a paired session's cookie, and the 400-day device
   credential) also crosses the network unencrypted, so anyone who can observe
   LAN traffic can copy them off the wire.
 
 ## Pairing
 
 `start` prints a QR code beside the address. Scan it with the phone's camera
-and the app pairs itself: the code is the address with the setup token in the
+and the app pairs itself: the code is the address with a pairing code in the
 URL fragment, which the app spends and then strips out of the URL. Typing the
-token into the pairing form does the same thing, if a camera is not to hand.
-`prime-agent-remote token --qr` prints the code again for a gateway that is
-already running.
+pairing code into the pairing form does the same thing, if a camera is not to
+hand. `prime-agent-remote token` prints a new link, and `--qr` a code to scan,
+for a gateway that is already running.
 
-A pairing link is as sensitive as the token it carries, and lasts as long —
-until `prime-agent-remote token --rotate` **and the gateway is restarted**. A
-running gateway holds the token it booted with and does not re-read the file,
-so rotation alone does not invalidate a leaked link. Treat it like the token.
+A pairing link is good for ten minutes and pairs one phone. It is minted by
+the running gateway from a setup secret that stays on this machine and is
+never itself part of a link, so a screenshot of the code, or a link left in a
+browser's history, is worth at most one pairing and at most ten minutes. A
+second phone gets its own link. `prime-agent-remote token --rotate` voids
+every link still outstanding at once, and replaces the setup secret that
+mints them.
 
 Either way the browser is then issued its own device credential, so it stays
-paired across gateway restarts and never needs the token again. Signing out
+paired across gateway restarts and never needs a link again. Signing out
 revokes that device, clears both cookies, and ends every other session running
 from that device, sockets included. Session expiry revokes nothing, by design,
 so a phone stays paired across a gateway restart.
@@ -141,10 +144,10 @@ Screen. Use the Tailscale HTTPS address, since being a secure context is what
 makes the app installable at all. Chrome on Android offers the install on its
 own.
 
-The installed app may ask for the setup token again, because iOS can give it
-storage separate from Safari's. If it does, that is expected rather than a
-failed pairing, and the token is the same one you already used.
-`prime-agent-remote token --qr` prints it, and a code to scan, again.
+The installed app may ask to pair again, because iOS can give it storage
+separate from Safari's. If it does, that is expected rather than a failed
+pairing; a link pairs one phone once, so print a new one with
+`prime-agent-remote token --qr` and scan that.
 
 ## From inside Prime Agent
 

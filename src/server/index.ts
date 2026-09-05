@@ -6,6 +6,7 @@ import { createGateway } from "./gateway.js";
 import { loadOrCreatePairingToken } from "./pairing-token.js";
 import { PrimeBackend } from "./prime-backend.js";
 import { loadOrCreateVapidKeys } from "./vapid-keys.js";
+import { buildPairingUrl } from "../protocol.js";
 
 const loaded = loadConfig();
 // Resolved here rather than in loadConfig, which stays free of file I/O so the
@@ -53,10 +54,13 @@ server.on("error", (error: NodeJS.ErrnoException) => {
 server.listen(config.port, config.host, () => {
   console.log(`Prime Agent Web gateway listening on http://${config.host}:${config.port}`);
   console.log(`Backend: ${backend.kind}`);
-  if (config.generatedPairingToken) {
-    console.log(`Setup pairing token: ${config.pairingToken}`);
-    console.log(`  stored at ${config.pairingTokenPath}`);
-  }
+  // A directly-run gateway prints one pairing link at boot. The setup token
+  // itself is never printed: it mints links, it is not one, and it lives in
+  // the token file for the CLI or an operator's curl to read.
+  const grant = gateway.auth.grants.mint();
+  const origin = [...config.allowedOrigins][0];
+  if (origin) console.log(`Pairing link, good for ten minutes: ${buildPairingUrl(origin, grant.token)}`);
+  console.log(`New links: POST /api/v1/auth/grants with the setup token at ${config.pairingTokenPath} as a bearer.`);
 });
 
 /**

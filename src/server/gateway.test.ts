@@ -172,11 +172,21 @@ interface PairedClient {
   csrfToken: string;
 }
 
+/** A one-time grant, minted the way the CLI mints one: with the setup token as a bearer. */
+async function grant(t: TestGateway): Promise<string> {
+  const response = await fetch(`${t.baseUrl}/api/v1/auth/grants`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${PAIRING_TOKEN}` },
+  });
+  expect(response.status).toBe(201);
+  return ((await response.json()) as { token: string }).token;
+}
+
 async function pairClient(t: TestGateway): Promise<PairedClient> {
   const response = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
     method: "POST",
     headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: PAIRING_TOKEN }),
+    body: JSON.stringify({ token: await grant(t) }),
   });
   expect(response.status).toBe(200);
   const body = await response.json() as { csrfToken: string };
@@ -262,7 +272,7 @@ describe("stableStringify", () => {
 describe("gateway pairing and authentication", () => {
   it("rejects pairing from disallowed or missing origins", async () => {
     const t = await startGateway();
-    const body = JSON.stringify({ token: PAIRING_TOKEN });
+    const body = JSON.stringify({ token: await grant(t) });
     const wrongOrigin = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
       method: "POST",
       headers: { Origin: "https://untrusted.invalid", "Content-Type": "application/json" },
@@ -364,7 +374,7 @@ describe("gateway sign-out", () => {
     const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
       method: "POST",
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-      body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: "phone" }),
+      body: JSON.stringify({ token: await grant(t), deviceName: "phone" }),
     });
     expect(paired.status).toBe(200);
     const deviceCookie = paired.headers.getSetCookie()
@@ -421,7 +431,7 @@ describe("gateway sign-out", () => {
       const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
         method: "POST",
         headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-        body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: `phone-${index}` }),
+        body: JSON.stringify({ token: await grant(t), deviceName: `phone-${index}` }),
       });
       expect(paired.status).toBe(200);
       cookies.push(paired.headers.getSetCookie()
@@ -455,7 +465,7 @@ describe("gateway sign-out", () => {
     const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
       method: "POST",
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-      body: JSON.stringify({ token: PAIRING_TOKEN }),
+      body: JSON.stringify({ token: await grant(t) }),
     });
     expect(paired.status).toBe(401);
   });
@@ -467,7 +477,7 @@ describe("gateway sign-out", () => {
     const paired = await fetch(`${first.baseUrl}/api/v1/auth/pair`, {
       method: "POST",
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-      body: JSON.stringify({ token: PAIRING_TOKEN, deviceName: "phone" }),
+      body: JSON.stringify({ token: await grant(first), deviceName: "phone" }),
     });
     expect(paired.status).toBe(200);
     const deviceCookie = paired.headers.getSetCookie()
@@ -502,7 +512,7 @@ describe("gateway sign-out", () => {
     const paired = await fetch(`${t.baseUrl}/api/v1/auth/pair`, {
       method: "POST",
       headers: { Origin: ORIGIN, "Content-Type": "application/json" },
-      body: JSON.stringify({ token: PAIRING_TOKEN }),
+      body: JSON.stringify({ token: await grant(t) }),
     });
     const cookies = paired.headers.getSetCookie();
     const deviceCookie = cookies.find((value) => value.startsWith("prime_web_device="))!.split(";", 1)[0];
@@ -1922,5 +1932,38 @@ describe("attention fan-out to push", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
     })).not.toThrow();
     expect(t.gateway.pushStore.list()).toEqual([]);
+  });
+});
+
+describe("pairing grants", () => {
+  it("mints for the setup token only, spends a grant once, and voids the rest on request", async () => {
+    const t = await startGateway();
+    expect((await fetch(`${t.baseUrl}/api/v1/auth/grants`, { method: "POST" })).status).toBe(401);
+    expect((await fetch(`${t.baseUrl}/api/v1/auth/grants`, { method: "POST", headers: { Authorization: "Bearer nope" } })).status).toBe(401);
+    // Origin is deliberately not required: the CLI sends none. The bearer is
+    // what guards it, and no browser holds one.
+    const minted = await fetch(`${t.baseUrl}/api/v1/auth/grants`, { method: "POST", headers: { Authorization: `Bearer ${PAIRING_TOKEN}` } });
+    expect(minted.status).toBe(201);
+    const body = await minted.json() as { token: string; expiresAt: string };
+    expect(body.token.length).toBeGreaterThanOrEqual(43);
+    expect(Date.parse(body.expiresAt)).toBeGreaterThan(Date.now());
+
+    const pairUrl = `${t.baseUrl}/api/v1/auth/pair`;
+    const headers = { Origin: ORIGIN, "Content-Type": "application/json" };
+    // The setup token itself no longer pairs.
+    const raw = await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: PAIRING_TOKEN }) });
+    expect(raw.status).toBe(401);
+    expect(((await raw.json()) as { title: string }).title).toBe("Invalid pairing token");
+    expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: body.token }) })).status).toBe(200);
+    expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: body.token }) })).status).toBe(401);
+
+    const voided = await grant(t);
+    const revoked = await fetch(`${t.baseUrl}/api/v1/auth/grants/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${PAIRING_TOKEN}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(await revoked.json()).toEqual({ revoked: 1 });
+    expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: voided }) })).status).toBe(401);
   });
 });

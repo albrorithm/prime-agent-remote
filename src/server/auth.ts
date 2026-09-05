@@ -2,6 +2,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GatewayConfig } from "./config.js";
 import type { DeviceStore } from "./device-store.js";
+import { PairingGrants } from "./pairing-grants.js";
+import { readPairingToken } from "./pairing-token.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 
 const SESSION_COOKIE = "prime_web_session";
@@ -29,7 +31,7 @@ export const RESUME_ATTEMPT_WINDOW_MS = 60_000;
 export const MAX_RESUME_ATTEMPTS_PER_DEVICE = 30;
 export const MAX_TRACKED_RESUME_DEVICES = 4_096;
 
-interface Session {
+export interface Session {
   id: string;
   csrfToken: string;
   expiresAt: number;
@@ -60,8 +62,24 @@ function parseCookies(header: string | undefined): Record<string, string> {
   return cookies;
 }
 
+export type PairOutcome = { session: Session } | { failure: "invalid" | "expired" };
+
 export class AuthService {
   private readonly sessions = new Map<string, Session>();
+  /** One-time grants a pairing link carries; see pairing-grants.ts. */
+  readonly grants = new PairingGrants();
+  /**
+   * Its own budget, the same size as pairing's, rather than a share of it:
+   * guessing the setup token here must cost what guessing it at `pair` used
+   * to, but a mint followed by a pair is one device joining, not two attempts,
+   * and behind one shared address that difference is how many phones a house
+   * can pair in a minute.
+   */
+  private readonly grantAttempts = new SlidingWindowLimiter(
+    PAIR_ATTEMPT_WINDOW_MS,
+    MAX_PAIR_ATTEMPTS_PER_CLIENT,
+    MAX_TRACKED_PAIR_CLIENTS,
+  );
   private readonly pairAttempts = new SlidingWindowLimiter(
     PAIR_ATTEMPT_WINDOW_MS,
     MAX_PAIR_ATTEMPTS_PER_CLIENT,
@@ -88,15 +106,50 @@ export class AuthService {
     return typeof origin === "string" && this.config.allowedOrigins.has(origin);
   }
 
-  async pair(req: IncomingMessage, res: ServerResponse, token: string, deviceName?: string): Promise<Session | null> {
+  /**
+   * Whether `presented` is the setup token, which is what mints a grant. The
+   * token file is read each time so a rotation counts at once; the value this
+   * process booted with stays good until it restarts, which is the same
+   * caveat the file-less configuration always had.
+   */
+  private async isSetupToken(presented: string): Promise<boolean> {
+    const stored = await readPairingToken(this.config.pairingTokenPath);
+    if (stored && safeEqual(presented, stored)) return true;
+    return safeEqual(presented, this.config.pairingToken);
+  }
+
+  /**
+   * Mints a pairing grant for whoever holds the setup token. Charged to the
+   * grant budget before the check, so a wrong guess costs the same as a
+   * right one and five of them shut the address out for the window.
+   */
+  async mintGrant(req: IncomingMessage, presented: string): Promise<{ token: string; expiresAt: number } | null> {
+    const key = req.socket.remoteAddress ?? "unknown";
+    const now = Date.now();
+    if (!this.grantAttempts.allow(key, now).allowed) return null;
+    if (!(await this.isSetupToken(presented))) return null;
+    return this.grants.mint(now);
+  }
+
+  /** Voids one grant, or all of them, for whoever holds the setup token. Null when refused. */
+  async revokeGrants(req: IncomingMessage, presented: string, token?: string): Promise<number | null> {
+    const key = req.socket.remoteAddress ?? "unknown";
+    if (!this.grantAttempts.allow(key, Date.now()).allowed) return null;
+    if (!(await this.isSetupToken(presented))) return null;
+    return this.grants.revoke(token);
+  }
+
+  async pair(req: IncomingMessage, res: ServerResponse, token: string, deviceName?: string): Promise<PairOutcome> {
     const key = req.socket.remoteAddress ?? "unknown";
     const now = Date.now();
     this.pruneSessions(now, this.sessions.size >= MAX_ACTIVE_SESSIONS);
 
-    // Recorded before the token check so failed guesses burn the budget too.
-    if (!this.pairAttempts.allow(key, now).allowed) return null;
-    if (!safeEqual(token, this.config.pairingToken)) return null;
-    if (this.sessions.size >= MAX_ACTIVE_SESSIONS) return null;
+    // Recorded before the grant check so failed guesses burn the budget too.
+    // The setup token itself no longer pairs: a link is a grant, spent once.
+    if (!this.pairAttempts.allow(key, now).allowed) return { failure: "invalid" };
+    const redemption = this.grants.redeem(token, now);
+    if (redemption !== "ok") return { failure: redemption === "expired" ? "expired" : "invalid" };
+    if (this.sessions.size >= MAX_ACTIVE_SESSIONS) return { failure: "invalid" };
 
     // Issued before the session so a store that cannot be written fails the
     // pairing outright, rather than handing back a session whose device cookie
@@ -106,7 +159,7 @@ export class AuthService {
     const cookies = [this.sessionCookieHeader(session)];
     if (issued) cookies.push(this.deviceCookieHeader(issued.token, DEVICE_COOKIE_MAX_AGE_SECONDS));
     res.setHeader("Set-Cookie", cookies);
-    return session;
+    return { session };
   }
 
   /**

@@ -15,7 +15,13 @@ Demo mode is the default and never executes local tools.
 2. `PRIME_WEB_PAIRING_TOKEN` is optional: leave it unset and the gateway mints
    a 32-byte token itself on first run, persisted at mode `0600`. Set one only
    to override that, and make it at least 32 characters — production rejects a
-   shorter one.
+   shorter one. The token does not pair a phone itself; it mints ten-minute
+   one-time pairing links. A directly-run gateway prints one link at boot, and
+   another comes from `POST /api/v1/auth/grants` with the token as a bearer:
+
+   ```sh
+   curl -X POST -H "Authorization: Bearer $(cat ~/.config/prime-agent-web/pairing-token)" http://127.0.0.1:8787/api/v1/auth/grants
+   ```
 3. Set exact `PRIME_WEB_ALLOWED_ORIGINS`.
 4. Keep `PRIME_WEB_HOST=127.0.0.1`.
 5. Set `PRIME_WEB_SECURE_COOKIE=true` behind HTTPS.

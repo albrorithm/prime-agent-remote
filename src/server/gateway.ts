@@ -18,6 +18,7 @@ import {
   deleteAgentRequestSchema,
   executeSlashCommandRequestSchema,
   pairRequestSchema,
+  revokeGrantsRequestSchema,
   PROTOCOL_VERSION,
   pushSubscribeRequestSchema,
   pushUnsubscribeRequestSchema,
@@ -310,6 +311,14 @@ function boundedQueryInteger(raw: string | null, fallback: number, maximum: numb
   return value >= 1 && value <= maximum ? value : null;
 }
 
+/** The bearer credential on a request, or null when there is none worth checking. */
+function bearerToken(req: IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (typeof header !== "string") return null;
+  const match = /^Bearer\s+([A-Za-z0-9_-]{1,512})$/u.exec(header.trim());
+  return match ? match[1]! : null;
+}
+
 function decodeSegment(value: string): string | null {
     try {
       const decoded = decodeURIComponent(value);
@@ -322,13 +331,40 @@ function decodeSegment(value: string): string | null {
   async function api(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<boolean> {
     if (!pathname.startsWith("/api/")) return false;
 
+    // Minting and voiding pairing grants. Not origin-checked: the caller is
+    // the CLI, or an operator's curl, and neither sends one. What guards these
+    // is the setup token as a bearer, which no browser ever holds, charged to
+    // the same address budget a pairing attempt is.
+    if (req.method === "POST" && (pathname === "/api/v1/auth/grants" || pathname === "/api/v1/auth/grants/revoke")) {
+      const presented = bearerToken(req);
+      if (!presented) { problem(res, 401, "Setup token required"); return true; }
+      if (pathname === "/api/v1/auth/grants") {
+        const grant = await auth.mintGrant(req, presented);
+        if (!grant) { problem(res, 401, "Invalid setup token"); return true; }
+        json(res, 201, { token: grant.token, expiresAt: new Date(grant.expiresAt).toISOString() });
+        return true;
+      }
+      const parsed = revokeGrantsRequestSchema.safeParse(await readJson(req));
+      if (!parsed.success) { problem(res, 400, "Invalid revoke request"); return true; }
+      const revoked = await auth.revokeGrants(req, presented, parsed.data.token);
+      if (revoked === null) { problem(res, 401, "Invalid setup token"); return true; }
+      json(res, 200, { revoked });
+      return true;
+    }
+
     if (req.method === "POST" && pathname === "/api/v1/auth/pair") {
       if (!auth.isAllowedOrigin(req)) { rejectOrigin(res, req); return true; }
       const parsed = pairRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) { problem(res, 400, "Invalid pairing request"); return true; }
-      const session = await auth.pair(req, res, parsed.data.token, parsed.data.deviceName);
-      if (!session) { problem(res, 401, "Invalid pairing token"); return true; }
-      json(res, 200, { paired: true, csrfToken: session.csrfToken });
+      const outcome = await auth.pair(req, res, parsed.data.token, parsed.data.deviceName);
+      if ("failure" in outcome) {
+        // A lapsed link is told apart from a wrong one: the first wants a
+        // fresh link, the second wants a look at what was typed. Neither
+        // helps a guesser, who is holding neither.
+        problem(res, 401, outcome.failure === "expired" ? "Pairing link expired" : "Invalid pairing token");
+        return true;
+      }
+      json(res, 200, { paired: true, csrfToken: outcome.session.csrfToken });
       return true;
     }
 

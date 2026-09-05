@@ -10,6 +10,8 @@ import { buildPairingUrl } from "../protocol.js";
 import { type GatewayConfig, loadConfig } from "../server/config.js";
 import { DeviceStore } from "../server/device-store.js";
 import { loadOrCreatePairingToken, rotatePairingToken } from "../server/pairing-token.js";
+import type { PairingGrant } from "../protocol.js";
+import { expiryClock, mintPairingGrant, PairingGrantError, revokePairingGrants } from "./pairing-grant.js";
 import { resolvePrimeModule } from "../server/prime-module.js";
 import { PushSubscriptionStore } from "../server/push-store.js";
 import { demoConfigDir, demoEnv } from "./demo-stores.js";
@@ -105,11 +107,15 @@ Usage:
   prime-agent-remote start [options]     Start the gateway in the background
   prime-agent-remote status [--demo]     Say whether it is running, and where
   prime-agent-remote stop [--demo]       Stop it
-  prime-agent-remote token [--rotate] [--qr] [--demo]   Print the setup token
+  prime-agent-remote token [--rotate] [--qr] [--demo]   Print a fresh pairing link
   prime-agent-remote devices [--revoke <id|all>] [--demo]  List or revoke paired devices
   prime-agent-remote rebuild [--demo]    Rebuild the UI and make it live
   prime-agent-remote install-command     Add /webui to Prime Agent
   prime-agent-remote help
+
+A pairing link is good for ten minutes and pairs one phone; \`token\` prints
+another whenever you need one. \`token --rotate\` voids every outstanding link
+and replaces the setup secret that mints them.
 
 --demo targets the demo instance, which keeps its own pairing token, paired
 devices, and gateway state entirely separate from a real run — pass it to
@@ -280,13 +286,14 @@ function baseEnv(options: Pick<Options, "demo">): NodeJS.ProcessEnv {
  */
 function printStartupInfo(
   exposure: Exposure,
-  token: string,
+  grant: PairingGrant | null,
   port: number,
   serve: PublishOutcome | null,
 ): void {
   line();
   line(`Running at ${exposure.url}`);
-  line(`Setup token: ${token}`);
+  if (grant) line(`Pairing code: ${grant.token}`);
+  if (grant) line(`  good until ${expiryClock(grant.expiresAt)}, for one phone; \`prime-agent-remote token\` prints another`);
   line();
   if (exposure.mode === "tailscale") {
     if (serve) for (const text of serve.message.split("\n")) line(text);
@@ -296,15 +303,29 @@ function printStartupInfo(
     }
     line();
   }
-  printPairingCode(exposure.url, token, exposure.mode !== "loopback");
+  if (grant) printPairingCode(exposure.url, grant.token, exposure.mode !== "loopback");
   for (const warning of exposure.warnings) line(`Note: ${warning}`);
   if (exposure.warnings.length > 0) line();
 }
 
 function pairingHint(exposure: Exposure): string {
   return exposure.mode === "loopback"
-    ? "Open that address and enter the setup token."
-    : "Scan the code with the phone's camera, or open the address and type the token.";
+    ? "Open that address and enter the pairing code."
+    : "Scan the code with the phone's camera, or open the address and type the pairing code.";
+}
+
+/**
+ * A pairing link from the running gateway, or null with the reason printed.
+ * Never fails a start: the gateway is up either way, and `token` can try again.
+ */
+async function mintOrExplain(origin: string, setupToken: string): Promise<PairingGrant | null> {
+  try {
+    return await mintPairingGrant(origin, setupToken);
+  } catch (error) {
+    line(error instanceof PairingGrantError ? error.message : "Could not mint a pairing link.");
+    line("Run `prime-agent-remote token` to try again.");
+    return null;
+  }
 }
 
 /**
@@ -321,7 +342,7 @@ function printPairingCode(url: string, token: string, reachable: boolean): void 
   if (!reachable) return;
   const link = buildPairingUrl(url, token);
   try {
-    line("Scan this to pair a phone, or open the address and type the token:");
+    line("Scan this to pair a phone, or open the address and type the pairing code:");
     line();
     // Colour only when a terminal will interpret it; see renderQr.
     line(renderQr(encodeQr(link), { color: process.stdout.isTTY === true && !process.env.NO_COLOR }));
@@ -419,16 +440,21 @@ async function start(options: Options): Promise<number> {
     : null;
 
   if (options.foreground) {
-    // The background path prints the URL and token once the gateway proves
-    // it is listening; this one hands the terminal straight to the child, so
-    // it has to say them first — and only here can it, since passing
-    // PRIME_WEB_PAIRING_TOKEN explicitly (above) means the child's own
-    // `generatedPairingToken` is false and it never prints the token itself.
-    printStartupInfo(exposure, token, port, serve);
-    line(pairingHint(exposure));
-    line();
+    // The terminal goes to the child, but a pairing link can only come from a
+    // gateway that is up, so the link is printed once it answers — in among
+    // the child's own output, which is the price of watching it run.
     const child = spawn(process.execPath, [entry], { cwd: projectRoot, env: environment, stdio: "inherit" });
-    const code = await new Promise<number>((resolve) => child.on("exit", (exitCode) => resolve(exitCode ?? 0)));
+    const exited = new Promise<number>((resolve) => child.on("exit", (exitCode) => resolve(exitCode ?? 0)));
+    const outcome = await waitForOurGateway({
+      probe: () => respondsAsGateway(gatewayOrigin(exposure.host, port)),
+      isAlive: () => child.exitCode === null,
+    });
+    if (outcome === "listening") {
+      printStartupInfo(exposure, await mintOrExplain(gatewayOrigin(exposure.host, port), token), port, serve);
+      line(pairingHint(exposure));
+      line();
+    }
+    const code = await exited;
     // No state file outlives a foreground run, so `stop` will never see this
     // mapping. Take down what this run put up, here, while we still know.
     if (serve?.published) await unpublishServe(systemRunner());
@@ -480,7 +506,7 @@ async function start(options: Options): Promise<number> {
     ...(options.noServe ? { noServe: true } : {}),
   });
 
-  printStartupInfo(exposure, token, port, serve);
+  printStartupInfo(exposure, await mintOrExplain(gatewayOrigin(exposure.host, port), token), port, serve);
   line(pairingHint(exposure));
   line("It stays paired across restarts. `prime-agent-remote stop` ends it.");
   return 0;
@@ -566,28 +592,51 @@ async function stop(options: Pick<Options, "demo">): Promise<number> {
 
 async function token(options: Options): Promise<number> {
   const config = loadConfig(baseEnv(options));
-  const value = options.rotate
-    ? await rotatePairingToken(config.pairingTokenPath)
-    : await loadOrCreatePairingToken(config.pairingTokenPath);
-  line(value);
-  if (options.qr) {
-    // The address is the running gateway's, not something this command can
-    // derive: it depends on the exposure mode that `start` chose.
-    const resolved = await resolveStatus(config.gatewayStatePath);
-    line();
-    if (!resolved.running || !resolved.state) {
-      line("Not running, so there is no address to pair with yet. Start it first.");
-    } else if (resolved.state.mode === "loopback") {
-      line(`Running on ${resolved.state.url}, which no other device can open.`);
-      line("Start it with --tailscale (or --lan) to pair a phone.");
-    } else {
-      printPairingCode(resolved.state.url, value, true);
-    }
-  }
+  // The link comes from the running gateway, which is where it is spent; the
+  // address is the gateway's too, since it depends on the exposure mode that
+  // `start` chose.
+  const resolved = await resolveStatus(config.gatewayStatePath);
+  const running = resolved.running && resolved.state ? resolved.state : null;
   if (options.rotate) {
+    // Voided with the secret the gateway still honours, before it is replaced:
+    // outstanding links must not outlive a rotation by the length of a restart.
+    const previous = await loadOrCreatePairingToken(config.pairingTokenPath);
+    if (running) {
+      try {
+        const voided = await revokePairingGrants(gatewayOrigin(running.host, running.port), previous);
+        line(`Voided ${voided} outstanding pairing link${voided === 1 ? "" : "s"}.`);
+      } catch (error) {
+        line(error instanceof PairingGrantError ? error.message : "Could not void the outstanding pairing links.");
+      }
+    }
+    await rotatePairingToken(config.pairingTokenPath);
+    line("Rotated the setup secret. Devices already paired keep working.");
+    line("The gateway mints with the new secret at once; restart it to stop honouring the old one.");
     line();
-    line("Rotated. Devices already paired keep working; new ones need this token.");
-    line("Restart the gateway for it to take effect.");
+  }
+  if (!running) {
+    line("Not running, so there is nothing to mint a pairing link. Start it first.");
+    return options.rotate ? 0 : 1;
+  }
+  const secret = await loadOrCreatePairingToken(config.pairingTokenPath);
+  let grant: PairingGrant;
+  try {
+    grant = await mintPairingGrant(gatewayOrigin(running.host, running.port), secret);
+  } catch (error) {
+    line(error instanceof PairingGrantError ? error.message : "Could not mint a pairing link.");
+    return 1;
+  }
+  line(`Pairing code: ${grant.token}`);
+  line(`  good until ${expiryClock(grant.expiresAt)}, for one phone`);
+  if (running.mode === "loopback") {
+    line(`Running on ${running.url}, which no other device can open.`);
+    line("Start it with --tailscale (or --lan) to pair a phone.");
+  } else {
+    line(`Pairing link: ${buildPairingUrl(running.url, grant.token)}`);
+    if (options.qr) {
+      line();
+      printPairingCode(running.url, grant.token, true);
+    }
   }
   return 0;
 }

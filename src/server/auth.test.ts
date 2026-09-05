@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { AuthService, MAX_TRACKED_PAIR_CLIENTS } from "./auth.js";
+import { AuthService, MAX_TRACKED_PAIR_CLIENTS, type Session } from "./auth.js";
 import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 
@@ -43,11 +43,21 @@ function response(): { value: ServerResponse; headers: Map<string, string> } {
   };
 }
 
+/**
+ * Pairs the way a phone does: with a grant minted from the setup token. A
+ * missing `token` mints one; a given one is presented as is, which is how the
+ * wrong-guess cases are written.
+ */
+async function pairWith(auth: AuthService, req: IncomingMessage, res: ServerResponse, token?: string): Promise<Session | null> {
+  const outcome = await auth.pair(req, res, token ?? auth.grants.mint().token);
+  return "session" in outcome ? outcome.session : null;
+}
+
 describe("AuthService", () => {
   it("exchanges the pairing token for a hardened session and validates CSRF", async () => {
     const auth = new AuthService(config());
     const res = response();
-    const session = await auth.pair(request({ origin: "https://agent.example.test" }), res.value, "correct-token");
+    const session = await pairWith(auth, request({ origin: "https://agent.example.test" }), res.value);
     expect(session).not.toBeNull();
     const cookie = res.headers.get("set-cookie")!;
     expect(cookie).toContain("HttpOnly");
@@ -64,7 +74,7 @@ describe("AuthService", () => {
   it("invalidates the session on sign-out and clears the cookie with matching attributes", async () => {
     const auth = new AuthService(config());
     const paired = response();
-    const session = (await auth.pair(request({ origin: "https://agent.example.test" }), paired.value, "correct-token"))!;
+    const session = (await pairWith(auth, request({ origin: "https://agent.example.test" }), paired.value))!;
     const cookiePair = paired.headers.get("set-cookie")!.split(";", 1)[0];
 
     const cleared = response();
@@ -83,7 +93,7 @@ describe("AuthService", () => {
   it("omits Secure from the clearing cookie exactly as pairing does", async () => {
     const auth = new AuthService(config({ secureCookie: false }));
     const paired = response();
-    const session = (await auth.pair(request({}, "100.64.0.9"), paired.value, "correct-token"))!;
+    const session = (await pairWith(auth, request({}, "100.64.0.9"), paired.value))!;
     const cleared = response();
     await auth.signOut(cleared.value, session);
     expect(cleared.headers.get("set-cookie")).not.toContain("Secure");
@@ -99,9 +109,9 @@ describe("AuthService", () => {
   it("bounds pairing attempts per remote address", async () => {
     const auth = new AuthService(config());
     for (let index = 0; index < 5; index += 1) {
-      expect(await auth.pair(request({}, "100.64.0.2"), response().value, "wrong-token")).toBeNull();
+      expect(await pairWith(auth, request({}, "100.64.0.2"), response().value, "wrong-token")).toBeNull();
     }
-    expect(await auth.pair(request({}, "100.64.0.2"), response().value, "correct-token")).toBeNull();
+    expect(await pairWith(auth, request({}, "100.64.0.2"), response().value)).toBeNull();
   });
 
   it("expires sessions and rejects their CSRF tokens", async () => {
@@ -109,7 +119,7 @@ describe("AuthService", () => {
     try {
       vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
       const auth = new AuthService(config({ sessionTtlMs: 1_000 }));
-      const session = (await auth.pair(request({}, "100.64.0.3"), response().value, "correct-token"))!;
+      const session = (await pairWith(auth, request({}, "100.64.0.3"), response().value))!;
       expect(auth.isSessionActive(session)).toBe(true);
       vi.advanceTimersByTime(1_000);
       expect(auth.isSessionActive(session)).toBe(false);
@@ -128,19 +138,48 @@ describe("AuthService", () => {
       vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
       const auth = new AuthService(config());
       for (let index = 0; index < MAX_TRACKED_PAIR_CLIENTS + 20; index += 1) {
-        await auth.pair(request({}, `100.64.${Math.floor(index / 256)}.${index % 256}`), response().value, "wrong-token");
+        await pairWith(auth, request({}, `100.64.${Math.floor(index / 256)}.${index % 256}`), response().value, "wrong-token");
       }
       const attempts = (auth as unknown as { pairAttempts: SlidingWindowLimiter }).pairAttempts;
       expect(attempts.trackedKeys).toBe(MAX_TRACKED_PAIR_CLIENTS);
       // A previously unseen client is refused while the tracking map is full,
       // even with the correct token.
-      expect(await auth.pair(request({}, "100.65.0.1"), response().value, "correct-token")).toBeNull();
+      expect(await pairWith(auth, request({}, "100.65.0.1"), response().value)).toBeNull();
 
       vi.advanceTimersByTime(60_001);
-      expect(await auth.pair(request({}, "100.65.0.1"), response().value, "correct-token")).not.toBeNull();
+      expect(await pairWith(auth, request({}, "100.65.0.1"), response().value)).not.toBeNull();
       expect(attempts.trackedKeys).toBe(1);
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("pairing grants", () => {
+  it("pairs a lapsed link differently from a wrong one, and spends both", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const auth = new AuthService(config());
+      const { token } = auth.grants.mint();
+      vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+      expect(await auth.pair(request(), response().value, token)).toEqual({ failure: "expired" });
+      expect(await auth.pair(request(), response().value, token)).toEqual({ failure: "invalid" });
+      expect(await auth.pair(request(), response().value, "correct-token")).toEqual({ failure: "invalid" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mints only for the setup token, charging guesses to the address budget", async () => {
+    const auth = new AuthService(config());
+    for (let index = 0; index < 5; index += 1) {
+      expect(await auth.mintGrant(request({}, "100.64.0.7"), "wrong")).toBeNull();
+    }
+    expect(await auth.mintGrant(request({}, "100.64.0.7"), "correct-token")).toBeNull();
+    const grant = await auth.mintGrant(request({}, "100.64.0.8"), "correct-token");
+    expect(grant?.token.length).toBeGreaterThanOrEqual(43);
+    expect(await auth.revokeGrants(request({}, "100.64.0.8"), "correct-token")).toBe(1);
+    expect(await auth.pair(request(), response().value, grant!.token)).toEqual({ failure: "invalid" });
   });
 });

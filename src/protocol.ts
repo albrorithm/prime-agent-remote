@@ -958,6 +958,23 @@ export const pairRequestSchema = z.object({
   token: z.string().min(1).max(512),
 }).strict();
 
+/** Voids one outstanding pairing grant, or every one when `token` is absent. */
+export const revokeGrantsRequestSchema = z.object({
+  token: z.string().min(1).max(512).optional(),
+}).strict();
+
+/** What a minted pairing grant looks like to the CLI that asked for one. */
+export interface PairingGrant {
+  token: string;
+  /** ISO instant after which the grant no longer pairs. */
+  expiresAt: string;
+}
+
+export const pairingGrantSchema = z.object({
+  token: z.string().min(32).max(512),
+  expiresAt: z.string().min(1).max(64),
+});
+
 const imageAttachmentRequestSchema = z.object({
   type: z.literal("image"),
   mimeType: z.enum(IMAGE_MIME_TYPES),

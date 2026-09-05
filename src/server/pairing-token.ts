@@ -43,7 +43,25 @@ export async function loadOrCreatePairingToken(filePath: string): Promise<string
   return token;
 }
 
-/** Invalidates every unpaired setup link. Paired devices are unaffected. */
+/**
+ * The stored token as it is right now, or null when there is none worth
+ * using. Read on every grant request so a rotation takes effect for minting
+ * without a restart; deliberately never mints, since a running gateway
+ * already holds a token and a file appearing behind its back would be a
+ * second one.
+ */
+export async function readPairingToken(filePath: string): Promise<string | null> {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    if (raw.length > MAX_TOKEN_FILE_BYTES) return null;
+    const token = raw.trim();
+    return isUsable(token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Voids the setup token for minting new grants. Paired devices are unaffected. */
 export async function rotatePairingToken(filePath: string): Promise<string> {
   const token = randomBytes(TOKEN_BYTES).toString("base64url");
   await writeTokenAtomically(filePath, token);
