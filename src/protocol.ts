@@ -380,6 +380,19 @@ export interface SessionQueue {
   active?: { kind: "turn" | "session_command"; phase: "preparing" | "committing" | "running" };
 }
 
+/**
+ * What lies before the rows a snapshot carries. `messages` is a recent window,
+ * not the whole transcript: `olderCount` rows older than its first one are
+ * held by the gateway and served by the history route, and `exhaustive` says
+ * whether those are everything the session has or only what the gateway
+ * retains. Absent when the backend does not page at all, in which case
+ * `messages` is all there is.
+ */
+export interface TranscriptHistory {
+  olderCount: number;
+  exhaustive: boolean;
+}
+
 export interface AgentSnapshot {
   revision: number;
   agentId: string;
@@ -389,6 +402,33 @@ export interface AgentSnapshot {
   goal?: AgentGoal;
   /** Absent when the daemon build does not report queue state, which is unknown, not empty. */
   queue?: SessionQueue;
+  history?: TranscriptHistory;
+}
+
+export const DEFAULT_HISTORY_PAGE_ROWS = 200;
+export const MAX_HISTORY_PAGE_ROWS = 500;
+
+/** The rows immediately before a given row, oldest first, and what remains before them. */
+export interface HistoryPage {
+  rows: TranscriptMessage[];
+  olderCount: number;
+  exhaustive: boolean;
+}
+
+export const MAX_SEARCH_QUERY_CHARS = 200;
+export const MAX_SEARCH_MATCHES = 50;
+
+/**
+ * A search over everything the gateway holds for the session, not only the
+ * window a client has loaded. `position` is the row's index in that full
+ * sequence, which is what tells a client how much older history stands
+ * between the match and its window. `exhaustive` is the history's: false
+ * means the session has rows the gateway no longer retains and did not search.
+ */
+export interface TranscriptSearchResult {
+  matches: Array<{ position: number; message: TranscriptMessage }>;
+  total: number;
+  exhaustive: boolean;
 }
 
 /**
@@ -434,6 +474,8 @@ export interface AgentPatch {
   dashboard?: SessionDashboard;
   goal?: AgentGoal | null;
   queue?: SessionQueue | null;
+  /** Rows leaving the window's front raise `olderCount`; this is the count after the patch. */
+  history?: TranscriptHistory;
 }
 
 export type GatewayEvent =
@@ -746,6 +788,11 @@ const agentGoalSchema = z.object({
   lastError: z.string().optional(),
 });
 
+const transcriptHistorySchema = z.object({
+  olderCount: z.number().int().nonnegative(),
+  exhaustive: z.boolean(),
+});
+
 export const agentSnapshotSchema = z.object({
   revision: z.number().int().nonnegative(),
   agentId: z.string().min(1),
@@ -754,6 +801,22 @@ export const agentSnapshotSchema = z.object({
   attention: z.array(attentionRequestSchema),
   goal: agentGoalSchema.optional(),
   queue: sessionQueueSchema.optional(),
+  history: transcriptHistorySchema.optional(),
+});
+
+export const historyPageSchema = z.object({
+  rows: z.array(transcriptMessageSchema).max(MAX_HISTORY_PAGE_ROWS),
+  olderCount: z.number().int().nonnegative(),
+  exhaustive: z.boolean(),
+});
+
+export const transcriptSearchResultSchema = z.object({
+  matches: z.array(z.object({
+    position: z.number().int().nonnegative(),
+    message: transcriptMessageSchema,
+  })).max(MAX_SEARCH_MATCHES),
+  total: z.number().int().nonnegative(),
+  exhaustive: z.boolean(),
 });
 
 export const bootstrapResponseSchema = z.object({
@@ -772,6 +835,7 @@ export const agentPatchSchema = z.object({
   dashboard: sessionDashboardSchema.optional(),
   goal: agentGoalSchema.nullable().optional(),
   queue: sessionQueueSchema.nullable().optional(),
+  history: transcriptHistorySchema.optional(),
 });
 
 const gatewayEventSchema = z.discriminatedUnion("kind", [

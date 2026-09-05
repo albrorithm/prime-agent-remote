@@ -2163,9 +2163,16 @@ describe("PrimeBackend", () => {
       });
       expect(backend.catalog().agents[0].name.length).toBeLessThanOrEqual(80);
       expect(backend.catalog().agents[0].cwd?.length).toBe(2_048);
-      const snapshot = await backend.agentSnapshot(backend.catalog().agents[0].id);
-      expect(snapshot?.messages).toHaveLength(1_000);
+      const agentId = backend.catalog().agents[0].id;
+      const snapshot = await backend.agentSnapshot(agentId);
+      // The projection keeps 1,000 rows; a snapshot carries the newest 200 of
+      // them and says how many stand before, and the rest are paged.
+      expect(snapshot?.messages).toHaveLength(200);
+      expect(snapshot?.history).toEqual({ olderCount: 800, exhaustive: false });
       expect(snapshot?.messages[0].createdAt).toBe("1970-01-01T00:00:00.000Z");
+      const page = await backend.historyPage(agentId, snapshot!.messages[0].id, 500);
+      expect(page?.rows).toHaveLength(500);
+      expect(page?.olderCount).toBe(300);
       expect(snapshot?.dashboard).toMatchObject({ status: "idle", needsInput: false, recap: "r".repeat(4_000) });
       expect(snapshot?.dashboard?.children).toHaveLength(250);
       expect(snapshot?.dashboard?.children.every((child) =>
@@ -3671,7 +3678,8 @@ describe("PrimeBackend incremental publication", () => {
     const live = await liveStream(messages);
     try {
       const before = await live.snapshot();
-      expect(before.messages).toHaveLength(1_000);
+      expect(before.messages).toHaveLength(200);
+      expect(before.history).toEqual({ olderCount: 800, exhaustive: true });
       live.daemonMessages.push(textMessage("m1000", "user", "Step 1000", 10));
       live.daemonMessages.push(textMessage("m1001", "assistant", "Step 1001", 11));
       await live.deliver({ type: "session_event", event: { type: "message_end" } });
@@ -3681,10 +3689,95 @@ describe("PrimeBackend incremental publication", () => {
       expect(patches[0]!.removed).toEqual([before.messages[0]!.id, before.messages[1]!.id]);
       expect(patches[0]!.added?.map((row) => row.text)).toEqual(["Step 1000", "Step 1001"]);
       expect(patches[0]!.updated).toBeUndefined();
+      // The projection is at its 1,000-row bound, so the two oldest rows left
+      // it for good and the window's older count holds while it stops being
+      // exhaustive.
+      expect(patches[0]!.history).toEqual({ olderCount: 800, exhaustive: false });
       expect(replacedSnapshots(live.frames)).toEqual([]);
       const after = await live.snapshot();
-      expect(after.messages).toHaveLength(1_000);
+      expect(after.messages).toHaveLength(200);
       expect(after.messages[0]!.id).toBe(before.messages[2]!.id);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("pages the retained rows before the window, oldest first, until there are none", async () => {
+    const messages = Array.from({ length: 450 }, (_, index) =>
+      textMessage(`m${index}`, index % 2 === 0 ? "user" : "assistant", `Step ${index}`, index % 60));
+    const live = await liveStream(messages);
+    try {
+      const window = await live.snapshot();
+      expect(window.messages.map((row) => row.text)[0]).toBe("Step 250");
+      expect(window.history).toEqual({ olderCount: 250, exhaustive: true });
+
+      const first = await live.backend.historyPage(live.agentId, window.messages[0]!.id, 200);
+      expect(first?.rows.map((row) => row.text)).toEqual(messages.slice(50, 250).map((row) => row.content));
+      expect(first?.olderCount).toBe(50);
+      expect(first?.exhaustive).toBe(true);
+
+      const second = await live.backend.historyPage(live.agentId, first!.rows[0]!.id, 200);
+      expect(second?.rows.map((row) => row.text)).toEqual(messages.slice(0, 50).map((row) => row.content));
+      expect(second?.olderCount).toBe(0);
+
+      const third = await live.backend.historyPage(live.agentId, second!.rows[0]!.id, 200);
+      expect(third).toEqual({ rows: [], olderCount: 0, exhaustive: true });
+
+      // Handed-out rows are copies: a caller cannot reach into the retained projection.
+      first!.rows[0]!.text = "tampered";
+      expect((await live.backend.historyPage(live.agentId, window.messages[0]!.id, 1))!.rows[0]!.text).toBe("Step 249");
+
+      await expect(live.backend.historyPage(live.agentId, "no-such-row", 200)).rejects.toBeInstanceOf(BackendConflictError);
+      expect(await live.backend.historyPage("no-such-agent", window.messages[0]!.id, 200)).toBeNull();
+      // A silly limit is clamped, not refused: the route already validated it.
+      expect((await live.backend.historyPage(live.agentId, window.messages[0]!.id, 100_000))!.rows).toHaveLength(250);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("searches every retained row, not only the window, and says where each match sits", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) =>
+      textMessage(`m${index}`, "user", index === 7 ? "The Needle is here" : `Step ${index}`, index % 60));
+    const live = await liveStream(messages);
+    try {
+      const found = await live.backend.searchTranscript(live.agentId, "needle", 10);
+      expect(found?.matches.map((match) => [match.position, match.message.text])).toEqual([[7, "The Needle is here"]]);
+      expect(found?.total).toBe(1);
+      expect(found?.exhaustive).toBe(true);
+
+      const many = await live.backend.searchTranscript(live.agentId, "step 2", 3);
+      expect(many?.matches).toHaveLength(3);
+      expect(many?.total).toBe(111);
+      expect(many?.matches[0]?.position).toBe(2);
+
+      expect((await live.backend.searchTranscript(live.agentId, "   ", 10))?.matches).toEqual([]);
+      expect(await live.backend.searchTranscript("no-such-agent", "step", 10)).toBeNull();
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("keeps the window and its older count right through the streaming fast path", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) =>
+      textMessage(`m${index}`, index % 2 === 0 ? "user" : "assistant", `Step ${index}`, index % 60));
+    const live = await liveStream(messages);
+    try {
+      const streaming = { id: "live-reply", role: "assistant", content: "Thinking", timestamp: "2026-01-01T00:01:00.000Z" };
+      fixture.snapshot.streamingMessage = streaming;
+      await live.deliver({ type: "session_event", event: { type: "message_start" } });
+      const fetchesBefore = fixture.snapshotCalls;
+      const grown = { ...streaming, content: "Thinking about the answer" };
+      fixture.snapshot.streamingMessage = grown;
+      await live.deliver({ type: "session_event", event: { type: "message_update", message: grown } });
+      expect(fixture.snapshotCalls).toBe(fetchesBefore);
+
+      const after = await live.snapshot();
+      const full = projectPrimeTranscript(live.daemonMessages, grown);
+      expect(after.messages).toEqual(full.slice(-200));
+      expect(after.history).toEqual({ olderCount: full.length - 200, exhaustive: true });
+      const page = await live.backend.historyPage(live.agentId, after.messages[0]!.id, 500);
+      expect(page?.rows).toEqual(full.slice(0, full.length - 200));
     } finally {
       await live.close();
     }

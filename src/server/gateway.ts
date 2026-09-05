@@ -5,6 +5,10 @@ import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
+  DEFAULT_HISTORY_PAGE_ROWS,
+  MAX_HISTORY_PAGE_ROWS,
+  MAX_SEARCH_MATCHES,
+  MAX_SEARCH_QUERY_CHARS,
   abortRequestSchema,
   attentionAgentCount,
   attentionResponseSchema,
@@ -294,7 +298,19 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
     return mutationCache.run(session.id, requestId, binding, operation) as Promise<T>;
   }
 
-  function decodeSegment(value: string): string | null {
+  /**
+ * A page-size query parameter: absent means the default, anything that is
+ * not an integer inside 1..maximum is a bad request rather than a quiet clamp,
+ * so a client asking for more than it can have hears about it.
+ */
+function boundedQueryInteger(raw: string | null, fallback: number, maximum: number): number | null {
+  if (raw === null || raw === "") return fallback;
+  if (!/^\d{1,6}$/.test(raw)) return null;
+  const value = Number(raw);
+  return value >= 1 && value <= maximum ? value : null;
+}
+
+function decodeSegment(value: string): string | null {
     try {
       const decoded = decodeURIComponent(value);
       return decoded && !decoded.includes("/") && !decoded.includes("\\") ? decoded : null;
@@ -350,6 +366,34 @@ export async function createGateway(config: GatewayConfig, deps: GatewayDeps): P
       const snapshot = agentId ? await backend.agentSnapshot(agentId) : null;
       if (!snapshot) problem(res, 404, "Agent not found");
       else json(res, 200, snapshot);
+      return true;
+    }
+
+    const historyMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/history$/);
+    if (req.method === "GET" && historyMatch) {
+      const agentId = decodeSegment(historyMatch[1]);
+      const url = new URL(req.url ?? "/", "http://gateway.invalid");
+      const before = url.searchParams.get("before") ?? "";
+      const limit = boundedQueryInteger(url.searchParams.get("limit"), DEFAULT_HISTORY_PAGE_ROWS, MAX_HISTORY_PAGE_ROWS);
+      if (!agentId || !before || before.length > 512 || limit === null) { problem(res, 400, "Invalid history request"); return true; }
+      const page = await backend.historyPage(agentId, before, limit);
+      if (!page) problem(res, 404, "Agent not found");
+      else json(res, 200, page);
+      return true;
+    }
+
+    const searchMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/search$/);
+    if (req.method === "GET" && searchMatch) {
+      const agentId = decodeSegment(searchMatch[1]);
+      const url = new URL(req.url ?? "/", "http://gateway.invalid");
+      // Matched here against rows already projected and bounded; the query
+      // never reaches the daemon, and is not logged.
+      const query = (url.searchParams.get("q") ?? "").trim();
+      const limit = boundedQueryInteger(url.searchParams.get("limit"), MAX_SEARCH_MATCHES, MAX_SEARCH_MATCHES);
+      if (!agentId || !query || query.length > MAX_SEARCH_QUERY_CHARS || limit === null) { problem(res, 400, "Invalid search request"); return true; }
+      const result = await backend.searchTranscript(agentId, query, limit);
+      if (!result) problem(res, 404, "Agent not found");
+      else json(res, 200, result);
       return true;
     }
 

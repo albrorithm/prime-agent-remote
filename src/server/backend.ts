@@ -5,12 +5,14 @@ import type {
   CatalogSnapshot,
   CellOutput,
   DirectoryListing,
+  HistoryPage,
   ImageMimeType,
   MessageDelivery,
   MutationAccepted,
   SessionCreated,
   SlashCommandAccepted,
   SlashCommandCatalog,
+  TranscriptSearchResult,
 } from "../protocol.js";
 import type { EventHub } from "./event-hub.js";
 import type { ValidatedImageAttachment } from "./image-attachments.js";
@@ -98,6 +100,16 @@ export class BackendCapabilityError extends Error {}
  * either way.
  */
 export const TEXT_ATTENTION_PROJECTION_DEFAULT = false;
+
+/**
+ * How many of the newest projected rows a snapshot carries. Measured in the
+ * UI harness on 2026-09-05, headless WebKit at 390px: mounting 200 rows took
+ * 64 ms, 1,000 rows 169 ms, 2,000 rows 303 ms, and a phone is several times
+ * slower than that machine. Streaming cost did not depend on the window at
+ * all, so this only buys first render and cold-attach bytes. The rest is
+ * paged through the history route.
+ */
+export const TRANSCRIPT_WINDOW_ROWS = 200;
 
 export function uniqueSessionName(base: string, existingNames: string[]): string {
   const taken = new Set(existingNames.map((name) => name.trim().toLowerCase()));
@@ -303,6 +315,18 @@ export interface AgentBackend {
   sendMessage(input: SendMessageInput): Promise<MutationAccepted>;
   slashCommandCatalog(agentId: string): Promise<SlashCommandCatalog | null>;
   executeSlashCommand(input: ExecuteSlashCommandInput): Promise<SlashCommandAccepted>;
+  /**
+   * The rows immediately before `beforeId`, oldest first, at most `limit`.
+   * Null for an unknown agent. Throws BackendConflictError when `beforeId` is
+   * not a row the backend holds any more — history was rewritten under the
+   * client, and the honest answer is to reload rather than guess a position.
+   */
+  historyPage(agentId: string, beforeId: string, limit: number): Promise<HistoryPage | null>;
+  /**
+   * Case-insensitive substring search over every row the backend holds for
+   * the agent, window or not. Null for an unknown agent.
+   */
+  searchTranscript(agentId: string, query: string, limit: number): Promise<TranscriptSearchResult | null>;
   attachment(id: string): AttachmentData | null;
   /** Full (bounded) sections of a projected python cell, or null when unknown. */
   cellOutput(id: string): CellOutput | null;

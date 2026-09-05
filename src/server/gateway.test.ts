@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
+import { historyPageSchema, transcriptSearchResultSchema } from "../protocol.js";
 import { BackendCapabilityError, type AttentionListener } from "./backend.js";
 import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
@@ -941,6 +942,40 @@ describe("gateway API routes", () => {
     expect((await fetch(`${t.baseUrl}/api/v1/agents/no-such-agent/snapshot`, { headers })).status).toBe(404);
     expect((await fetch(`${t.baseUrl}/api/v1/attachments/no-such-attachment`, { headers })).status).toBe(404);
     expect((await fetch(`${t.baseUrl}/api/v1/agents/no-such-agent/commands`, { headers })).status).toBe(404);
+  });
+
+  it("pages history and searches the transcript as authenticated reads", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.send)!.id;
+    const base = `${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}`;
+    const headers = { Cookie: client.cookie };
+    const snapshot = await (await fetch(`${base}/snapshot`, { headers })).json() as { messages: Array<{ id: string; text: string }> };
+    const firstId = snapshot.messages[0]!.id;
+
+    // Reads: a cookie is enough, and no CSRF token is asked for.
+    expect((await fetch(`${base}/history?before=${encodeURIComponent(firstId)}`)).status).toBe(401);
+    const page = await fetch(`${base}/history?before=${encodeURIComponent(firstId)}`, { headers });
+    expect(page.status).toBe(200);
+    expect(historyPageSchema.parse(await page.json())).toEqual({ rows: [], olderCount: 0, exhaustive: true });
+    expect((await fetch(`${base}/history`, { headers })).status).toBe(400);
+    expect((await fetch(`${base}/history?before=${encodeURIComponent(firstId)}&limit=0`, { headers })).status).toBe(400);
+    expect((await fetch(`${base}/history?before=${encodeURIComponent(firstId)}&limit=9999`, { headers })).status).toBe(400);
+    expect((await fetch(`${base}/history?before=no-such-row`, { headers })).status).toBe(409);
+    expect((await fetch(`${t.baseUrl}/api/v1/agents/no-such-agent/history?before=x`, { headers })).status).toBe(404);
+
+    const needle = snapshot.messages[0]!.text.split(" ")[0]!.toUpperCase();
+    const found = await fetch(`${base}/search?q=${encodeURIComponent(needle)}&limit=1`, { headers });
+    expect(found.status).toBe(200);
+    const result = transcriptSearchResultSchema.parse(await found.json());
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]!.position).toBe(0);
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect((await fetch(`${base}/search?q=`, { headers })).status).toBe(400);
+    expect((await fetch(`${base}/search?q=${"x".repeat(201)}`, { headers })).status).toBe(400);
+    expect((await fetch(`${base}/search?q=a&limit=51`, { headers })).status).toBe(400);
+    expect((await fetch(`${t.baseUrl}/api/v1/agents/no-such-agent/search?q=a`, { headers })).status).toBe(404);
   });
 
   it("lists directories and validates the requested path", async () => {

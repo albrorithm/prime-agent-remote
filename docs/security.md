@@ -11,7 +11,7 @@ The browser talks only to the web gateway. The gateway is the sole owner of daem
 The gateway currently permits these live operations:
 
 - list projected agents;
-- read projected transcripts and activity;
+- read projected transcripts and activity, page older rows of a transcript, and search a transcript. Pages and search results hand out only rows a snapshot could already contain; a search query is matched in the gateway against those projected, bounded rows and never reaches the daemon or a log;
 - send a text prompt or explicitly user-selected image prompt, choosing a steer or follow-up delivery lane, with queue-if-busy semantics, waking a daemon-projected saved session first when needed;
 - execute four enumerated session commands and five explicit `AgentConnection` adapters with bounded single-line arguments;
 - detect additional installed extension, prompt, and skill command names through a metadata-stripping projection;

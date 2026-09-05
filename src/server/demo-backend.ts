@@ -9,6 +9,7 @@ import type {
   CatalogSnapshot,
   CellOutput,
   DirectoryListing,
+  HistoryPage,
   MutationAccepted,
   SessionCreated,
   SessionDashboard,
@@ -18,7 +19,9 @@ import type {
   SlashCommandCatalog,
   SlashCommandResult,
   TranscriptMessage,
+  TranscriptSearchResult,
 } from "../protocol.js";
+import { MAX_SEARCH_MATCHES, MAX_SEARCH_QUERY_CHARS } from "../protocol.js";
 import {
   BackendCapabilityError,
   BackendConflictError,
@@ -1089,6 +1092,37 @@ export class DemoBackend implements AgentBackend {
     this.hub.unregister(`agent:${input.agentId}`);
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
     return { accepted: true, requestId: input.requestId, revision };
+  }
+
+  /**
+   * Demo snapshots carry every row they have and no `history`, so there is
+   * never a page before the first row. Answering the route honestly still
+   * means telling a stale `beforeId` apart from an unknown agent.
+   */
+  async historyPage(agentId: string, beforeId: string, _limit: number): Promise<HistoryPage | null> {
+    const snapshot = this.snapshots.get(agentId);
+    if (!snapshot) return null;
+    if (!snapshot.messages.some((message) => message.id === beforeId)) {
+      throw new BackendConflictError("History has changed. Reload the transcript.");
+    }
+    return { rows: [], olderCount: 0, exhaustive: true };
+  }
+
+  async searchTranscript(agentId: string, query: string, limit: number): Promise<TranscriptSearchResult | null> {
+    const snapshot = this.snapshots.get(agentId);
+    if (!snapshot) return null;
+    const needle = query.trim().slice(0, MAX_SEARCH_QUERY_CHARS).toLowerCase();
+    const size = Math.min(MAX_SEARCH_MATCHES, Math.max(1, Math.trunc(limit) || 1));
+    const matches: TranscriptSearchResult["matches"] = [];
+    let total = 0;
+    if (needle) {
+      snapshot.messages.forEach((message, position) => {
+        if (!message.text.toLowerCase().includes(needle)) return;
+        total += 1;
+        if (matches.length < size) matches.push({ position, message: structuredClone(message) });
+      });
+    }
+    return { matches, total, exhaustive: true };
   }
 
   async resolveAttention(input: ResolveAttentionInput): Promise<MutationAccepted> {

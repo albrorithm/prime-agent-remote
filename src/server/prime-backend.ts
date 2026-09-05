@@ -8,7 +8,10 @@ import { resolvePrimeModule } from "./prime-module.js";
 import {
   DIRECT_SLASH_COMMAND_NAMES,
   MAX_ATTENTION_TEXT_CHARS,
+  MAX_HISTORY_PAGE_ROWS,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
+  MAX_SEARCH_MATCHES,
+  MAX_SEARCH_QUERY_CHARS,
   MAX_QUEUE_ENTRIES_PER_LANE,
   MAX_QUEUE_ENTRY_CHARS,
   SESSION_SLASH_COMMAND_NAMES,
@@ -24,6 +27,7 @@ import type {
   AttentionRequest,
   CatalogSnapshot,
   CellOutput,
+  HistoryPage,
   DirectoryListing,
   ImageAttachmentInput,
   TranscriptAttachment,
@@ -40,6 +44,8 @@ import type {
   SlashCommandAccepted,
   SlashCommandCatalog,
   SlashCommandCatalogEntry,
+  TranscriptHistory,
+  TranscriptSearchResult,
   SlashCommandOption,
   SlashCommandResult,
   TranscriptMessage,
@@ -52,6 +58,7 @@ import {
   BackendNotFoundError,
   CoalescedRefreshQueue,
   TEXT_ATTENTION_PROJECTION_DEFAULT,
+  TRANSCRIPT_WINDOW_ROWS,
   uniqueSessionName,
   withSerialLock,
   type AttachmentData,
@@ -1302,6 +1309,30 @@ interface ProjectedTranscript {
   /** Ids of the rows the streaming message produced, so the next tick can drop them. */
   streamingRowIds: string[];
   context: TranscriptProjectionContext;
+  /** True when a bound cut rows the daemon holds: what is kept is not the whole session. */
+  truncated: boolean;
+}
+
+/**
+ * Everything the gateway retains for one agent, of which a snapshot carries
+ * only the newest TRANSCRIPT_WINDOW_ROWS. Pages and search come from here.
+ */
+interface RetainedTranscript {
+  messages: TranscriptMessage[];
+  exhaustive: boolean;
+}
+
+/**
+ * The newest rows plus what a client needs to know about the rest. Every
+ * snapshot, live or inactive, is cut here so no two paths can disagree about
+ * where the window ends or how much stands before it.
+ */
+function windowTranscript(retained: RetainedTranscript): { messages: TranscriptMessage[]; history: TranscriptHistory } {
+  const messages = retained.messages.slice(-TRANSCRIPT_WINDOW_ROWS);
+  return {
+    messages,
+    history: { olderCount: retained.messages.length - messages.length, exhaustive: retained.exhaustive },
+  };
 }
 
 /**
@@ -1368,6 +1399,7 @@ function projectPrimeTranscriptParts(
       }
     }
   }
+  const projectedCount = projected.length;
   const bounded = boundProjectedMessages(projected);
   // Read after the bounding pass: it can drop a row from the front and rename
   // a colliding id, and a stale id here would leave a duplicate row behind.
@@ -1376,6 +1408,7 @@ function projectPrimeTranscriptParts(
     messages: bounded,
     streamingRowIds: streamingRows.filter((row) => survived.has(row)).map((row) => row.id),
     context,
+    truncated: sourceOffset > 0 || bounded.length < projectedCount,
   };
 }
 
@@ -1450,8 +1483,9 @@ function diffAgentSnapshots(prev: AgentSnapshot, next: AgentSnapshot): SnapshotD
   const dashboardChanged = !sameJson(prev.dashboard, next.dashboard);
   const goalChanged = !sameJson(prev.goal, next.goal);
   const queueChanged = !sameJson(prev.queue, next.queue);
+  const historyChanged = !sameJson(prev.history, next.history);
   if (!removed.length && !updated.length && !added.length
-    && !dashboardChanged && !goalChanged && !queueChanged) return { kind: "none" };
+    && !dashboardChanged && !goalChanged && !queueChanged && !historyChanged) return { kind: "none" };
 
   // Past halfway the patch carries more than the snapshot it stands in for,
   // and costs the client a merge on top of receiving it.
@@ -1471,6 +1505,11 @@ function diffAgentSnapshots(prev: AgentSnapshot, next: AgentSnapshot): SnapshotD
   }
   if (goalChanged) patch.goal = next.goal ?? null;
   if (queueChanged) patch.queue = next.queue ?? null;
+  if (historyChanged) {
+    // Like the dashboard: the wire cannot say a paged transcript stopped being one.
+    if (!next.history) return { kind: "replace" };
+    patch.history = next.history;
+  }
   return { kind: "patch", patch };
 }
 
@@ -1493,10 +1532,24 @@ export async function projectSavedSessionTranscript(
   imageSink?: ImageAttachmentSink,
   cellSink?: CellSink,
 ): Promise<TranscriptMessage[]> {
+  return (await projectSavedSessionTranscriptParts(sessionFile, imageSink, cellSink)).messages;
+}
+
+/**
+ * The saved projection plus whether a bound cut it: the scan reads only the
+ * tail of a large file, and the row and character caps drop from the front,
+ * and either means the rows kept are not the whole session.
+ */
+async function projectSavedSessionTranscriptParts(
+  sessionFile: string,
+  imageSink?: ImageAttachmentSink,
+  cellSink?: CellSink,
+): Promise<RetainedTranscript> {
   try {
     const file = await stat(sessionFile);
-    if (!file.isFile() || file.size <= 0) return [];
+    if (!file.isFile() || file.size <= 0) return { messages: [], exhaustive: true };
     const start = Math.max(0, file.size - SAVED_TRANSCRIPT_SCAN_BYTES);
+    let dropped = start > 0;
     const stream = createReadStream(sessionFile, { start, end: file.size - 1, highWaterMark: 64 * 1024 });
     const decoder = new StringDecoder("utf8");
     const messages: TranscriptMessage[] = [];
@@ -1517,6 +1570,7 @@ export async function projectSavedSessionTranscript(
       while (messages.length > SAVED_TRANSCRIPT_MAX_MESSAGES || totalChars > SAVED_TRANSCRIPT_MAX_TEXT_CHARS) {
         const removed = messages.shift();
         totalChars -= removed ? messageChars(removed) : 0;
+        dropped = true;
       }
     };
 
@@ -1649,9 +1703,9 @@ export async function projectSavedSessionTranscript(
         pending.message.presentation = { ...presentation, status: "unknown" };
       }
     }
-    return ensureUniqueMessageIds(messages);
+    return { messages: ensureUniqueMessageIds(messages), exhaustive: !dropped };
   } catch {
-    return [];
+    return { messages: [], exhaustive: true };
   }
 }
 
@@ -1804,6 +1858,12 @@ export class PrimeBackend implements AgentBackend {
   private readonly connectionPromises = new Map<string, Promise<ConnectionRecord>>();
   private readonly commandLocks = new Map<string, Promise<void>>();
   private readonly pendingExtensions = new Map<string, PendingExtension>();
+  /**
+   * The full bounded projection per agent, live or saved. Snapshots carry a
+   * window of it; the history and search routes read the rest. Dropped with
+   * the snapshot, never independently.
+   */
+  private readonly retained = new Map<string, RetainedTranscript>();
   private readonly attachmentCache = new Map<string, AttachmentData>();
   private attachmentCacheBytes = 0;
   private readonly cellCache = new Map<string, CellOutput>();
@@ -1978,15 +2038,58 @@ export class PrimeBackend implements AgentBackend {
   }
 
   async agentSnapshot(agentId: string): Promise<AgentSnapshot | null> {
+    const snapshot = await this.ensureSnapshot(agentId);
+    return snapshot ? structuredClone(snapshot) : null;
+  }
+
+  /** The stored snapshot, projecting one first if this agent has never been read. */
+  private async ensureSnapshot(agentId: string): Promise<AgentSnapshot | null> {
     const summary = this.rawSummaries.get(agentId);
     if (!summary) return null;
     if (summary.activeSessionId) await this.ensureConnection(agentId, summary.activeSessionId);
     const existing = this.snapshots.get(agentId);
-    if (existing) return structuredClone(existing);
+    if (existing) return existing;
     const inactive = await this.projectInactiveSnapshot(agentId, summary);
     this.snapshots.set(agentId, inactive);
     this.hub.register(`agent:${agentId}`, inactive);
-    return structuredClone(inactive);
+    return inactive;
+  }
+
+  async historyPage(agentId: string, beforeId: string, limit: number): Promise<HistoryPage | null> {
+    if (!(await this.ensureSnapshot(agentId))) return null;
+    const retained = this.retained.get(agentId);
+    if (!retained) return null;
+    const index = retained.messages.findIndex((message) => message.id === beforeId);
+    // Not a 404: the agent is here, the row is not. History was rewritten
+    // under the client, and reloading is the only answer that cannot be wrong.
+    if (index < 0) throw new BackendConflictError("History has changed. Reload the transcript.");
+    const size = Math.min(MAX_HISTORY_PAGE_ROWS, Math.max(1, Math.trunc(limit) || 1));
+    const start = Math.max(0, index - size);
+    return {
+      rows: structuredClone(retained.messages.slice(start, index)),
+      olderCount: start,
+      exhaustive: retained.exhaustive,
+    };
+  }
+
+  async searchTranscript(agentId: string, query: string, limit: number): Promise<TranscriptSearchResult | null> {
+    if (!(await this.ensureSnapshot(agentId))) return null;
+    const retained = this.retained.get(agentId);
+    if (!retained) return null;
+    // The same rule the browser applied to its own window, so a search that
+    // moves to the gateway does not start matching differently.
+    const needle = query.trim().slice(0, MAX_SEARCH_QUERY_CHARS).toLowerCase();
+    const size = Math.min(MAX_SEARCH_MATCHES, Math.max(1, Math.trunc(limit) || 1));
+    const matches: TranscriptSearchResult["matches"] = [];
+    let total = 0;
+    if (needle) {
+      retained.messages.forEach((message, position) => {
+        if (!message.text.toLowerCase().includes(needle)) return;
+        total += 1;
+        if (matches.length < size) matches.push({ position, message: structuredClone(message) });
+      });
+    }
+    return { matches, total, exhaustive: retained.exhaustive };
   }
 
   attachment(id: string): AttachmentData | null {
@@ -2396,6 +2499,7 @@ export class PrimeBackend implements AgentBackend {
       if (!response.success) throw new Error("Prime session delete failed");
 
       this.snapshots.delete(input.agentId);
+      this.retained.delete(input.agentId);
       this.hub.unregister(`agent:${input.agentId}`);
       await this.refreshCatalog(true);
       return { accepted: true, requestId: input.requestId, revision };
@@ -2642,6 +2746,7 @@ export class PrimeBackend implements AgentBackend {
     for (const previousId of new Set([...previousSummaries.keys(), ...previousVisibleIds])) {
       if (nextSummaries.has(previousId) && visibleIds.has(previousId)) continue;
       this.snapshots.delete(previousId);
+      this.retained.delete(previousId);
       this.clearPendingExtensions(previousId, false);
       if (this.hub.has(`agent:${previousId}`)) this.hub.unregister(`agent:${previousId}`);
     }
@@ -2993,6 +3098,7 @@ export class PrimeBackend implements AgentBackend {
     const messages = projection.messages;
     record.projection = projection.context;
     record.streamingRowIds = projection.streamingRowIds;
+    const retained: RetainedTranscript = { messages, exhaustive: !projection.truncated };
     applyLiveRefines(record.refines, messages);
     const children: SessionDashboardChild[] = (source.children ?? []).map((child) => {
       const agentId = child.activeSessionId ? this.publicByActive.get(child.activeSessionId) : undefined;
@@ -3038,12 +3144,13 @@ export class PrimeBackend implements AgentBackend {
       // actually going out under this revision.
       revision: record.revision,
       agentId: record.publicId,
-      messages,
+      ...windowTranscript(retained),
       dashboard,
       attention,
       goal: projectGoal(source.state.goal),
       ...(queue ? { queue } : {}),
     };
+    this.retained.set(record.publicId, retained);
     this.publishProjected(record, snapshot, publish, diffable);
     this.maybeRefreshContextStats(record);
   }
@@ -3139,19 +3246,25 @@ export class PrimeBackend implements AgentBackend {
         if (placeholder) rows.push(placeholder);
       }
       if (context.turnId) for (const row of rows) row.turnId = context.turnId;
+      const before = this.retained.get(record.publicId);
+      if (!before) return false;
       const dropped = new Set(record.streamingRowIds);
-      const messages = previous.messages.filter((row) => !dropped.has(row.id));
+      // On the retained projection, not the window: a row retiring from the
+      // window is still history the phone can page back to.
+      const messages = before.messages.filter((row) => !dropped.has(row.id));
       messages.push(...rows);
+      const unboundedCount = messages.length;
       boundProjectedMessages(messages);
       const survived = new Set(messages);
       record.streamingRowIds = rows.filter((row) => survived.has(row)).map((row) => row.id);
+      const retained: RetainedTranscript = { messages, exhaustive: before.exhaustive && messages.length === unboundedCount };
       // No applyLiveRefines here: the settled rows carry the enrichment the
       // last full projection gave them, refines arrive as their own session
       // events, and each of those takes the full refresh.
       const next: AgentSnapshot = {
         revision: record.revision,
         agentId: record.publicId,
-        messages,
+        ...windowTranscript(retained),
         // A token batch moves no state. Reusing the projected objects also
         // makes the diff below see them as unchanged without walking them.
         dashboard: previous.dashboard,
@@ -3159,6 +3272,7 @@ export class PrimeBackend implements AgentBackend {
         goal: previous.goal,
         ...(previous.queue ? { queue: previous.queue } : {}),
       };
+      this.retained.set(record.publicId, retained);
       this.publishProjected(record, next, true, true);
       return true;
     } catch (error) {
@@ -3453,21 +3567,23 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private async projectInactiveSnapshot(publicId: string, summary: PrimeSessionSummary): Promise<AgentSnapshot> {
-    const messages = summary.sessionFile
-      ? await projectSavedSessionTranscript(
+    const retained = summary.sessionFile
+      ? await projectSavedSessionTranscriptParts(
           summary.sessionFile,
           (image) => this.cacheImage(image),
           (cell) => this.cacheCell(cell),
         )
-      : [];
+      : { messages: [], exhaustive: true };
+    const messages = retained.messages;
     const fallback = conciseTitle(summary.firstMessage, 4_000);
     if (!messages.length && fallback) {
       messages.push({ id: `${publicId}:first`, role: "user", text: fallback, state: "complete", createdAt: toIso(summary.created) });
     }
+    this.retained.set(publicId, retained);
     return {
       revision: 1,
       agentId: publicId,
-      messages,
+      ...windowTranscript(retained),
       dashboard: {
         status: "inactive",
         needsInput: false,

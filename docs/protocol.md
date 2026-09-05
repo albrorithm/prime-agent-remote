@@ -58,7 +58,7 @@ Seven, all delivered as an `EventEnvelope.event`:
 
 - `catalog.replaced` — payload is a full `CatalogSnapshot`; only on the `catalog` stream.
 - `agent.replaced` — payload is a full `AgentSnapshot`; only on that agent's own `agent:<id>` stream.
-- `agent.patched` — payload is an `AgentPatch`, `{ revision, removed?, updated?, added?, dashboard?, goal?, queue? }`, describing what changed since the previous event on the stream rather than repeating the whole snapshot. Applied in order: drop the rows named in `removed`, replace rows by id from `updated`, then append `added` (an `added` row whose id already exists replaces that row in place instead of duplicating it). `dashboard`, `goal` and `queue` replace the corresponding snapshot field when present; `goal: null` and `queue: null` mean the field went away, so the client deletes it rather than storing null. A field left out of the payload is unchanged. `revision` is the snapshot's revision once the patch is applied. A patch is only useful once the client already holds a snapshot at an older revision: one at or below the client's current revision is stale and must be ignored, since an HTTP-loaded snapshot can already be ahead of socket events still in flight. Anything a patch cannot express — a row moved, history rewritten, compaction — arrives as `agent.replaced` instead, which stays the authority.
+- `agent.patched` — payload is an `AgentPatch`, `{ revision, removed?, updated?, added?, dashboard?, goal?, queue?, history? }`, describing what changed since the previous event on the stream rather than repeating the whole snapshot. Applied in order: drop the rows named in `removed`, replace rows by id from `updated`, then append `added` (an `added` row whose id already exists replaces that row in place instead of duplicating it). `dashboard`, `goal` and `queue` replace the corresponding snapshot field when present; `goal: null` and `queue: null` mean the field went away, so the client deletes it rather than storing null. A field left out of the payload is unchanged. `revision` is the snapshot's revision once the patch is applied. A patch is only useful once the client already holds a snapshot at an older revision: one at or below the client's current revision is stale and must be ignored, since an HTTP-loaded snapshot can already be ahead of socket events still in flight. Anything a patch cannot express — a row moved, history rewritten, compaction — arrives as `agent.replaced` instead, which stays the authority.
 - `agent.message_added` — payload is one `TranscriptMessage` newly appended to the transcript.
 - `agent.message_updated` — payload is one `TranscriptMessage` sharing an `id` with one already delivered, typically as it streams in.
 - `agent.attention_added` — payload is one `AttentionRequest` newly requiring a response.
@@ -91,6 +91,8 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 ### Agents
 
 - `GET /api/v1/agents/:id/snapshot` — authenticated. The same `AgentSnapshot` shape the WebSocket delivers; `404` if the id is unknown.
+- `GET /api/v1/agents/:id/history?before=<rowId>&limit=<n>` — authenticated read. Returns a `HistoryPage`, `{ rows, olderCount, exhaustive }`: at most `limit` rows immediately before the row `before`, oldest first, with `olderCount` the rows still held before the page. `limit` defaults to 200 and must be 1 to 500. `400` for a missing `before` or a `limit` out of range, `404` for an unknown agent, `409` when `before` is no longer a row the gateway holds, which means history was rewritten under the client and the transcript should be reloaded.
+- `GET /api/v1/agents/:id/search?q=<text>&limit=<n>` — authenticated read. Case-insensitive substring search over every row the gateway retains for the agent, not only the window a client has loaded. Returns a `TranscriptSearchResult`, `{ matches: [{ position, message }], total, exhaustive }`, where `position` is the row's index in the retained sequence and `total` counts every match while `matches` carries the first `limit`. `q` is trimmed and must be 1 to 200 characters; `limit` defaults to 50 and must be 1 to 50. The query is matched in the gateway against rows already projected and never reaches the daemon.
 - `GET /api/v1/agents/:id/commands` — the slash-command catalog; see [Slash commands](#slash-commands).
 - `POST /api/v1/agents/:id/commands` — execute a slash command; see [Slash commands](#slash-commands).
 - `POST /api/v1/agents/:id/messages` — send text and/or images; see [Image messages](#image-messages).
@@ -164,6 +166,12 @@ attention: dialog | question | error | null
 ```
 
 This avoids treating transport loss, agent lifecycle, and user attention as the same status.
+
+## Transcript window and history
+
+`AgentSnapshot.messages` is a recent window, not the whole transcript: the newest 200 projected rows. `AgentSnapshot.history`, `{ olderCount, exhaustive }`, says what stands before it. `olderCount` is how many older rows the gateway retains and serves through the history route; `exhaustive` is whether those retained rows are the whole session or only what the gateway keeps, which is bounded at 1,000 rows and 2 MB of text for a live session and by the tail of the session file for a saved one. `history` is absent when the backend does not page at all, in which case `messages` is everything there is.
+
+As rows arrive on a full window the oldest leave it. On the stream that shows up as `removed` ids in an `agent.patched` event together with a new `history`, and a client that keeps rows it has already seen or paged should treat those as retired to history rather than gone. A replacement snapshot carries its own window and history, and a client holding older pages must check that the new window's first row still follows what it holds before keeping them.
 
 ## Session queue
 
