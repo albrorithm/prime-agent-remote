@@ -544,6 +544,11 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
    moment the textarea could grow. */
 .jump-latest { position: absolute; z-index: 5; right: 14px; bottom: calc(var(--composer-min-h) + 34px + var(--composer-safe-bottom)); display: flex; min-height: 36px; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); font-size: .625rem; font-weight: 700; }
 .jump-latest svg { width: 13px; }
+.history-load-older-wrap { display: grid; justify-items: center; gap: 6px; padding: 2px 0 14px; }
+.history-load-older { min-height: 36px; padding: 6px 14px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--panel-raised-3); font-size: .75rem; font-weight: 700; }
+.history-load-older:disabled { opacity: .6; }
+.history-error, .history-exhausted { margin: 0; color: var(--muted); font-size: .75rem; text-align: center; }
+.history-exhausted { padding: 2px 0 14px; }
 
 .sessions-trigger { position: relative; }
 /* min-height, not height: these hold digits, and a fixed box crops them the

@@ -1,4 +1,4 @@
-import { fireEvent, render as renderBare, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render as renderBare, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -10,7 +10,7 @@ import { authorLineIds, cwdBasename, deriveAgentLineage, TranscriptEntry, Transc
 type GatewayMockState = Pick<
   ReturnType<typeof useGateway>,
   "catalog" | "selectedAgent" | "selectedSnapshot" | "pendingMessages" | "selectAgent"
-> & Partial<Pick<ReturnType<typeof useGateway>, "transcriptErrors" | "retryTranscript">>;
+> & Partial<Pick<ReturnType<typeof useGateway>, "transcriptErrors" | "retryTranscript" | "selectedTranscript" | "selectedHistory" | "loadOlder" | "ensureLoadedThrough" | "searchTranscript">>;
 
 const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }));
 
@@ -27,6 +27,12 @@ vi.mock("../gateway-store", async () => {
         // stands in for. A test that wants the failed state sets them.
         transcriptErrors: {},
         retryTranscript: async () => {},
+        // An unpaged store: everything is the window, and nothing is older.
+        selectedTranscript: gatewayMock.state.selectedSnapshot?.messages ?? [],
+        selectedHistory: null,
+        loadOlder: async () => 0,
+        ensureLoadedThrough: async () => true,
+        searchTranscript: async () => ({ scope: "loaded" as const, matches: [], total: 0, exhaustive: true }),
         ...gatewayMock.state,
         attentionCount: attentionAgentCount(gatewayMock.state.catalog.agents),
       },
@@ -940,5 +946,90 @@ describe("a transcript that failed to load", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(retryTranscript).toHaveBeenCalledWith("agent-a");
+  });
+});
+
+describe("paged history in the panel", () => {
+  function deferredSearch() {
+    type Outcome = Awaited<ReturnType<NonNullable<GatewayMockState["searchTranscript"]>>>;
+    let resolve!: (value: Outcome) => void;
+    const promise = new Promise<Outcome>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  function row(id: string, text = `row ${id}`): TranscriptMessage {
+    return { id, role: "assistant", text, state: "complete", createdAt: "2026-01-01T00:00:00.000Z" };
+  }
+  function pagedState(older: TranscriptMessage[], window: TranscriptMessage[], history: { remaining: number; exhaustive: boolean; loading?: boolean; error?: string | null }) {
+    const selectedAgent = agent("agent-a", null, 0);
+    gatewayMock.state = {
+      catalog: { revision: 0, agents: [selectedAgent] },
+      selectedAgent,
+      selectedSnapshot: { revision: 1, agentId: "agent-a", messages: window, attention: [], history: { olderCount: history.remaining + older.length, exhaustive: history.exhaustive } },
+      selectedTranscript: [...older, ...window],
+      selectedHistory: { remaining: history.remaining, exhaustive: history.exhaustive, loaded: older.length, loading: history.loading ?? false, error: history.error ?? null },
+      pendingMessages: [],
+      selectAgent: vi.fn(async () => {}),
+      loadOlder: vi.fn(async () => 1),
+      searchTranscript: vi.fn(async () => ({ scope: "loaded" as const, matches: [], total: 0, exhaustive: true })),
+    };
+  }
+
+  it("renders paged rows above the window and offers the rest", async () => {
+    const user = userEvent.setup();
+    pagedState([row("h1"), row("h2")], [row("w1")], { remaining: 3, exhaustive: true });
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    const texts = [...document.querySelectorAll(".message-list .message")].map((element) => element.textContent);
+    expect(texts.join(" ")).toMatch(/row h1.*row h2.*row w1/);
+    await user.click(screen.getByRole("button", { name: "Load earlier messages" }));
+    expect(gatewayMock.state!.loadOlder).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Earlier messages are not available.")).not.toBeInTheDocument();
+  });
+
+  it("says when the gateway holds nothing older but the session had more", () => {
+    pagedState([], [row("w1")], { remaining: 0, exhaustive: false });
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.queryByRole("button", { name: /earlier messages/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Earlier messages are not available.")).toBeInTheDocument();
+  });
+
+  it("shows a failed page load beside the control and keeps it usable", () => {
+    pagedState([], [row("w1")], { remaining: 2, exhaustive: true, error: "Could not load earlier messages" });
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load earlier messages");
+    expect(screen.getByRole("button", { name: "Load earlier messages" })).toBeEnabled();
+  });
+
+  // Search answers from what is loaded at once, then from the gateway, which
+  // also holds the rows this client has not paged. jsdom cannot see the scroll
+  // anchoring a page arrival performs; that is the harness's job.
+  it("replaces local search matches with the gateway's once they arrive", async () => {
+    const user = userEvent.setup();
+    pagedState([], [row("w1", "alpha here"), row("w2", "beta")], { remaining: 5, exhaustive: true });
+    const answer = deferredSearch();
+    gatewayMock.state!.searchTranscript = vi.fn(() => answer.promise);
+    render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Search transcript" }));
+    await user.type(screen.getByRole("textbox", { name: "Search this transcript" }), "alpha");
+    // Search mode highlights the term, which splits a row's text across
+    // elements, so the list's text is what to read.
+    const listText = () => document.querySelector(".message-list")?.textContent ?? "";
+    expect(screen.getByText("1 match")).toBeInTheDocument();
+    expect(listText()).not.toContain("far away");
+
+    await waitFor(() => expect(gatewayMock.state!.searchTranscript).toHaveBeenCalledWith("alpha"));
+    await act(async () => {
+      answer.resolve({
+        scope: "session",
+        matches: [{ position: 0, message: row("far", "alpha far away") }, { position: 6, message: row("w1", "alpha here") }],
+        total: 2,
+        exhaustive: true,
+      });
+    });
+    expect(listText()).toContain("far away");
+    expect(screen.getByText("2 matches")).toBeInTheDocument();
   });
 });

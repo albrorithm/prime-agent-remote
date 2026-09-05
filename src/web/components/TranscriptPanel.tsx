@@ -408,13 +408,20 @@ export function TranscriptEntry({
 }
 
 export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPanelProps) {
-  const { selectedAgent, selectedSnapshot, pendingMessages, attentionCount, catalog, selectAgent, backend, transcriptErrors, retryTranscript } = useGateway();
+  const {
+    selectedAgent, selectedSnapshot, selectedTranscript, selectedHistory, pendingMessages, attentionCount, catalog,
+    selectAgent, backend, transcriptErrors, retryTranscript, loadOlder, searchTranscript,
+  } = useGateway();
   const transcriptError = selectedAgent ? transcriptErrors[selectedAgent.id] ?? null : null;
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [sessionMatches, setSessionMatches] = useState<TranscriptMessage[] | null>(null);
+  // The window plus what is being sent, deliberately without paged history: a
+  // page arriving above the reader is not something new at the bottom, and the
+  // unseen counter must not say it is.
   const messageCount = selectedSnapshot?.messages.length ?? 0;
   const renderedMessageCount = messageCount + pendingMessages.length;
-  const lastMessage = selectedSnapshot?.messages.at(-1);
+  const lastMessage = selectedTranscript.at(-1);
   const lastContentKey = `${lastMessage?.id ?? ""}\0${lastMessage?.text ?? ""}\0${pendingMessages.map((message) => `${message.id}:${message.text}:${message.attachments?.length ?? 0}`).join("|")}`;
   const lineage = useMemo(
     () => deriveAgentLineage(catalog.agents, selectedAgent?.id ?? null),
@@ -441,6 +448,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
     renderedMessageCount,
     lastContentKey,
     snapshotAttention,
+    olderRowCount: selectedHistory?.loaded ?? 0,
   });
 
   const replyAnnouncement = useReplyAnnouncer(selectedAgent?.id ?? null, selectedAgent?.name, selectedSnapshot);
@@ -460,15 +468,34 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
 
   const normalizedQuery = query.trim().toLowerCase();
   const searching = searchOpen && Boolean(normalizedQuery);
-  const visibleMessages: TranscriptMessage[] | null = searching && selectedSnapshot
-    ? selectedSnapshot.messages.filter((message) => message.text.toLowerCase().includes(normalizedQuery))
+  // What is held here answers at once; the gateway, which holds the rows this
+  // client has not paged, answers a beat later and replaces it. When the
+  // gateway cannot be reached the local answer stands, and the count then
+  // covers only what is loaded.
+  const localMatches: TranscriptMessage[] | null = searching
+    ? selectedTranscript.filter((message) => message.text.toLowerCase().includes(normalizedQuery))
     : null;
+  const visibleMessages = searching ? sessionMatches ?? localMatches : null;
+  useEffect(() => {
+    setSessionMatches(null);
+    if (!searching || !selectedHistory) return;
+    let stale = false;
+    const timer = setTimeout(() => {
+      void searchTranscript(normalizedQuery).then((outcome) => {
+        if (stale || outcome.scope !== "session") return;
+        setSessionMatches(outcome.matches.map((match) => match.message));
+      });
+    }, 150);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [searching, normalizedQuery, selectedHistory, searchTranscript]);
 
-  // Every daemon tick full-replaces the messages array, so array identity is
-  // the correct (and only meaningful) memo key.
-  const snapshotMessages = selectedSnapshot?.messages;
-  const turnItems = useMemo(() => groupIntoTurns(snapshotMessages ?? []), [snapshotMessages]);
-  const authorIds = useMemo(() => authorLineIds(snapshotMessages ?? []), [snapshotMessages]);
+  // Untouched rows keep their identity across patches and pages, so the
+  // array's identity changes exactly when its contents do.
+  const turnItems = useMemo(() => groupIntoTurns(selectedTranscript), [selectedTranscript]);
+  const authorIds = useMemo(() => authorLineIds(selectedTranscript), [selectedTranscript]);
   const lastItem = turnItems.at(-1);
   const lastTurnKey = lastItem?.kind === "turn" ? lastItem.key : null;
   const sessionRecap = selectedSnapshot?.dashboard?.recap;
@@ -626,6 +653,25 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                 </div>
               ) : (
                 <div className="message-list" role="log" aria-live="off">
+                  {/* Provisional: the mechanism needs a trigger to be reachable at
+                      all, and this is the plainest one. Its form is a decision for a
+                      person looking at it on a phone. */}
+                  {selectedHistory && selectedHistory.remaining > 0 && (
+                    <div className="history-load-older-wrap">
+                      <button
+                        type="button"
+                        className="history-load-older"
+                        disabled={selectedHistory.loading}
+                        onClick={() => { void loadOlder(); }}
+                      >
+                        {selectedHistory.loading ? "Loading earlier messages…" : "Load earlier messages"}
+                      </button>
+                      {selectedHistory.error && <p className="history-error" role="alert">{selectedHistory.error}</p>}
+                    </div>
+                  )}
+                  {selectedHistory && selectedHistory.remaining === 0 && !selectedHistory.exhaustive && (
+                    <p className="history-exhausted">Earlier messages are not available.</p>
+                  )}
                   {turnItems.map((item) => item.kind === "turn" ? (
                     <TurnGroup
                       key={item.key}
@@ -657,7 +703,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                       </div>
                     </article>
                   ))}
-                  {!selectedSnapshot.messages.length && !pendingMessages.length && <div className="empty-transcript"><p>Start a conversation with {selectedAgent.name}.</p></div>}
+                  {!selectedTranscript.length && !pendingMessages.length && <div className="empty-transcript"><p>Start a conversation with {selectedAgent.name}.</p></div>}
                 </div>
               )}
             </div>

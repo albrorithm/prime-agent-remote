@@ -10,7 +10,17 @@ const gatewayMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }
 // Defaulted for the same reason as in TranscriptPanel.test.tsx: the real store
 // always carries these, so a mock without them is kinder than reality.
 vi.mock("./gateway-store", () => ({
-  useGateway: () => ({ transcriptErrors: {}, retryTranscript: async () => {}, ...gatewayMock.current }),
+  useGateway: () => ({
+    transcriptErrors: {},
+    retryTranscript: async () => {},
+    // Unpaged, like the demo: the window is the transcript.
+    selectedTranscript: (gatewayMock.current.selectedSnapshot as { messages?: unknown[] } | null | undefined)?.messages ?? [],
+    selectedHistory: null,
+    loadOlder: async () => 0,
+    ensureLoadedThrough: async () => true,
+    searchTranscript: async () => ({ scope: "loaded", matches: [], total: 0, exhaustive: true }),
+    ...gatewayMock.current,
+  }),
 }));
 
 // Transcript components read useSettings(); main.tsx mounts the provider above them.

@@ -20,6 +20,8 @@ import {
   eventEnvelopeSchema,
   PROTOCOL_VERSION,
   type AgentSummary,
+  historyPageSchema,
+  transcriptSearchResultSchema,
 } from "./protocol.js";
 
 function snapshotWith(presentation: unknown): unknown {
@@ -510,5 +512,22 @@ describe("eventEnvelopeSchema for agent.patched", () => {
 
   it("rejects an agent.patched envelope on the catalog stream", () => {
     expect(eventEnvelopeSchema.safeParse(envelope("catalog")).success).toBe(false);
+  });
+});
+
+describe("history and search schemas", () => {
+  const row = { id: "r", role: "user", text: "t", state: "complete", createdAt: "2026-01-01T00:00:00.000Z" };
+
+  it("accepts a page and a result, and a snapshot that carries history", () => {
+    expect(historyPageSchema.safeParse({ rows: [row], olderCount: 0, exhaustive: true }).success).toBe(true);
+    expect(transcriptSearchResultSchema.safeParse({ matches: [{ position: 3, message: row }], total: 1, exhaustive: false }).success).toBe(true);
+    expect(agentSnapshotSchema.safeParse({ ...snapshotWith(undefined), history: { olderCount: 12, exhaustive: false } }).success).toBe(true);
+  });
+
+  it("rejects a negative count, a missing flag, and a page past the bound", () => {
+    expect(historyPageSchema.safeParse({ rows: [], olderCount: -1, exhaustive: true }).success).toBe(false);
+    expect(historyPageSchema.safeParse({ rows: [], olderCount: 0 }).success).toBe(false);
+    expect(historyPageSchema.safeParse({ rows: Array.from({ length: 501 }, () => row), olderCount: 0, exhaustive: true }).success).toBe(false);
+    expect(transcriptSearchResultSchema.safeParse({ matches: [{ position: -1, message: row }], total: 1, exhaustive: true }).success).toBe(false);
   });
 });

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, respondToAttention, resume, sendMessage, signOut, stopAgent } from "./api";
+import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, respondToAttention, resume, sendMessage, signOut, stopAgent,
+  loadHistoryPage,
+  searchTranscript,
+} from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -385,5 +388,43 @@ describe("resume", () => {
       headers: { "Content-Type": "application/json" },
     })));
     await expect(resume()).rejects.toThrow();
+  });
+});
+
+describe("history and search reads", () => {
+  it("asks for the page before a row and validates what comes back", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      rows: [{ id: "h1", role: "user", text: "earlier", state: "complete", createdAt: "2026-01-01T00:00:00.000Z" }],
+      olderCount: 4,
+      exhaustive: false,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await loadHistoryPage("agent/1", "row a", 25);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent%2F1/history?before=row+a&limit=25");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+    expect(page.rows.map((row) => row.id)).toEqual(["h1"]);
+    expect(page.olderCount).toBe(4);
+  });
+
+  it("surfaces a rewritten history as a 409", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      type: "about:blank", title: "History has changed", status: 409,
+    }), { status: 409, headers: { "Content-Type": "application/json" } })));
+
+    await expect(loadHistoryPage("agent-1", "gone")).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("sends the query as a parameter and reads positions back", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      matches: [{ position: 12, message: { id: "m", role: "assistant", text: "needle", state: "complete", createdAt: "2026-01-01T00:00:00.000Z" } }],
+      total: 1,
+      exhaustive: true,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await searchTranscript("agent-1", "need le", 10);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent-1/search?q=need+le&limit=10");
+    expect(result.matches[0]).toMatchObject({ position: 12 });
   });
 });

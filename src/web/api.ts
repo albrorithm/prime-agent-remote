@@ -1,7 +1,11 @@
 import { z, type ZodType } from "zod";
 import {
+  DEFAULT_HISTORY_PAGE_ROWS,
+  MAX_SEARCH_MATCHES,
   agentSnapshotSchema,
   bootstrapResponseSchema,
+  historyPageSchema,
+  transcriptSearchResultSchema,
   cellOutputSchema,
   deviceListSnapshotSchema,
   deviceRevokedSchema,
@@ -17,6 +21,8 @@ import {
   type CellOutput,
   type DeviceListSnapshot,
   type DirectoryListing,
+  type HistoryPage,
+  type TranscriptSearchResult,
   type ImageAttachmentInput,
   type MessageDelivery,
   type MutationAccepted,
@@ -181,6 +187,34 @@ export async function loadAgent(agentId: string, options?: ApiRequestOptions): P
     credentials: "same-origin",
     cache: "no-store",
   }, options, agentSnapshotSchema);
+}
+
+/** The rows immediately before `beforeId`, oldest first. A 409 means history was rewritten and the transcript should be reloaded. */
+export async function loadHistoryPage(
+  agentId: string,
+  beforeId: string,
+  limit: number = DEFAULT_HISTORY_PAGE_ROWS,
+  options?: ApiRequestOptions,
+): Promise<HistoryPage> {
+  const query = new URLSearchParams({ before: beforeId, limit: String(limit) });
+  return request(`/api/v1/agents/${encodeURIComponent(agentId)}/history?${query}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  }, options, historyPageSchema);
+}
+
+/** Search across everything the gateway holds for the agent, not only what is loaded here. */
+export async function searchTranscript(
+  agentId: string,
+  query: string,
+  limit: number = MAX_SEARCH_MATCHES,
+  options?: ApiRequestOptions,
+): Promise<TranscriptSearchResult> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return request(`/api/v1/agents/${encodeURIComponent(agentId)}/search?${params}`, {
+    credentials: "same-origin",
+    cache: "no-store",
+  }, options, transcriptSearchResultSchema);
 }
 
 /** Full, untruncated sections of a python cell that was inlined with caps. */

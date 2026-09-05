@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSnapshot, GatewayEvent } from "../protocol";
-import { applyGatewayEvent, imageInputsForRequest, reconcilePending } from "./gateway-store";
+import { applyGatewayEvent, imageInputsForRequest, reconcilePending, reconcileOlderRows, retireRemovedRows } from "./gateway-store";
 
 const snapshot: AgentSnapshot = {
   revision: 1,
@@ -210,5 +210,36 @@ describe("imageInputsForRequest", () => {
     }]);
     expect(inputs).toEqual([{ type: "image", mimeType: "image/jpeg", data: "canonical-base64" }]);
     expect(JSON.stringify(inputs)).not.toContain("browser-only-preview");
+  });
+});
+
+describe("history buffer", () => {
+  const row = (id: string) => ({ id, role: "assistant" as const, text: id, state: "complete" as const, createdAt: "2026-01-01T00:00:00.000Z" });
+  const paged = (ids: string[]) => ({ ...snapshot, messages: ids.map(row), history: { olderCount: 0, exhaustive: true } });
+
+  it("retires rows leaving the window's front, in order, and drops the rest", () => {
+    const older = [row("h1")];
+    const previous = [row("w1"), row("w2"), row("w3"), row("w4")];
+    const retired = retireRemovedRows(older, previous, ["w1", "w2", "w4"]);
+    expect(retired.map((item) => item.id)).toEqual(["h1", "w1", "w2"]);
+    // The rows themselves move, not copies: the reader may be looking at them.
+    expect(retired[1]).toBe(previous[0]);
+    expect(retireRemovedRows(older, previous, undefined)).toBe(older);
+    expect(retireRemovedRows(older, previous, ["w3"])).toBe(older);
+  });
+
+  it("keeps history across a replacement whose window still follows what is held", () => {
+    const older = [row("h1"), row("h2")];
+    const previous = [row("w1"), row("w2"), row("w3")];
+    expect(reconcileOlderRows(older, previous, paged(["w2", "w3", "w4"])).map((item) => item.id)).toEqual(["h1", "h2", "w1"]);
+    expect(reconcileOlderRows(older, previous, paged(["h2", "w1"])).map((item) => item.id)).toEqual(["h1"]);
+  });
+
+  it("starts history over when a replacement was rewritten or is not paged", () => {
+    const older = [row("h1")];
+    const previous = [row("w1")];
+    expect(reconcileOlderRows(older, previous, paged(["x1", "x2"]))).toEqual([]);
+    expect(reconcileOlderRows(older, previous, { ...snapshot, messages: [row("w1")] })).toEqual([]);
+    expect(reconcileOlderRows([], [], paged(["w1"]))).toEqual([]);
   });
 });

@@ -25,6 +25,7 @@ import type {
   SlashCommandCatalog,
   SlashCommandResult,
 } from "../protocol";
+import { MAX_SEARCH_MATCHES } from "../protocol";
 import { attentionAgentCount, PROTOCOL_VERSION, readPairingFragment, serverFrameSchema } from "../protocol";
 import * as api from "./api";
 import { ApiError, humanizeError, type AttentionReplyInput } from "./api";
@@ -49,6 +50,62 @@ export interface PendingMessage {
 }
 
 const SNAPSHOT_CAP = 24;
+/** Pages one `ensureLoadedThrough` may fetch before giving up: five is the whole retained transcript at the default page size. */
+const MAX_PAGES_PER_REACH = 5;
+
+/**
+ * Rows this client holds that are older than the snapshot's window, oldest
+ * first and contiguous with it: `older ++ snapshot.messages` is one unbroken
+ * slice of the session ending at its newest row. Rows arrive here two ways —
+ * paged from the gateway, or retired from the window's front as it slides —
+ * and leave only when history is rewritten under them.
+ */
+export interface HistoryBuffer {
+  older: TranscriptMessage[];
+  loading: boolean;
+  error: string | null;
+}
+
+const emptyHistory: HistoryBuffer = { older: [], loading: false, error: null };
+
+/**
+ * Rows that left the window's front are settled history the reader may be
+ * looking at, so they join the buffer in order. Anything removed from
+ * elsewhere in the window was rewritten, not retired, and is dropped.
+ */
+export function retireRemovedRows(older: TranscriptMessage[], previous: TranscriptMessage[], removed: readonly string[] | undefined): TranscriptMessage[] {
+  if (!removed?.length) return older;
+  const gone = new Set(removed);
+  const retired: TranscriptMessage[] = [];
+  for (const row of previous) {
+    if (!gone.has(row.id)) break;
+    retired.push(row);
+  }
+  return retired.length ? [...older, ...retired] : older;
+}
+
+/**
+ * What the buffer becomes when a whole new window arrives. The new window's
+ * first row has to be somewhere in what this client already holds for the
+ * rows before it to still be its history; otherwise the transcript was
+ * rewritten (compaction, a rewind) or this client held nothing, and the buffer
+ * starts empty. A snapshot without `history` is not paged, so nothing is older.
+ */
+export function reconcileOlderRows(older: TranscriptMessage[], previous: TranscriptMessage[], next: AgentSnapshot): TranscriptMessage[] {
+  if (!next.history || !next.messages.length || (!older.length && !previous.length)) return [];
+  const firstId = next.messages[0]!.id;
+  const sequence = [...older, ...previous];
+  const index = sequence.findIndex((row) => row.id === firstId);
+  return index < 0 ? [] : sequence.slice(0, index);
+}
+
+/** A search answered by the gateway, or by this client's own rows when the gateway could not be reached. */
+export interface TranscriptSearchOutcome {
+  scope: "session" | "loaded";
+  matches: Array<{ position: number | null; message: TranscriptMessage }>;
+  total: number;
+  exhaustive: boolean;
+}
 const ERROR_TTL_MS = 6000;
 export const SOCKET_PING_INTERVAL_MS = 25_000;
 export const SOCKET_PONG_TIMEOUT_MS = 10_000;
@@ -165,6 +222,7 @@ interface State {
   // the stream while the fetch was in flight.
   goneAgentIds: Set<string>;
   pending: Record<string, PendingMessage[]>;
+  history: Record<string, HistoryBuffer>;
   selectedAgentId: string | null;
   error: string | null;
   // True once the socket has gone offline at least once this app lifetime, so
@@ -234,6 +292,10 @@ type Action =
   | { type: "pending_add"; agentId: string; value: PendingMessage }
   | { type: "pending_remove"; agentId: string; id: string }
   | { type: "evict_snapshot"; agentId: string }
+  | { type: "history_loading"; agentId: string }
+  | { type: "history_loaded"; agentId: string; beforeId: string; rows: TranscriptMessage[] }
+  | { type: "history_failed"; agentId: string; message: string }
+  | { type: "history_clear"; agentId: string }
   | { type: "transcript_error"; agentId: string; message: string | null }
   | { type: "select"; value: string | null }
   | { type: "error"; value: string | null };
@@ -250,6 +312,7 @@ const initialState: State = {
   transcriptErrors: {},
   goneAgentIds: new Set(),
   pending: {},
+  history: {},
   selectedAgentId: null,
   error: null,
   hasReconnected: false,
@@ -387,12 +450,17 @@ function reducer(state: State, action: Action): State {
         goneAgentIds = new Set(goneAgentIds);
         goneAgentIds.delete(action.value.agentId);
       }
+      const buffer = state.history[action.value.agentId] ?? emptyHistory;
       return {
         ...state,
         snapshots: pruneSnapshots(
           { ...state.snapshots, [action.value.agentId]: action.value },
           state.selectedAgentId,
         ),
+        history: {
+          ...state.history,
+          [action.value.agentId]: { ...buffer, older: reconcileOlderRows(buffer.older, current?.messages ?? [], action.value) },
+        },
         // The transcript arrived, so whatever went wrong last time no longer has
         // anything to say.
         transcriptErrors: clearTranscriptError(state.transcriptErrors, action.value.agentId),
@@ -418,9 +486,17 @@ function reducer(state: State, action: Action): State {
       const current = state.snapshots[agentId];
       if (!current) return state;
       const updated = applyGatewayEvent(current, action.value.event);
+      const buffer = state.history[agentId] ?? emptyHistory;
+      const event = action.value.event;
+      const older = event.kind === "agent.replaced"
+        ? reconcileOlderRows(buffer.older, current.messages, updated)
+        : event.kind === "agent.patched" && updated !== current
+          ? retireRemovedRows(buffer.older, current.messages, event.payload.removed)
+          : buffer.older;
       return {
         ...state,
         snapshots: { ...state.snapshots, [agentId]: updated },
+        history: older === buffer.older ? state.history : { ...state.history, [agentId]: { ...buffer, older } },
         pending: {
           ...state.pending,
           [agentId]: reconcilePending(state.pending[agentId] ?? [], updated.messages),
@@ -456,7 +532,33 @@ function reducer(state: State, action: Action): State {
       if (!(action.agentId in state.snapshots)) return { ...state, goneAgentIds };
       const snapshots = { ...state.snapshots };
       delete snapshots[action.agentId];
-      return { ...state, snapshots, goneAgentIds };
+      const history = { ...state.history };
+      delete history[action.agentId];
+      return { ...state, snapshots, history, goneAgentIds };
+    }
+    case "history_loading": {
+      const buffer = state.history[action.agentId] ?? emptyHistory;
+      return { ...state, history: { ...state.history, [action.agentId]: { ...buffer, loading: true, error: null } } };
+    }
+    case "history_loaded": {
+      const buffer = state.history[action.agentId] ?? emptyHistory;
+      const snapshot = state.snapshots[action.agentId];
+      const front = buffer.older[0] ?? snapshot?.messages[0];
+      // A page is only history if it still ends where this client's rows
+      // begin. Anything else happened while it was in flight, and the rows
+      // would land somewhere they do not belong.
+      const older = front?.id === action.beforeId ? [...action.rows, ...buffer.older] : buffer.older;
+      return { ...state, history: { ...state.history, [action.agentId]: { older, loading: false, error: null } } };
+    }
+    case "history_failed": {
+      const buffer = state.history[action.agentId] ?? emptyHistory;
+      return { ...state, history: { ...state.history, [action.agentId]: { ...buffer, loading: false, error: action.message } } };
+    }
+    case "history_clear": {
+      if (!(action.agentId in state.history)) return state;
+      const history = { ...state.history };
+      delete history[action.agentId];
+      return { ...state, history };
     }
     case "select":
       return { ...state, selectedAgentId: action.value };
@@ -486,6 +588,15 @@ interface GatewayContextValue extends State {
   reconnect: () => void;
   /** Try a failed transcript again, from the panel that is showing the failure. */
   retryTranscript: (agentId: string) => Promise<void>;
+  /** Every row this client holds for the selected agent: paged history, then the window. */
+  selectedTranscript: TranscriptMessage[];
+  /** Null when the selected snapshot is not paged; then `selectedTranscript` is everything. */
+  selectedHistory: { remaining: number; exhaustive: boolean; loaded: number; loading: boolean; error: string | null } | null;
+  /** Fetch the page before the oldest row held. Resolves with how many rows arrived, zero on failure or nothing older. */
+  loadOlder: () => Promise<number>;
+  /** Page until the row at `position` (an index the search route reports) is held, within a bound. */
+  ensureLoadedThrough: (position: number) => Promise<boolean>;
+  searchTranscript: (query: string) => Promise<TranscriptSearchOutcome>;
 }
 
 const GatewayContext = createContext<GatewayContextValue | null>(null);
@@ -1475,6 +1586,113 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     await hydrateAgent(agentId, () => generation === sessionGeneration.current).catch(() => {});
   }, [hydrateAgent]);
 
+  // Guarded by a ref, not by the rendered `loading` flag: a caller that pages
+  // in a loop asks again before React has committed the previous answer.
+  const historyLoads = useRef(new Set<string>());
+  const loadOlder = useCallback(async (): Promise<number> => {
+    const current = stateRef.current;
+    const id = current.selectedAgentId;
+    const snapshot = id ? current.snapshots[id] : null;
+    if (!id || !snapshot?.history || historyLoads.current.has(id)) return 0;
+    const buffer = current.history[id] ?? emptyHistory;
+    const front = (buffer.older[0] ?? snapshot.messages[0])?.id;
+    if (!front) return 0;
+    const generation = sessionGeneration.current;
+    historyLoads.current.add(id);
+    dispatch({ type: "history_loading", agentId: id });
+    try {
+      const page = await api.loadHistoryPage(id, front);
+      if (generation !== sessionGeneration.current) return 0;
+      dispatch({ type: "history_loaded", agentId: id, beforeId: front, rows: page.rows });
+      return page.rows.length;
+    } catch (error) {
+      if (generation !== sessionGeneration.current) return 0;
+      if (error instanceof ApiError && error.status === 409) {
+        // The row this client paged from is no longer one the gateway holds:
+        // history was rewritten. What is held is not history any more, and
+        // the window itself is due a reload.
+        dispatch({ type: "history_clear", agentId: id });
+        try {
+          const loaded = await loadAgentHttp(id);
+          if (generation === sessionGeneration.current) dispatchLoadedSnapshot(loaded);
+        } catch {
+          // The next attach or retry reloads it; nothing more to say here.
+        }
+        return 0;
+      }
+      if (!(error instanceof ApiError && error.status === 401)) {
+        dispatch({ type: "history_failed", agentId: id, message: humanizeError(error, "Could not load earlier messages") });
+      }
+      return 0;
+    } finally {
+      historyLoads.current.delete(id);
+    }
+  }, [dispatchLoadedSnapshot, loadAgentHttp]);
+
+  const ensureLoadedThrough = useCallback(async (position: number): Promise<boolean> => {
+    const current = stateRef.current;
+    const id = current.selectedAgentId;
+    const snapshot = id ? current.snapshots[id] : null;
+    if (!id || !snapshot) return false;
+    if (!snapshot.history) return position < snapshot.messages.length;
+    // Counted here rather than re-read from state after each page: the
+    // rendered count lags a dispatch, and reading it mid-loop paged twice for
+    // the same rows.
+    let held = (current.history[id] ?? emptyHistory).older.length;
+    for (let pages = 0; ; pages += 1) {
+      // The first held row's index in the gateway's full sequence.
+      if (position >= snapshot.history.olderCount - held) return true;
+      if (pages >= MAX_PAGES_PER_REACH) return false;
+      const arrived = await loadOlder();
+      if (!arrived) return false;
+      held += arrived;
+    }
+  }, [loadOlder]);
+
+  const searchTranscript = useCallback(async (query: string): Promise<TranscriptSearchOutcome> => {
+    const current = stateRef.current;
+    const id = current.selectedAgentId;
+    const snapshot = id ? current.snapshots[id] : null;
+    const needle = query.trim().toLowerCase();
+    const held = id ? [...(current.history[id] ?? emptyHistory).older, ...(snapshot?.messages ?? [])] : [];
+    const local = (): TranscriptSearchOutcome => {
+      const matches = needle ? held.filter((row) => row.text.toLowerCase().includes(needle)) : [];
+      return {
+        scope: "loaded",
+        matches: matches.map((message) => ({ position: null, message })),
+        total: matches.length,
+        exhaustive: !snapshot?.history || (snapshot.history.exhaustive && snapshot.history.olderCount === held.length - snapshot.messages.length),
+      };
+    };
+    // An unpaged snapshot is everything the session has, and the client has it.
+    if (!id || !snapshot?.history || !needle) return local();
+    try {
+      const result = await api.searchTranscript(id, needle, MAX_SEARCH_MATCHES);
+      return { scope: "session", matches: result.matches, total: result.total, exhaustive: result.exhaustive };
+    } catch {
+      // Offline, or the gateway refused: what is loaded is still worth searching.
+      return local();
+    }
+  }, []);
+
+  const selectedBuffer = state.selectedAgentId ? state.history[state.selectedAgentId] ?? emptyHistory : emptyHistory;
+  const selectedTranscript = useMemo(
+    () => selectedBuffer.older.length ? [...selectedBuffer.older, ...(selectedSnapshot?.messages ?? [])] : selectedSnapshot?.messages ?? [],
+    [selectedBuffer.older, selectedSnapshot?.messages],
+  );
+  const selectedHistory = useMemo(
+    () => selectedSnapshot?.history
+      ? {
+          remaining: Math.max(0, selectedSnapshot.history.olderCount - selectedBuffer.older.length),
+          exhaustive: selectedSnapshot.history.exhaustive,
+          loaded: selectedBuffer.older.length,
+          loading: selectedBuffer.loading,
+          error: selectedBuffer.error,
+        }
+      : null,
+    [selectedSnapshot?.history, selectedBuffer],
+  );
+
   const value = useMemo<GatewayContextValue>(
     () => ({
       ...state,
@@ -1496,8 +1714,13 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       signOut,
       reconnect,
       retryTranscript,
+      selectedTranscript,
+      selectedHistory,
+      loadOlder,
+      ensureLoadedThrough,
+      searchTranscript,
     }),
-    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, deleteSession, respond, signOut, reconnect, retryTranscript],
+    [state, selectedAgent, selectedSnapshot, pendingMessages, attentionCount, pair, selectAgent, createSession, send, loadSlashCommands, runSlashCommand, abort, rename, stop, deleteSession, respond, signOut, reconnect, retryTranscript, selectedTranscript, selectedHistory, loadOlder, ensureLoadedThrough, searchTranscript],
   );
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>;
 }

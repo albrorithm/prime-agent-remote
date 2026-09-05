@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSnapshot, AgentSummary, BootstrapResponse, ServerFrame } from "../protocol";
+import type { AgentSnapshot, AgentSummary, BootstrapResponse, ServerFrame, TranscriptMessage } from "../protocol";
 
 const apiMock = vi.hoisted(() => {
   class MockApiError extends Error {
@@ -25,6 +25,8 @@ const apiMock = vi.hoisted(() => {
     deleteAgent: vi.fn(),
     respondToAttention: vi.fn(),
     signOut: vi.fn(),
+    loadHistoryPage: vi.fn(),
+    searchTranscript: vi.fn(),
     unauthorized: null as null | (() => void),
   };
 });
@@ -68,6 +70,8 @@ vi.mock("./api", () => ({
   deleteAgent: apiMock.deleteAgent,
   respondToAttention: apiMock.respondToAttention,
   signOut: apiMock.signOut,
+  loadHistoryPage: apiMock.loadHistoryPage,
+  searchTranscript: apiMock.searchTranscript,
   humanizeError: (error: unknown, fallback: string) =>
     error instanceof Error && error.message ? error.message : fallback,
 }));
@@ -200,6 +204,8 @@ beforeEach(() => {
   apiMock.stopAgent.mockReset();
   apiMock.deleteAgent.mockReset();
   apiMock.respondToAttention.mockReset();
+  apiMock.loadHistoryPage.mockReset();
+  apiMock.searchTranscript.mockReset();
   apiMock.signOut.mockReset().mockResolvedValue(undefined);
   pushMock.revokePushLocally.mockReset().mockResolvedValue(undefined);
   pushMock.reclaimPushSubscription.mockReset().mockResolvedValue(undefined);
@@ -1542,5 +1548,87 @@ describe("GatewayProvider automatic transcript loading", () => {
     apiMock.loadAgent.mockResolvedValue(snapshot("agent-b", 2));
     await act(() => result.current.pair("test-token"));
     expect(result.current.selectedSnapshot?.revision).toBe(2);
+  });
+});
+
+describe("paged history", () => {
+  const row = (id: string): TranscriptMessage => ({ id, role: "assistant", text: `text ${id}`, state: "complete", createdAt: "2026-01-01T00:00:00.000Z" });
+  function pagedSnapshot(agentId: string, windowIds: string[], olderCount: number): AgentSnapshot {
+    return { ...snapshot(agentId), messages: windowIds.map(row), history: { olderCount, exhaustive: true } };
+  }
+
+  it("prepends a page before the window and counts down what remains", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(pagedSnapshot("agent-a", ["w1", "w2"], 3));
+    apiMock.loadHistoryPage
+      .mockResolvedValueOnce({ rows: [row("h2"), row("h3")], olderCount: 1, exhaustive: true })
+      .mockResolvedValueOnce({ rows: [row("h1")], olderCount: 0, exhaustive: true });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+    expect(result.current.selectedHistory).toMatchObject({ remaining: 3, loaded: 0 });
+
+    await act(() => result.current.loadOlder());
+    expect(apiMock.loadHistoryPage).toHaveBeenCalledWith("agent-a", "w1");
+    expect(result.current.selectedTranscript.map((item) => item.id)).toEqual(["h2", "h3", "w1", "w2"]);
+    expect(result.current.selectedHistory).toMatchObject({ remaining: 1, loaded: 2 });
+
+    // The next page is asked for before the oldest row held, not the window.
+    expect(await act(() => result.current.ensureLoadedThrough(0))).toBe(true);
+    expect(apiMock.loadHistoryPage).toHaveBeenLastCalledWith("agent-a", "h2");
+    expect(result.current.selectedTranscript.map((item) => item.id)).toEqual(["h1", "h2", "h3", "w1", "w2"]);
+    expect(result.current.selectedHistory).toMatchObject({ remaining: 0, loaded: 3 });
+  });
+
+  it("drops what it holds and reloads when the gateway no longer has the row it paged from", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent
+      .mockResolvedValueOnce(pagedSnapshot("agent-a", ["w1", "w2"], 2))
+      .mockResolvedValueOnce({ ...pagedSnapshot("agent-a", ["n1", "n2"], 0), revision: 5 });
+    apiMock.loadHistoryPage
+      .mockResolvedValueOnce({ rows: [row("h1")], olderCount: 1, exhaustive: true })
+      .mockRejectedValueOnce(new apiMock.ApiError(409, "History has changed"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(() => result.current.loadOlder());
+    expect(result.current.selectedHistory?.loaded).toBe(1);
+    await act(() => result.current.loadOlder());
+    await waitFor(() => expect(result.current.selectedSnapshot?.revision).toBe(5));
+    expect(result.current.selectedTranscript.map((item) => item.id)).toEqual(["n1", "n2"]);
+    expect(result.current.selectedHistory).toMatchObject({ remaining: 0, loaded: 0, error: null });
+  });
+
+  it("keeps a failure readable and does not wedge the next attempt", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(pagedSnapshot("agent-a", ["w1"], 1));
+    apiMock.loadHistoryPage
+      .mockRejectedValueOnce(new Error("gateway unreachable"))
+      .mockResolvedValueOnce({ rows: [row("h1")], olderCount: 0, exhaustive: true });
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    await act(() => result.current.loadOlder());
+    expect(result.current.selectedHistory).toMatchObject({ loading: false, error: "gateway unreachable" });
+    await act(() => result.current.loadOlder());
+    expect(result.current.selectedHistory).toMatchObject({ loaded: 1, error: null });
+  });
+
+  it("searches through the gateway and falls back to what is loaded when it cannot", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(pagedSnapshot("agent-a", ["w1", "w2"], 5));
+    apiMock.searchTranscript
+      .mockResolvedValueOnce({ matches: [{ position: 3, message: row("h4") }], total: 7, exhaustive: false })
+      .mockRejectedValueOnce(new Error("offline"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
+
+    const remote = await result.current.searchTranscript("W");
+    expect(apiMock.searchTranscript).toHaveBeenCalledWith("agent-a", "w", 50);
+    expect(remote).toEqual({ scope: "session", matches: [{ position: 3, message: row("h4") }], total: 7, exhaustive: false });
+
+    const local = await result.current.searchTranscript("W2");
+    expect(local.scope).toBe("loaded");
+    expect(local.matches.map((match) => match.message.id)).toEqual(["w2"]);
+    expect(local.exhaustive).toBe(false);
   });
 });

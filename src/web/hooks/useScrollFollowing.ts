@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export function countUnseen(previousCount: number, currentCount: number): number {
   return currentCount > previousCount ? currentCount - previousCount : 0;
@@ -10,6 +10,8 @@ interface UseScrollFollowingOptions {
   renderedMessageCount: number;
   lastContentKey: string;
   snapshotAttention: number;
+  /** Rows rendered above the window, paged in from history. Growth here means a prepend. */
+  olderRowCount?: number;
 }
 
 export function useScrollFollowing({
@@ -18,6 +20,7 @@ export function useScrollFollowing({
   renderedMessageCount,
   lastContentKey,
   snapshotAttention,
+  olderRowCount = 0,
 }: UseScrollFollowingOptions) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -29,6 +32,29 @@ export function useScrollFollowing({
   const previousSnapshotAgentId = useRef<string | null>(null);
   const followingRef = useRef(following);
   followingRef.current = following;
+
+  const previousOlderCount = useRef(olderRowCount);
+  const heightBeforeCommit = useRef(0);
+
+  // A page of older rows lands above everything the reader can see. Left
+  // alone, the content under their thumb moves down by the page's height and
+  // they lose their place; a follower is pinned to the bottom anyway and needs
+  // nothing. The height read here is from the previous commit, recorded by the
+  // effect after this one, so the correction is exactly what was inserted.
+  // Declared before the recorder on purpose: layout effects run in order.
+  // jsdom has no layout, so no test can see this move; the harness can.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    const grew = olderRowCount > previousOlderCount.current;
+    previousOlderCount.current = olderRowCount;
+    if (!element || !grew || followingRef.current) return;
+    const delta = element.scrollHeight - heightBeforeCommit.current;
+    if (delta > 0) element.scrollTop += delta;
+  }, [olderRowCount]);
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (element) heightBeforeCommit.current = element.scrollHeight;
+  });
 
   useEffect(() => {
     const element = scrollRef.current;
