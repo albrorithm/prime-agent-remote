@@ -88,6 +88,10 @@ Accepted request IDs are cached briefly so network retries do not duplicate prom
 
 - `GET /api/v1/bootstrap` — authenticated. Returns a `BootstrapResponse`: `{ protocolVersion, csrfToken, backend: "demo" | "prime", push: { enabled, publicKey }, catalog }`.
 
+### Diagnostics
+
+- `GET /api/v1/diagnostics` — authenticated read. Returns a `GatewayDiagnostics`: the protocol version, the gateway's package version, which backend is serving, Prime Agent's version and where its module was found (`env`, `dependency`, `global`, or `sibling`, never a path) and whether the daemon socket is connected, whether push is configured, and the feature flags a client should check before offering a control: `textAttention`, `messageDelivery`, `transcriptPaging`, `transcriptSearch`. A version that cannot be read is `null`, which means unknown and never old. The flags come from the same constants the routes check, so what is offered and what is refused cannot disagree.
+
 ### Agents
 
 - `GET /api/v1/agents/:id/snapshot` — authenticated. The same `AgentSnapshot` shape the WebSocket delivers; `404` if the id is unknown.

@@ -25,6 +25,7 @@ import { MAX_SEARCH_MATCHES, MAX_SEARCH_QUERY_CHARS } from "../protocol.js";
 import {
   BackendCapabilityError,
   BackendConflictError,
+  type BackendDescription,
   BackendNotFoundError,
   uniqueSessionName,
   withSerialLock,
@@ -1092,6 +1093,10 @@ export class DemoBackend implements AgentBackend {
     this.hub.unregister(`agent:${input.agentId}`);
     this.hub.publish("catalog", { kind: "catalog.replaced", payload: this.catalogState }, this.catalogState);
     return { accepted: true, requestId: input.requestId, revision };
+  }
+
+  describe(): BackendDescription {
+    return { primeVersion: null, primeModule: null, connected: true, textAttention: false, transcriptPaging: false };
   }
 
   /**

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import {
   PRIME_INSTALL_COMMAND,
@@ -13,6 +15,7 @@ import {
   primeModuleCandidates,
   resolvePrimeModule,
   toImportSpecifier,
+  readPackageVersion,
 } from "./prime-module.js";
 
 const GLOBAL_ROOT = path.join(path.sep, "usr", "local", "lib", "node_modules");
@@ -210,5 +213,18 @@ describe("resolvePrimeModule directory expansion", () => {
     expect(resolution.specifier).toBe(entry);
     expect(imported).toContain(pathToFileURL(entry).href);
     expect(imported).not.toContain(pathToFileURL(directory).href);
+  });
+});
+
+describe("readPackageVersion", () => {
+  it("reads the nearest manifest above a resolved entry file and says null otherwise", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "prime-version-"));
+    await mkdir(path.join(root, "dist", "modes"), { recursive: true });
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "prime-agent", version: "0.9.1" }));
+    expect(await readPackageVersion(path.join(root, "dist", "modes", "index.js"))).toBe("0.9.1");
+    expect(await readPackageVersion("prime-agent")).toBeNull();
+    expect(await readPackageVersion("data:text/javascript;base64,AA==")).toBeNull();
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "prime-agent", version: 9 }));
+    expect(await readPackageVersion(path.join(root, "dist", "index.js"))).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, respondToAttention, resume, sendMessage, signOut, stopAgent,
   loadHistoryPage,
   searchTranscript,
+  loadDiagnostics,
 } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
@@ -426,5 +427,22 @@ describe("history and search reads", () => {
     const result = await searchTranscript("agent-1", "need le", 10);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/agents/agent-1/search?q=need+le&limit=10");
     expect(result.matches[0]).toMatchObject({ position: 12 });
+  });
+});
+
+describe("loadDiagnostics", () => {
+  it("reads versions and flags, keeping an unknown version as null", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      protocolVersion: 1,
+      gateway: { version: "0.1.1" },
+      backend: "prime",
+      prime: { version: null, module: "global", connected: false },
+      push: { enabled: true },
+      features: { textAttention: false, messageDelivery: ["steer", "follow_up"], transcriptPaging: true, transcriptSearch: true },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const diagnostics = await loadDiagnostics();
+    expect(diagnostics.prime).toEqual({ version: null, module: "global", connected: false });
+    expect(diagnostics.features.messageDelivery).toEqual(["steer", "follow_up"]);
   });
 });

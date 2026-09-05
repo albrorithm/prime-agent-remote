@@ -7,6 +7,7 @@ import type {
   DirectoryListing,
   HistoryPage,
   ImageMimeType,
+  PrimeModuleOrigin,
   MessageDelivery,
   MutationAccepted,
   SessionCreated,
@@ -305,8 +306,18 @@ export class CoalescedRefreshQueue {
  */
 export type AttentionListener = (attention: AttentionRequest) => void;
 
+/** What a backend knows about itself, for the diagnostics route. Nothing here is a path. */
+export interface BackendDescription {
+  primeVersion: string | null;
+  primeModule: PrimeModuleOrigin | null;
+  connected: boolean;
+  textAttention: boolean;
+  transcriptPaging: boolean;
+}
+
 export interface AgentBackend {
   readonly kind: "demo" | "prime";
+  describe(): BackendDescription;
   initialize(hub: EventHub): Promise<void>;
   /** Optional: a backend that never raises attention need not implement it. */
   onAttentionAdded?(listener: AttentionListener): void;

@@ -134,6 +134,28 @@ export async function expandPackageDirectory(specifier: string): Promise<string>
 }
 
 /**
+ * The version of the package a resolved specifier lives in: the nearest
+ * package.json above it, read once. Null for anything that is not a file on
+ * disk, or when no manifest turns up within a few levels, which is "unknown"
+ * and is reported as such rather than guessed at.
+ */
+export async function readPackageVersion(specifier: string): Promise<string | null> {
+  if (!path.isAbsolute(specifier)) return null;
+  let directory = path.dirname(specifier);
+  for (let depth = 0; depth < 6; depth += 1) {
+    try {
+      const manifest = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")) as { version?: unknown };
+      return typeof manifest.version === "string" && manifest.version.length <= 64 ? manifest.version : null;
+    } catch {
+      const parent = path.dirname(directory);
+      if (parent === directory) return null;
+      directory = parent;
+    }
+  }
+  return null;
+}
+
+/**
  * How Prime Agent is actually installed. Not `npm install -g prime-agent`:
  * that package does not exist on the registry and never has, so the previous
  * message sent anyone who hit it — which is precisely the people who do not

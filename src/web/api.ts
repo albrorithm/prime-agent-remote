@@ -4,6 +4,7 @@ import {
   MAX_SEARCH_MATCHES,
   agentSnapshotSchema,
   bootstrapResponseSchema,
+  gatewayDiagnosticsSchema,
   historyPageSchema,
   transcriptSearchResultSchema,
   cellOutputSchema,
@@ -21,6 +22,7 @@ import {
   type CellOutput,
   type DeviceListSnapshot,
   type DirectoryListing,
+  type GatewayDiagnostics,
   type HistoryPage,
   type TranscriptSearchResult,
   type ImageAttachmentInput,
@@ -187,6 +189,11 @@ export async function loadAgent(agentId: string, options?: ApiRequestOptions): P
     credentials: "same-origin",
     cache: "no-store",
   }, options, agentSnapshotSchema);
+}
+
+/** Versions and feature flags, for a settings screen to show and for a control to check before it is offered. */
+export async function loadDiagnostics(options?: ApiRequestOptions): Promise<GatewayDiagnostics> {
+  return request("/api/v1/diagnostics", { credentials: "same-origin", cache: "no-store" }, options, gatewayDiagnosticsSchema);
 }
 
 /** The rows immediately before `beforeId`, oldest first. A 409 means history was rewritten and the transcript should be reloaded. */

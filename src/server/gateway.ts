@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   DEFAULT_HISTORY_PAGE_ROWS,
+  MESSAGE_DELIVERIES,
   MAX_HISTORY_PAGE_ROWS,
   MAX_SEARCH_MATCHES,
   MAX_SEARCH_QUERY_CHARS,
@@ -311,6 +313,21 @@ function boundedQueryInteger(raw: string | null, fallback: number, maximum: numb
   return value >= 1 && value <= maximum ? value : null;
 }
 
+/**
+ * This package's own version, read once from the manifest two levels above
+ * this module — the same place from `src/server` and from `dist-server/server`.
+ * Null when it cannot be read, which the diagnostics report as unknown.
+ */
+const gatewayVersion: Promise<string | null> = (async () => {
+  try {
+    const here = import.meta.url.startsWith("file:") ? fileURLToPath(import.meta.url) : import.meta.url;
+    const manifest = JSON.parse(await readFile(path.resolve(path.dirname(here), "..", "..", "package.json"), "utf8")) as { version?: unknown };
+    return typeof manifest.version === "string" && manifest.version.length <= 64 ? manifest.version : null;
+  } catch {
+    return null;
+  }
+})();
+
 /** The bearer credential on a request, or null when there is none worth checking. */
 function bearerToken(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
@@ -392,6 +409,26 @@ function decodeSegment(value: string): string | null {
         // design — it is what the browser subscribes with.
         push: { enabled: Boolean(config.webPush), publicKey: config.webPush?.publicKey ?? null },
         catalog: backend.catalog(),
+      });
+      return true;
+    }
+
+    if (req.method === "GET" && pathname === "/api/v1/diagnostics") {
+      const described = backend.describe();
+      json(res, 200, {
+        protocolVersion: PROTOCOL_VERSION,
+        gateway: { version: await gatewayVersion },
+        backend: backend.kind,
+        prime: { version: described.primeVersion, module: described.primeModule, connected: described.connected },
+        push: { enabled: Boolean(config.webPush) },
+        // From the same constants the routes check, so what is shown and what
+        // is refused cannot drift apart.
+        features: {
+          textAttention: described.textAttention,
+          messageDelivery: [...MESSAGE_DELIVERIES],
+          transcriptPaging: described.transcriptPaging,
+          transcriptSearch: true,
+        },
       });
       return true;
     }

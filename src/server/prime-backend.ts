@@ -4,7 +4,7 @@ import { opendir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { resolvePrimeModule } from "./prime-module.js";
+import { readPackageVersion, resolvePrimeModule } from "./prime-module.js";
 import {
   DIRECT_SLASH_COMMAND_NAMES,
   MAX_ATTENTION_TEXT_CHARS,
@@ -62,6 +62,7 @@ import {
   uniqueSessionName,
   withSerialLock,
   type AttachmentData,
+  type BackendDescription,
   type AbortInput,
   type AgentBackend,
   type AttentionListener,
@@ -1843,6 +1844,8 @@ export class PrimeBackend implements AgentBackend {
   private hub!: EventHub;
   private readonly attentionListeners: AttentionListener[] = [];
   private module!: PrimeModule;
+  private primeVersion: string | null = null;
+  private primeModuleOrigin: BackendDescription["primeModule"] = null;
   private client!: PrimeDaemonClient;
   /** Unsubscribes the current client's close listener; see observeClientDisconnect. */
   private clientCloseUnsubscribe: (() => void) | undefined;
@@ -1902,6 +1905,16 @@ export class PrimeBackend implements AgentBackend {
     this.attentionListeners.push(listener);
   }
 
+  describe(): BackendDescription {
+    return {
+      primeVersion: this.primeVersion,
+      primeModule: this.primeModuleOrigin,
+      connected: this.client !== undefined && !this.closed && this.reconnectPromise === undefined,
+      textAttention: this.projectTextRequests,
+      transcriptPaging: true,
+    };
+  }
+
   async initialize(hub: EventHub): Promise<void> {
     this.hub = hub;
     // An explicit specifier is offered first but is not the only candidate: a
@@ -1914,6 +1927,8 @@ export class PrimeBackend implements AgentBackend {
       console.log(`Prime Agent module resolved from the ${resolution.origin} install: ${resolution.specifier}`);
     }
     this.module = resolution.module as unknown as PrimeModule;
+    this.primeModuleOrigin = resolution.origin;
+    this.primeVersion = await readPackageVersion(resolution.specifier);
     this.client = new this.module.DaemonClient(this.socketOverride || this.module.defaultDaemonSocketPath());
     await this.client.connect(5_000);
     this.observeClientDisconnect(this.client);

@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
-import { historyPageSchema, transcriptSearchResultSchema } from "../protocol.js";
+import { gatewayDiagnosticsSchema, historyPageSchema, transcriptSearchResultSchema } from "../protocol.js";
 import { BackendCapabilityError, type AttentionListener } from "./backend.js";
 import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
@@ -1965,5 +1965,27 @@ describe("pairing grants", () => {
     });
     expect(await revoked.json()).toEqual({ revoked: 1 });
     expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: voided }) })).status).toBe(401);
+  });
+});
+
+describe("diagnostics", () => {
+  it("says what this gateway is and can do, and never guesses a version", async () => {
+    const t = await startGateway();
+    expect((await fetch(`${t.baseUrl}/api/v1/diagnostics`)).status).toBe(401);
+    const client = await pairClient(t);
+    const response = await fetch(`${t.baseUrl}/api/v1/diagnostics`, { headers: { Cookie: client.cookie } });
+    expect(response.status).toBe(200);
+    const diagnostics = gatewayDiagnosticsSchema.parse(await response.json());
+    const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { version: string };
+    expect(diagnostics.gateway.version).toBe(manifest.version);
+    expect(diagnostics.backend).toBe("demo");
+    // Demo has no Prime build behind it: unknown, reported as null rather than as anything.
+    expect(diagnostics.prime).toEqual({ version: null, module: null, connected: true });
+    expect(diagnostics.features).toEqual({
+      textAttention: false,
+      messageDelivery: ["steer", "follow_up"],
+      transcriptPaging: false,
+      transcriptSearch: true,
+    });
   });
 });
