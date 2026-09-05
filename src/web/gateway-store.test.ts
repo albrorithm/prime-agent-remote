@@ -66,6 +66,69 @@ describe("applyGatewayEvent", () => {
     expect(result).toBe(withQueue);
     expect(result.queue).toEqual(withQueue.queue);
   });
+
+  const message = (id: string, text: string) => ({
+    id,
+    role: "assistant" as const,
+    text,
+    state: "complete" as const,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  it("applies a patch's removed, updated and added rows in order, leaving untouched rows the same objects", () => {
+    const m1 = message("m1", "one");
+    const m2 = message("m2", "two");
+    const m3 = message("m3", "three");
+    const base: AgentSnapshot = { ...snapshot, revision: 1, messages: [m1, m2, m3] };
+    const m1Updated = message("m1", "one (edited)");
+    const m4 = message("m4", "four");
+    const result = applyGatewayEvent(base, {
+      kind: "agent.patched",
+      payload: { revision: 2, removed: ["m2"], updated: [m1Updated], added: [m4] },
+    });
+    expect(result.messages.map((item) => item.id)).toEqual(["m1", "m3", "m4"]);
+    expect(result.messages[0]).toBe(m1Updated);
+    expect(result.messages[1]).toBe(m3);
+    expect(result.revision).toBe(2);
+  });
+
+  it("upserts an added row whose id already exists in place, rather than duplicating it", () => {
+    const m1 = message("m1", "one");
+    const m2 = message("m2", "two");
+    const base: AgentSnapshot = { ...snapshot, revision: 1, messages: [m1, m2] };
+    const m1Replacement = message("m1", "one (again)");
+    const result = applyGatewayEvent(base, {
+      kind: "agent.patched",
+      payload: { revision: 2, added: [m1Replacement] },
+    });
+    expect(result.messages.map((item) => item.id)).toEqual(["m1", "m2"]);
+    expect(result.messages[0]).toBe(m1Replacement);
+  });
+
+  it("removes the goal when a patch sets it to null", () => {
+    const base: AgentSnapshot = {
+      ...snapshot,
+      revision: 1,
+      goal: { status: "active", objective: "ship it", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
+    };
+    const result = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 2, goal: null } });
+    expect(result.goal).toBeUndefined();
+  });
+
+  it("replaces the queue a patch carries", () => {
+    const base: AgentSnapshot = { ...snapshot, revision: 1 };
+    const queue = { steering: [{ text: "next", truncated: false }], followUp: [], queuedCount: 1 };
+    const result = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 2, queue } });
+    expect(result.queue).toEqual(queue);
+  });
+
+  it("ignores a patch at or below the snapshot's revision", () => {
+    const base: AgentSnapshot = { ...snapshot, revision: 5, messages: [message("m1", "one")] };
+    const stale = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 5, added: [message("m2", "two")] } });
+    expect(stale).toBe(base);
+    const older = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 3, added: [message("m2", "two")] } });
+    expect(older).toBe(base);
+  });
 });
 
 describe("reconcilePending", () => {

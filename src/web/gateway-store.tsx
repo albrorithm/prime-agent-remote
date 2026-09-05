@@ -269,6 +269,35 @@ export function applyGatewayEvent(snapshot: AgentSnapshot, event: GatewayEvent):
   switch (event.kind) {
     case "agent.replaced":
       return event.payload.revision < snapshot.revision ? snapshot : event.payload;
+    case "agent.patched": {
+      const patch = event.payload;
+      // A stale patch is not wrong, just late: an HTTP-loaded snapshot can already
+      // be ahead of socket events still in flight for the revision it replaced.
+      if (patch.revision <= snapshot.revision) return snapshot;
+      let messages = snapshot.messages;
+      if (patch.removed?.length || patch.updated?.length) {
+        const removedIds = new Set(patch.removed ?? []);
+        const updatedById = new Map((patch.updated ?? []).map((message) => [message.id, message]));
+        const next: TranscriptMessage[] = [];
+        for (const message of messages) {
+          if (removedIds.has(message.id)) continue;
+          next.push(updatedById.get(message.id) ?? message);
+        }
+        messages = next;
+      }
+      for (const row of patch.added ?? []) messages = upsertById(messages, row);
+      const next: AgentSnapshot = { ...snapshot, messages, revision: patch.revision };
+      if (patch.dashboard !== undefined) next.dashboard = patch.dashboard;
+      if (patch.goal !== undefined) {
+        if (patch.goal === null) delete next.goal;
+        else next.goal = patch.goal;
+      }
+      if (patch.queue !== undefined) {
+        if (patch.queue === null) delete next.queue;
+        else next.queue = patch.queue;
+      }
+      return next;
+    }
     case "agent.message_added":
     case "agent.message_updated":
       return { ...snapshot, messages: upsertById(snapshot.messages, event.payload) };

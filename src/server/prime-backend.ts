@@ -17,6 +17,7 @@ import type {
   AgentCapabilities,
   AgentGoal,
   AgentMessageRelationship,
+  AgentPatch,
   AgentSnapshot,
   AgentSummary,
   AttentionReply,
@@ -279,6 +280,15 @@ interface ConnectionRecord {
   refines: StoredRefine[];
   contextStats?: { fetchedAt: number; value?: SessionContextUsage };
   contextStatsPending?: Promise<void>;
+  /**
+   * State from the last full projection on this record. Its presence is also
+   * what says a delta may be applied on top: a record that has projected
+   * nothing yet has no rows to patch, and a fresh record after a re-attach is
+   * a new authority rather than a delta on what the old connection left.
+   */
+  projection?: TranscriptProjectionContext;
+  /** Rows the last projection's streaming message produced, replaced wholesale by the next one. */
+  streamingRowIds: string[];
 }
 
 /** The daemon extension dialogs this adapter can carry to a client. */
@@ -1275,12 +1285,50 @@ function ensureUniqueMessageIds(messages: TranscriptMessage[]): TranscriptMessag
   return messages;
 }
 
-export function projectPrimeTranscript(
+/**
+ * What the streaming fast path needs to project one more token batch without
+ * asking the daemon for the whole transcript again: where the streaming
+ * message sat in the daemon's own message list, the tool results the settled
+ * rows were resolved against, and the turn its rows belong to.
+ */
+interface TranscriptProjectionContext {
+  nextIndex: number;
+  toolResults: ReadonlyMap<string, PrimeRecord>;
+  turnId?: string;
+}
+
+interface ProjectedTranscript {
+  messages: TranscriptMessage[];
+  /** Ids of the rows the streaming message produced, so the next tick can drop them. */
+  streamingRowIds: string[];
+  context: TranscriptProjectionContext;
+}
+
+/**
+ * The bounds every projected transcript carries. Both the full projection and
+ * the streaming fast path end here so the two cannot drift: nothing from the
+ * daemon reaches the wire unbounded, and every row id is unique within the
+ * snapshot a client indexes by id.
+ */
+function boundProjectedMessages(projected: TranscriptMessage[]): TranscriptMessage[] {
+  let totalChars = 0;
+  for (const message of projected) {
+    message.text = message.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
+    totalChars += messageChars(message);
+  }
+  while (projected.length > MAX_SNAPSHOT_MESSAGES || totalChars > MAX_TRANSCRIPT_TEXT_CHARS) {
+    const removed = projected.shift();
+    totalChars -= removed ? messageChars(removed) : 0;
+  }
+  return ensureUniqueMessageIds(projected);
+}
+
+function projectPrimeTranscriptParts(
   messages: unknown[],
   streamingMessage?: unknown,
   imageSink?: ImageAttachmentSink,
   cellSink?: CellSink,
-): TranscriptMessage[] {
+): ProjectedTranscript {
   const boundedSource = messages.slice(-MAX_SNAPSHOT_MESSAGES);
   const sourceOffset = messages.length - boundedSource.length;
   const toolResults = collectToolResults(boundedSource);
@@ -1298,27 +1346,132 @@ export function projectPrimeTranscript(
     return rows;
   };
   boundedSource.forEach((message, index) => append(message, sourceOffset + index, false));
+  // Captured before the streaming message is appended, which is the state the
+  // fast path replays from. An assistant reply never opens a turn of its own,
+  // so this is also the turn its rows carry.
+  const context: TranscriptProjectionContext = {
+    nextIndex: messages.length,
+    toolResults,
+    ...(turnId ? { turnId } : {}),
+  };
+  const streamingRows: TranscriptMessage[] = [];
   if (streamingMessage) {
     const streaming = append(streamingMessage, messages.length, true);
+    streamingRows.push(...streaming);
     if (!streaming.length) {
       const record = primeRecord(streamingMessage) ?? { role: "assistant" };
       const placeholder = plainMessage(record, messages.length, "assistant", "", true, "placeholder");
       if (placeholder) {
         if (turnId) placeholder.turnId = turnId;
         projected.push(placeholder);
+        streamingRows.push(placeholder);
       }
     }
   }
-  let totalChars = 0;
-  for (const message of projected) {
-    message.text = message.text.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS);
-    totalChars += messageChars(message);
+  const bounded = boundProjectedMessages(projected);
+  // Read after the bounding pass: it can drop a row from the front and rename
+  // a colliding id, and a stale id here would leave a duplicate row behind.
+  const survived = new Set(bounded);
+  return {
+    messages: bounded,
+    streamingRowIds: streamingRows.filter((row) => survived.has(row)).map((row) => row.id),
+    context,
+  };
+}
+
+export function projectPrimeTranscript(
+  messages: unknown[],
+  streamingMessage?: unknown,
+  imageSink?: ImageAttachmentSink,
+  cellSink?: CellSink,
+): TranscriptMessage[] {
+  return projectPrimeTranscriptParts(messages, streamingMessage, imageSink, cellSink).messages;
+}
+
+/**
+ * Structural equality over the plain JSON shapes the wire types are, used to
+ * decide what a patch has to carry. Deliberately not `JSON.stringify` on each
+ * row: that allocates a string per comparison on every streaming tick, and a
+ * walk stops at the first difference.
+ */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) if (!sameJson(a[index], b[index])) return false;
+    return true;
   }
-  while (projected.length > MAX_SNAPSHOT_MESSAGES || totalChars > MAX_TRANSCRIPT_TEXT_CHARS) {
-    const removed = projected.shift();
-    totalChars -= removed ? messageChars(removed) : 0;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  // An absent key and a key set to undefined are the same thing on the wire,
+  // and the projection produces both shapes for the same optional field.
+  const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) if (!sameJson(left[key], right[key])) return false;
+  return true;
+}
+
+type SnapshotDelta =
+  | { kind: "none" }
+  | { kind: "replace" }
+  | { kind: "patch"; patch: Omit<AgentPatch, "revision"> };
+
+/**
+ * What to put on the wire for a client that already holds `prev`.
+ *
+ * A patch can only say: these rows went, these rows changed in place, these
+ * rows were appended, and this state field is now that. Anything else — a row
+ * that moved, history rewritten under compaction — is not expressible, and
+ * `agent.replaced` stays the authority for it.
+ */
+function diffAgentSnapshots(prev: AgentSnapshot, next: AgentSnapshot): SnapshotDelta {
+  // Attention rides its own events, which carry their own revisions; a patch
+  // that also moved attention would race them. Both sides project the same
+  // pendingExtensions, so a difference here means something outside this path
+  // changed the snapshot, and the client is better served by the authority.
+  if (!sameJson(prev.attention, next.attention)) return { kind: "replace" };
+
+  const nextIds = new Set(next.messages.map((message) => message.id));
+  const removed = prev.messages.filter((message) => !nextIds.has(message.id)).map((message) => message.id);
+  const kept = removed.length ? prev.messages.filter((message) => nextIds.has(message.id)) : prev.messages;
+  if (kept.length > next.messages.length) return { kind: "replace" };
+  const updated: TranscriptMessage[] = [];
+  for (let index = 0; index < kept.length; index += 1) {
+    const before = kept[index]!;
+    const after = next.messages[index]!;
+    // A surviving row that changed position is not something a patch can say.
+    if (before.id !== after.id) return { kind: "replace" };
+    if (!sameJson(before, after)) updated.push(after);
   }
-  return ensureUniqueMessageIds(projected);
+  const added = next.messages.slice(kept.length);
+
+  const dashboardChanged = !sameJson(prev.dashboard, next.dashboard);
+  const goalChanged = !sameJson(prev.goal, next.goal);
+  const queueChanged = !sameJson(prev.queue, next.queue);
+  if (!removed.length && !updated.length && !added.length
+    && !dashboardChanged && !goalChanged && !queueChanged) return { kind: "none" };
+
+  // Past halfway the patch carries more than the snapshot it stands in for,
+  // and costs the client a merge on top of receiving it.
+  if (next.messages.length > 50 && updated.length + added.length > next.messages.length / 2) {
+    return { kind: "replace" };
+  }
+
+  const patch: Omit<AgentPatch, "revision"> = {};
+  if (removed.length) patch.removed = removed;
+  if (updated.length) patch.updated = updated;
+  if (added.length) patch.added = added;
+  if (dashboardChanged) {
+    // The wire has no way to say "the dashboard is gone", and the projection
+    // never drops one; if it ever did, only a replacement could carry it.
+    if (!next.dashboard) return { kind: "replace" };
+    patch.dashboard = next.dashboard;
+  }
+  if (goalChanged) patch.goal = next.goal ?? null;
+  if (queueChanged) patch.queue = next.queue ?? null;
+  return { kind: "patch", patch };
 }
 
 const SAVED_TRANSCRIPT_SCAN_BYTES = 64 * 1024 * 1024;
@@ -2666,6 +2819,7 @@ export class PrimeBackend implements AgentBackend {
       revision: this.snapshots.get(publicId)?.revision ?? 0,
       disposed: false,
       refines: [],
+      streamingRowIds: [],
       unsubscribe: () => {},
       refreshQueue: new CoalescedRefreshQueue({
         run: () => this.runConnectionRefresh(record),
@@ -2768,6 +2922,11 @@ export class PrimeBackend implements AgentBackend {
             ...(detail ? { error: sanitizeTranscriptPreview(detail, 200) } : {}),
           },
         });
+      } else if (inner?.type === "message_update" && this.applyStreamingDelta(record, inner)) {
+        // Handled without a daemon fetch. Returning here is the point: this
+        // event must not also queue a refresh, or the round trips it exists to
+        // avoid arrive anyway, one tick late.
+        return;
       }
     }
     if (event.type === "closed") {
@@ -2821,13 +2980,19 @@ export class PrimeBackend implements AgentBackend {
   }
 
   private applyPrimeSnapshot(record: ConnectionRecord, source: PrimeSnapshot, publish: boolean): void {
-    record.revision += 1;
-    const messages = projectPrimeTranscript(
+    // Whether this record had already projected once, read before the new
+    // context overwrites it: a first projection is a new authority, not a
+    // delta on whatever a previous connection left in the cache.
+    const diffable = record.projection !== undefined;
+    const projection = projectPrimeTranscriptParts(
       source.messages,
       source.streamingMessage,
       (image) => this.cacheImage(image),
       (cell) => this.cacheCell(cell),
     );
+    const messages = projection.messages;
+    record.projection = projection.context;
+    record.streamingRowIds = projection.streamingRowIds;
     applyLiveRefines(record.refines, messages);
     const children: SessionDashboardChild[] = (source.children ?? []).map((child) => {
       const agentId = child.activeSessionId ? this.publicByActive.get(child.activeSessionId) : undefined;
@@ -2869,6 +3034,8 @@ export class PrimeBackend implements AgentBackend {
       .map(([id, pending]) => this.projectAttention(id, pending));
     const queue = projectSessionQueue(source.state.sessionActions);
     const snapshot: AgentSnapshot = {
+      // Settled by publishProjected, which is what knows whether anything is
+      // actually going out under this revision.
       revision: record.revision,
       agentId: record.publicId,
       messages,
@@ -2877,11 +3044,127 @@ export class PrimeBackend implements AgentBackend {
       goal: projectGoal(source.state.goal),
       ...(queue ? { queue } : {}),
     };
-    this.snapshots.set(record.publicId, snapshot);
-    const streamId = `agent:${record.publicId}`;
-    if (!this.hub.has(streamId)) this.hub.register(streamId, snapshot);
-    else if (publish) this.hub.publish(streamId, { kind: "agent.replaced", payload: snapshot }, snapshot);
+    this.publishProjected(record, snapshot, publish, diffable);
     this.maybeRefreshContextStats(record);
+  }
+
+  /**
+   * Store a freshly projected snapshot and tell the stream what changed.
+   *
+   * The daemon adapter marks its cached snapshot stale on every session event,
+   * so a live agent re-projects its whole transcript dozens of times a second
+   * while it streams. Publishing that as `agent.replaced` each time put the
+   * entire transcript on the wire for a delta that only ever touched the last
+   * row. What a client that already holds the previous snapshot needs is the
+   * difference; a replacement is kept for everything a patch cannot express,
+   * and for a client attaching cold, which the hub still serves from the
+   * stored snapshot handed in here.
+   */
+  private publishProjected(
+    record: ConnectionRecord,
+    next: AgentSnapshot,
+    publish: boolean,
+    diffable: boolean,
+  ): void {
+    const streamId = `agent:${record.publicId}`;
+    const registered = this.hub.has(streamId);
+    const previous = this.snapshots.get(record.publicId);
+    const delta: SnapshotDelta = diffable && publish && registered && previous
+      ? diffAgentSnapshots(previous, next)
+      : { kind: "replace" };
+    if (delta.kind === "none") {
+      // The revision is the precondition a phone sends against. Advancing it
+      // with nothing on the wire would fail that precondition on the next send
+      // and cost a full transcript refetch over HTTP, for a refresh that had
+      // nothing to say.
+      next.revision = record.revision;
+      this.snapshots.set(record.publicId, next);
+      return;
+    }
+    record.revision += 1;
+    next.revision = record.revision;
+    this.snapshots.set(record.publicId, next);
+    if (!registered) this.hub.register(streamId, next);
+    else if (!publish) return;
+    else if (delta.kind === "patch") {
+      this.hub.publish(streamId, { kind: "agent.patched", payload: { revision: next.revision, ...delta.patch } }, next);
+    } else {
+      this.hub.publish(streamId, { kind: "agent.replaced", payload: next }, next);
+    }
+  }
+
+  /**
+   * Project one streaming token batch straight from the event, without asking
+   * the daemon for the whole transcript again.
+   *
+   * A `message_update` on the assistant's reply arrives once per token batch,
+   * dozens of times a second on a long answer, and the installed adapter marks
+   * its cached snapshot stale on every session event — so the refresh path pays
+   * three daemon round trips and a full re-projection for a delta that only
+   * ever touches the last row. Every other event is once per message, not once
+   * per token, and keeps the full refresh.
+   *
+   * Ordering: a coalesced full refresh can complete after a publish from here.
+   * That is safe because the adapter reads its own tracked streaming message at
+   * the END of `getInitialSnapshot`, after its awaits, so a refresh that lands
+   * later carries a streaming message at least as new as any event already
+   * delivered. It cannot put an older token batch back on the wire.
+   *
+   * Returns false when the delta cannot be applied, so the caller falls back to
+   * a full refresh rather than losing the update.
+   */
+  private applyStreamingDelta(record: ConnectionRecord, inner: PrimeRecord): boolean {
+    const context = record.projection;
+    const previous = this.snapshots.get(record.publicId);
+    const message = primeRecord(inner.message);
+    if (!context || !previous || !message || message.role !== "assistant") return false;
+    // Only worth it when someone is watching. With nothing attached there is
+    // no wire cost to save, and the full refresh is also what keeps the
+    // catalog's activity line moving for the session list.
+    if (!this.hub.has(`agent:${record.publicId}`)) return false;
+    try {
+      const rows = projectMessage(
+        message,
+        context.nextIndex,
+        true,
+        context.toolResults,
+        (image) => this.cacheImage(image),
+        (cell) => this.cacheCell(cell),
+      );
+      if (!rows.length) {
+        // Same rule the full projection applies: a streaming message that
+        // projects to nothing still shows as a row, or the reply appears to
+        // arrive out of nowhere once its first tokens land.
+        const placeholder = plainMessage(message, context.nextIndex, "assistant", "", true, "placeholder");
+        if (placeholder) rows.push(placeholder);
+      }
+      if (context.turnId) for (const row of rows) row.turnId = context.turnId;
+      const dropped = new Set(record.streamingRowIds);
+      const messages = previous.messages.filter((row) => !dropped.has(row.id));
+      messages.push(...rows);
+      boundProjectedMessages(messages);
+      const survived = new Set(messages);
+      record.streamingRowIds = rows.filter((row) => survived.has(row)).map((row) => row.id);
+      // No applyLiveRefines here: the settled rows carry the enrichment the
+      // last full projection gave them, refines arrive as their own session
+      // events, and each of those takes the full refresh.
+      const next: AgentSnapshot = {
+        revision: record.revision,
+        agentId: record.publicId,
+        messages,
+        // A token batch moves no state. Reusing the projected objects also
+        // makes the diff below see them as unchanged without walking them.
+        dashboard: previous.dashboard,
+        attention: previous.attention,
+        goal: previous.goal,
+        ...(previous.queue ? { queue: previous.queue } : {}),
+      };
+      this.publishProjected(record, next, true, true);
+      return true;
+    } catch (error) {
+      console.error("Prime streaming delta failed; falling back to a full refresh", error);
+      return false;
+    }
   }
 
   private recordRefine(record: ConnectionRecord, refine: StoredRefine): void {

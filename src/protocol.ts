@@ -415,9 +415,31 @@ export interface StreamCursor {
   seq: number;
 }
 
+/**
+ * What changed since the previous event on the stream, for a client that
+ * already holds the snapshot. Applied in order: rows in `removed` go, rows in
+ * `updated` replace the row with the same id, rows in `added` are appended.
+ * A field that is absent did not change; `goal` and `queue` are null when
+ * they went away. `revision` is the snapshot's revision once the patch is
+ * applied, so a client that has it can still send with a current precondition.
+ *
+ * Anything a patch cannot say — a row moved, history rewritten, compaction —
+ * comes as `agent.replaced` instead. A replacement is always the authority.
+ */
+export interface AgentPatch {
+  revision: number;
+  removed?: string[];
+  updated?: TranscriptMessage[];
+  added?: TranscriptMessage[];
+  dashboard?: SessionDashboard;
+  goal?: AgentGoal | null;
+  queue?: SessionQueue | null;
+}
+
 export type GatewayEvent =
   | { kind: "catalog.replaced"; payload: CatalogSnapshot }
   | { kind: "agent.replaced"; payload: AgentSnapshot }
+  | { kind: "agent.patched"; payload: AgentPatch }
   | { kind: "agent.message_added"; payload: TranscriptMessage }
   | { kind: "agent.message_updated"; payload: TranscriptMessage }
   | { kind: "agent.attention_added"; payload: AttentionRequest }
@@ -742,9 +764,20 @@ export const bootstrapResponseSchema = z.object({
   catalog: catalogSnapshotSchema,
 });
 
+export const agentPatchSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  removed: z.array(z.string()).optional(),
+  updated: z.array(transcriptMessageSchema).optional(),
+  added: z.array(transcriptMessageSchema).optional(),
+  dashboard: sessionDashboardSchema.optional(),
+  goal: agentGoalSchema.nullable().optional(),
+  queue: sessionQueueSchema.nullable().optional(),
+});
+
 const gatewayEventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("catalog.replaced"), payload: catalogSnapshotSchema }),
   z.object({ kind: z.literal("agent.replaced"), payload: agentSnapshotSchema }),
+  z.object({ kind: z.literal("agent.patched"), payload: agentPatchSchema }),
   z.object({ kind: z.literal("agent.message_added"), payload: transcriptMessageSchema }),
   z.object({ kind: z.literal("agent.message_updated"), payload: transcriptMessageSchema }),
   z.object({ kind: z.literal("agent.attention_added"), payload: attentionRequestSchema }),

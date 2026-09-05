@@ -54,10 +54,11 @@ An `EventEnvelope` is `{ version, streamId, epoch, seq, emittedAt, event }`.
 
 ### GatewayEvent kinds
 
-Six, all delivered as an `EventEnvelope.event`:
+Seven, all delivered as an `EventEnvelope.event`:
 
 - `catalog.replaced` — payload is a full `CatalogSnapshot`; only on the `catalog` stream.
 - `agent.replaced` — payload is a full `AgentSnapshot`; only on that agent's own `agent:<id>` stream.
+- `agent.patched` — payload is an `AgentPatch`, `{ revision, removed?, updated?, added?, dashboard?, goal?, queue? }`, describing what changed since the previous event on the stream rather than repeating the whole snapshot. Applied in order: drop the rows named in `removed`, replace rows by id from `updated`, then append `added` (an `added` row whose id already exists replaces that row in place instead of duplicating it). `dashboard`, `goal` and `queue` replace the corresponding snapshot field when present; `goal: null` and `queue: null` mean the field went away, so the client deletes it rather than storing null. A field left out of the payload is unchanged. `revision` is the snapshot's revision once the patch is applied. A patch is only useful once the client already holds a snapshot at an older revision: one at or below the client's current revision is stale and must be ignored, since an HTTP-loaded snapshot can already be ahead of socket events still in flight. Anything a patch cannot express — a row moved, history rewritten, compaction — arrives as `agent.replaced` instead, which stays the authority.
 - `agent.message_added` — payload is one `TranscriptMessage` newly appended to the transcript.
 - `agent.message_updated` — payload is one `TranscriptMessage` sharing an `id` with one already delivered, typically as it streams in.
 - `agent.attention_added` — payload is one `AttentionRequest` newly requiring a response.

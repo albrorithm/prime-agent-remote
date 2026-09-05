@@ -16,6 +16,9 @@ import {
   readPairingFragment,
   sessionDashboardSchema,
   MAX_QUEUE_ENTRIES_PER_LANE,
+  agentPatchSchema,
+  eventEnvelopeSchema,
+  PROTOCOL_VERSION,
   type AgentSummary,
 } from "./protocol.js";
 
@@ -472,5 +475,40 @@ describe("attentionRequestSchema reply", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
     };
     expect(agentSnapshotSchema.safeParse(snapshotWithAttention(request)).success).toBe(false);
+  });
+});
+
+describe("agentPatchSchema", () => {
+  it("accepts a minimal patch carrying only a revision", () => {
+    expect(agentPatchSchema.safeParse({ revision: 1 }).success).toBe(true);
+  });
+
+  it("accepts a patch that clears the goal", () => {
+    expect(agentPatchSchema.safeParse({ revision: 1, goal: null }).success).toBe(true);
+  });
+
+  it("rejects a negative revision", () => {
+    expect(agentPatchSchema.safeParse({ revision: -1 }).success).toBe(false);
+  });
+});
+
+describe("eventEnvelopeSchema for agent.patched", () => {
+  function envelope(streamId: string): unknown {
+    return {
+      version: PROTOCOL_VERSION,
+      streamId,
+      epoch: "epoch-1",
+      seq: 1,
+      emittedAt: "2026-01-01T00:00:00.000Z",
+      event: { kind: "agent.patched", payload: { revision: 2 } },
+    };
+  }
+
+  it("accepts an agent.patched envelope on its agent stream", () => {
+    expect(eventEnvelopeSchema.safeParse(envelope("agent:agent-1")).success).toBe(true);
+  });
+
+  it("rejects an agent.patched envelope on the catalog stream", () => {
+    expect(eventEnvelopeSchema.safeParse(envelope("catalog")).success).toBe(false);
   });
 });

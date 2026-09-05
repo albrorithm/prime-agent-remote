@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_ATTENTION_TEXT_CHARS, MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
-import type { AgentSnapshot, AttentionRequest, ServerFrame } from "../protocol.js";
+import type { AgentPatch, AgentSnapshot, AttentionRequest, ServerFrame } from "../protocol.js";
 import { BackendCapabilityError, BackendConflictError, BackendNotFoundError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
@@ -408,6 +408,13 @@ afterEach(() => {
 function replacedSnapshots(frames: readonly ServerFrame[]): AgentSnapshot[] {
   return frames.flatMap((frame) => frame.type === "event" && frame.envelope.event.kind === "agent.replaced"
     ? [frame.envelope.event.payload as AgentSnapshot]
+    : []);
+}
+
+/** The patches a run of frames put on the wire, in order. */
+function patchedFrames(frames: readonly ServerFrame[]): AgentPatch[] {
+  return frames.flatMap((frame) => frame.type === "event" && frame.envelope.event.kind === "agent.patched"
+    ? [frame.envelope.event.payload as AgentPatch]
     : []);
 }
 
@@ -2818,12 +2825,10 @@ describe("PrimeBackend", () => {
       expect(error).toHaveBeenCalledWith("Prime agent refresh recovered");
       const snapshot = await backend.agentSnapshot(agentId);
       expect(snapshot?.dashboard?.recap).toBe("Recovered refresh detail");
-      expect(frames).toContainEqual(expect.objectContaining({
-        type: "event",
-        envelope: expect.objectContaining({
-          event: expect.objectContaining({ kind: "agent.replaced" }),
-        }),
-      }));
+      // The recovery reached the wire and not only the cache. Only the
+      // dashboard moved, so only the dashboard is what goes out.
+      expect(patchedFrames(frames).some((patch) =>
+        patch.dashboard?.recap === "Recovered refresh detail")).toBe(true);
       attached?.detach();
     } finally {
       fixture.snapshot = originalSnapshot;
@@ -3521,4 +3526,367 @@ describe("PrimeBackend", () => {
     }
   });
 
+});
+
+/*
+ * What a live agent actually puts on the wire.
+ *
+ * A streaming reply used to republish the whole transcript on every daemon
+ * event — hundreds of kilobytes a tick for a delta that only touched the last
+ * row. These tests are about the frames, not the cached snapshot: the cache
+ * has always been right, and was never what cost anything.
+ */
+describe("PrimeBackend incremental publication", () => {
+  const pristineSnapshot = structuredClone(fixture.snapshot);
+  const pristineStats = structuredClone(fixture.sessionStats);
+
+  interface LiveStream {
+    backend: PrimeBackend;
+    agentId: string;
+    frames: ServerFrame[];
+    /** The daemon messages the next refresh will read. */
+    daemonMessages: Record<string, unknown>[];
+    deliver(event: unknown): Promise<void>;
+    snapshot(): Promise<AgentSnapshot>;
+    close(): Promise<void>;
+  }
+
+  async function liveStream(messages: Record<string, unknown>[]): Promise<LiveStream> {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.snapshot = {
+      state: {
+        sessionId: "private-session",
+        activeSessionId: "private-active",
+        sessionName: "Live agent",
+        isStreaming: false,
+        isCompacting: false,
+        isBashRunning: false,
+      },
+      messages,
+      children: [],
+    };
+    // Nothing to report, so the throttled context-stat probe cannot publish a
+    // frame of its own in among the ones under test.
+    fixture.sessionStats = {};
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    const agentId = backend.catalog().agents[0]!.id;
+    await backend.agentSnapshot(agentId);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const frames: ServerFrame[] = [];
+    const attached = hub.attach(`agent:${agentId}`, null, (frame) => { frames.push(frame); });
+    const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+    return {
+      backend,
+      agentId,
+      frames,
+      daemonMessages: fixture.snapshot.messages as Record<string, unknown>[],
+      async deliver(event: unknown) {
+        listener(event);
+        // Past the refresh queue's own coalescing delay, so a full refresh has
+        // been and gone by the time the frames are read.
+        await new Promise((resolve) => setTimeout(resolve, 160));
+      },
+      async snapshot() {
+        return (await backend.agentSnapshot(agentId))!;
+      },
+      async close() {
+        fixture.snapshot = structuredClone(pristineSnapshot);
+        fixture.sessionStats = structuredClone(pristineStats);
+        attached?.detach();
+        hub.close();
+        await backend.close();
+      },
+    };
+  }
+
+  function textMessage(id: string, role: string, text: string, second: number): Record<string, unknown> {
+    return {
+      id,
+      role,
+      content: text,
+      timestamp: `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`,
+    };
+  }
+
+  it("sends an appended daemon message as an addition, not as the whole transcript", async () => {
+    const live = await liveStream([
+      textMessage("m1", "user", "First", 0),
+      textMessage("m2", "assistant", "Second", 1),
+    ]);
+    try {
+      const before = await live.snapshot();
+      live.daemonMessages.push(textMessage("m3", "assistant", "Third", 2));
+      await live.deliver({ type: "session_event", event: { type: "message_end" } });
+
+      const patches = patchedFrames(live.frames);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]!.added?.map((row) => row.text)).toEqual(["Third"]);
+      expect(patches[0]!.removed).toBeUndefined();
+      expect(patches[0]!.updated).toBeUndefined();
+      expect(patches[0]!.revision).toBe(before.revision + 1);
+      expect(replacedSnapshots(live.frames)).toEqual([]);
+      // The revision on the patch is the one the phone's next send is checked
+      // against, so it has to be the one the cache now holds.
+      expect((await live.snapshot()).revision).toBe(patches[0]!.revision);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("sends a changed streaming row as an update of that row alone", async () => {
+    const live = await liveStream([textMessage("m1", "user", "Go", 0)]);
+    try {
+      const streaming = {
+        id: "live",
+        role: "assistant",
+        content: [{ type: "text", text: "Thin" }],
+        timestamp: "2026-01-01T00:00:05.000Z",
+      };
+      fixture.snapshot.streamingMessage = streaming;
+      await live.deliver({ type: "session_event", event: { type: "message_start" } });
+      expect(patchedFrames(live.frames)[0]?.added?.map((row) => row.text)).toEqual(["Thin"]);
+
+      live.frames.length = 0;
+      fixture.snapshot.streamingMessage = { ...streaming, content: [{ type: "text", text: "Thinking about it" }] };
+      await live.deliver({ type: "session_event", event: { type: "streaming_update" } });
+
+      const patches = patchedFrames(live.frames);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]!.updated?.map((row) => row.text)).toEqual(["Thinking about it"]);
+      expect(patches[0]!.added).toBeUndefined();
+      expect(patches[0]!.removed).toBeUndefined();
+      expect(patches[0]!.dashboard).toBeUndefined();
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("names the rows a front trim dropped instead of resending what survived", async () => {
+    const messages = Array.from({ length: 1_000 }, (_, index) =>
+      textMessage(`m${index}`, index % 2 === 0 ? "user" : "assistant", `Step ${index}`, index % 60));
+    const live = await liveStream(messages);
+    try {
+      const before = await live.snapshot();
+      expect(before.messages).toHaveLength(1_000);
+      live.daemonMessages.push(textMessage("m1000", "user", "Step 1000", 10));
+      live.daemonMessages.push(textMessage("m1001", "assistant", "Step 1001", 11));
+      await live.deliver({ type: "session_event", event: { type: "message_end" } });
+
+      const patches = patchedFrames(live.frames);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]!.removed).toEqual([before.messages[0]!.id, before.messages[1]!.id]);
+      expect(patches[0]!.added?.map((row) => row.text)).toEqual(["Step 1000", "Step 1001"]);
+      expect(patches[0]!.updated).toBeUndefined();
+      expect(replacedSnapshots(live.frames)).toEqual([]);
+      const after = await live.snapshot();
+      expect(after.messages).toHaveLength(1_000);
+      expect(after.messages[0]!.id).toBe(before.messages[2]!.id);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("falls back to a replacement when surviving rows changed places", async () => {
+    const live = await liveStream([
+      textMessage("m1", "user", "First", 0),
+      textMessage("m2", "assistant", "Second", 1),
+      textMessage("m3", "user", "Third", 2),
+    ]);
+    try {
+      // A patch can say what went, what changed and what was appended. It
+      // cannot say that history was rewritten, so the snapshot has to go.
+      const reordered = [live.daemonMessages[2]!, live.daemonMessages[0]!, live.daemonMessages[1]!];
+      live.daemonMessages.splice(0, 3, ...reordered);
+      await live.deliver({ type: "session_event", event: { type: "session_action_update" } });
+
+      expect(patchedFrames(live.frames)).toEqual([]);
+      const replaced = replacedSnapshots(live.frames);
+      expect(replaced).toHaveLength(1);
+      expect(replaced[0]!.messages.map((row) => row.text)).toEqual(["Third", "First", "Second"]);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("sends a state change on its own and says when a goal is gone", async () => {
+    const live = await liveStream([textMessage("m1", "user", "Go", 0)]);
+    try {
+      const state = fixture.snapshot.state as Record<string, unknown>;
+      state.goal = { active: true, status: "active", objective: "Ship the shell" };
+      await live.deliver({ type: "session_event", event: { type: "session_action_update" } });
+      expect(patchedFrames(live.frames).at(-1)?.goal).toMatchObject({ objective: "Ship the shell" });
+
+      live.frames.length = 0;
+      state.isStreaming = true;
+      await live.deliver({ type: "session_event", event: { type: "session_action_update" } });
+      const streamingPatch = patchedFrames(live.frames);
+      expect(streamingPatch).toHaveLength(1);
+      expect(streamingPatch[0]!.dashboard?.status).toBe("responding");
+      expect(streamingPatch[0]!.added).toBeUndefined();
+      expect(streamingPatch[0]!.updated).toBeUndefined();
+      expect(streamingPatch[0]!.removed).toBeUndefined();
+      expect(streamingPatch[0]!.goal).toBeUndefined();
+
+      live.frames.length = 0;
+      delete state.goal;
+      await live.deliver({ type: "session_event", event: { type: "session_action_update" } });
+      const cleared = patchedFrames(live.frames);
+      expect(cleared).toHaveLength(1);
+      // Absent means unchanged on this wire, so "gone" has to be said out loud.
+      expect(cleared[0]!.goal).toBeNull();
+      expect(cleared[0]!.dashboard).toBeUndefined();
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("publishes nothing and holds the revision when a refresh changed nothing", async () => {
+    const live = await liveStream([
+      textMessage("m1", "user", "First", 0),
+      textMessage("m2", "assistant", "Second", 1),
+    ]);
+    try {
+      const before = await live.snapshot();
+      await live.deliver({ type: "session_event", event: { type: "session_action_update" } });
+
+      expect(live.frames).toEqual([]);
+      // A revision that moved with nothing on the wire would fail the phone's
+      // next precondition and cost it a full refetch over HTTP.
+      expect((await live.snapshot()).revision).toBe(before.revision);
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("prefers a replacement once a patch would carry most of the transcript", async () => {
+    const live = await liveStream(Array.from({ length: 60 }, (_, index) =>
+      textMessage(`m${index}`, index % 2 === 0 ? "user" : "assistant", `Step ${index}`, index)));
+    try {
+      for (let index = 0; index < 40; index += 1) {
+        live.daemonMessages[index]!.content = `Rewritten step ${index}`;
+      }
+      await live.deliver({ type: "session_event", event: { type: "message_end" } });
+
+      expect(patchedFrames(live.frames)).toEqual([]);
+      const replaced = replacedSnapshots(live.frames);
+      expect(replaced).toHaveLength(1);
+      expect(replaced[0]!.messages[0]!.text).toBe("Rewritten step 0");
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("projects a streaming token batch without asking the daemon for the transcript again", async () => {
+    const live = await liveStream([textMessage("m1", "user", "Go", 0)]);
+    try {
+      live.frames.length = 0;
+      fixture.snapshotCalls = 0;
+      const streaming = {
+        id: "live",
+        role: "assistant",
+        content: [{ type: "text", text: "First tokens" }],
+        timestamp: "2026-01-01T00:00:05.000Z",
+      };
+      // The adapter tracks the streaming message itself and reads it at the end
+      // of its snapshot call, so a refresh racing this event sees this object.
+      fixture.snapshot.streamingMessage = streaming;
+      await live.deliver({ type: "session_event", event: { type: "message_update", message: streaming } });
+
+      expect(fixture.snapshotCalls).toBe(0);
+      const patches = patchedFrames(live.frames);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]!.added?.map((row) => row.text)).toEqual(["First tokens"]);
+      expect(replacedSnapshots(live.frames)).toEqual([]);
+      // The equivalence the fast path rests on: the same daemon state through
+      // the full projection produces exactly these rows.
+      const settled = await live.snapshot();
+      expect(settled.messages).toEqual(projectPrimeTranscript(live.daemonMessages, streaming));
+
+      // The end of the message is once per message, not once per token, and
+      // takes the full refresh — which must not regress what the deltas built.
+      live.frames.length = 0;
+      live.daemonMessages.push(textMessage("a1", "assistant", "First tokens", 6));
+      delete fixture.snapshot.streamingMessage;
+      await live.deliver({ type: "session_event", event: { type: "message_end" } });
+
+      expect(fixture.snapshotCalls).toBeGreaterThan(0);
+      expect(replacedSnapshots(live.frames)).toEqual([]);
+      const ended = patchedFrames(live.frames);
+      expect(ended).toHaveLength(1);
+      expect(ended[0]!.removed).toEqual([settled.messages.at(-1)!.id]);
+      expect(ended[0]!.added?.map((row) => row.text)).toEqual(["First tokens"]);
+      expect((await live.snapshot()).messages.at(-1)!.state).toBe("complete");
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("adds a row when the streaming message grows a tool call mid-batch", async () => {
+    const live = await liveStream([textMessage("m1", "user", "Go", 0)]);
+    try {
+      const first = {
+        id: "live",
+        role: "assistant",
+        content: [{ type: "text", text: "Working on it" }],
+        timestamp: "2026-01-01T00:00:05.000Z",
+      };
+      fixture.snapshot.streamingMessage = first;
+      await live.deliver({ type: "session_event", event: { type: "message_update", message: first } });
+
+      live.frames.length = 0;
+      fixture.snapshotCalls = 0;
+      const withTool = {
+        ...first,
+        content: [
+          { type: "text", text: "Working on it" },
+          { type: "toolCall", id: "call-1", name: "ipython", arguments: { code: "print(1)" } },
+        ],
+      };
+      fixture.snapshot.streamingMessage = withTool;
+      await live.deliver({ type: "session_event", event: { type: "message_update", message: withTool } });
+
+      expect(fixture.snapshotCalls).toBe(0);
+      const patches = patchedFrames(live.frames);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]!.added).toHaveLength(1);
+      expect(patches[0]!.added![0]!.presentation?.kind).toBe("python");
+      expect(patches[0]!.removed).toBeUndefined();
+      expect((await live.snapshot()).messages).toEqual(projectPrimeTranscript(live.daemonMessages, withTool));
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("falls back to a refresh for a delta with no projection to build on", async () => {
+    const live = await liveStream([textMessage("m1", "user", "Go", 0)]);
+    try {
+      // The ordering that produces this is a connection whose first projection
+      // has not landed yet. Reached here directly, because a record only ever
+      // replays its buffered events after that projection.
+      const connections = Reflect.get(live.backend, "connections") as Map<string, { projection?: unknown }>;
+      delete connections.get(live.agentId)!.projection;
+
+      live.frames.length = 0;
+      fixture.snapshotCalls = 0;
+      const streaming = {
+        id: "live",
+        role: "assistant",
+        content: [{ type: "text", text: "First tokens" }],
+        timestamp: "2026-01-01T00:00:05.000Z",
+      };
+      fixture.snapshot.streamingMessage = streaming;
+      await live.deliver({ type: "session_event", event: { type: "message_update", message: streaming } });
+
+      // No update is lost: it went the long way instead.
+      expect(fixture.snapshotCalls).toBeGreaterThan(0);
+      expect(replacedSnapshots(live.frames)).toHaveLength(1);
+      expect((await live.snapshot()).messages.at(-1)!.text).toBe("First tokens");
+    } finally {
+      await live.close();
+    }
+  });
 });
