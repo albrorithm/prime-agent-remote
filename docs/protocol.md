@@ -73,7 +73,7 @@ Mutations use HTTP instead of WebSocket. Every request includes:
 - a UUID `requestId`;
 - an `expectedRevision` precondition (except where noted below).
 
-Accepted request IDs are cached briefly so network retries do not duplicate prompts or approvals. Message and session-command mutations use Prime Agent's standard steering delivery when a run is active. Prime Agent applies the session's configured steering queue mode. A mutation route also enforces the session mutation rate limit (`docs/security.md`); sign-out is the one documented exception, since revoking a session must never be the one request that session cannot make. Sign-out and device revocation are also the two routes that carry neither a `requestId` nor an `expectedRevision`: neither is replayable in a way a cache would help, and neither targets an agent whose revision could have moved.
+Accepted request IDs are cached briefly so network retries do not duplicate prompts or approvals. Message mutations carry a `delivery`: `"steer"` reaches the current run at its next boundary, `"follow_up"` waits until the run is idle, and both start at once when nothing is running. It defaults to `"steer"`, which is what every message did before the field existed. Session-command mutations always use the steering lane. A mutation route also enforces the session mutation rate limit (`docs/security.md`); sign-out is the one documented exception, since revoking a session must never be the one request that session cannot make. Sign-out and device revocation are also the two routes that carry neither a `requestId` nor an `expectedRevision`: neither is replayable in a way a cache would help, and neither targets an agent whose revision could have moved.
 
 ## REST routes
 
@@ -124,7 +124,9 @@ Both return `202 { accepted: true, requestId }`.
 
 ### Attention
 
-- `POST /api/v1/attention/:id/respond` — `{ requestId, expectedRevision, optionId }`. `202` with a `MutationAccepted` body.
+An `AttentionRequest` carries `{ id, agentId, kind, title, detail?, revision, reply, options, createdAt, expiresAt? }`. `reply` is `{ kind: "choice" }` or `{ kind: "text", multiline, placeholder?, prefill? }`. A text request still carries `options`, but only the one entry that cancels it — there is no menu to pick from the way there is on a `choice` request. `expiresAt`, when present, is the instant the daemon's own deadline lapses; the gateway drops the request at that point and publishes `agent.attention_resolved`. Its absence means no known deadline, not that one exists silently.
+
+- `POST /api/v1/attention/:id/respond` — `{ requestId, expectedRevision, optionId?, text? }`, exactly one of `optionId` or `text`. Which one a request accepts is its `reply` kind: a `choice` request is answered with one of its `options`; a `text` request is answered with typed `text` (bounded to 32,000 characters) or with its own cancel option's id. Answering a `choice` request with `text`, giving a `text` request an `optionId` other than its cancel option, or sending a line break in `text` to a request whose `reply.multiline` is `false`, all fail with `403`. `202` with a `MutationAccepted` body on success.
 
 ### Slash commands
 
@@ -144,7 +146,7 @@ Command responses use a closed result union (`SlashCommandResult`: `session_acce
 
 ### Image messages
 
-`POST /api/v1/agents/:id/messages` accepts `text` plus up to three `images`. Each image is exactly `{ type: "image", mimeType, data }`, where `mimeType` is JPEG, PNG, or WebP and `data` is canonical base64. Either text or at least one image is required. The gateway validates count, per-image size, total size, canonical encoding, and MIME signature before calling Prime Agent's native image prompt API.
+`POST /api/v1/agents/:id/messages` accepts `text` plus up to three `images`, plus a `delivery` of `"steer"` or `"follow_up"` (default `"steer"`; see [Mutations](#mutations)). Each image is exactly `{ type: "image", mimeType, data }`, where `mimeType` is JPEG, PNG, or WebP and `data` is canonical base64. Either text or at least one image is required. The gateway validates count, per-image size, total size, canonical encoding, and MIME signature before calling Prime Agent's native image prompt API.
 
 For a resumable inactive agent, the same revision-checked and request-ID-deduplicated message mutation first resolves the server-only saved-session path, creates and attaches the live Prime runtime, then admits the text prompt. The composer accepts text while inactive and describes this as `Send a message to wake`. Images and slash commands remain unavailable until the session is live.
 
@@ -161,3 +163,18 @@ attention: dialog | question | error | null
 ```
 
 This avoids treating transport loss, agent lifecycle, and user attention as the same status.
+
+## Session queue
+
+An `AgentSnapshot` may carry an optional `queue`: what Prime Agent holds for the session but has not yet handed to the model. It is a projection of Prime Agent's own queue, never a promise about when an entry will run.
+
+```text
+queue: {
+  steering:    SessionQueueEntry[]  // delivered at the current run's next boundary, in order
+  followUp:    SessionQueueEntry[]  // started once the current run is idle, in order
+  queuedCount: number               // everything queued, including entries the two lists above don't name
+  active?:     { kind: "turn" | "session_command", phase: "preparing" | "committing" | "running" }
+}
+```
+
+Each `SessionQueueEntry` is `{ text, truncated }`, with `text` cut at 2,000 characters; both lists are capped at 25 entries, and `queuedCount` also covers session commands and anything past that cap. `active`, when present, is what Prime Agent says it is running right now. `queue` itself is absent when the daemon build does not report queue state at all — which is unknown, not empty.

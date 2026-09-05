@@ -29,8 +29,8 @@ describe("applyGatewayEvent", () => {
     const withAttention: AgentSnapshot = {
       ...snapshot,
       attention: [
-        { id: "a", agentId: "agent-1", kind: "dialog", title: "A", revision: 1, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
-        { id: "b", agentId: "agent-1", kind: "question", title: "B", revision: 1, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
+        { id: "a", agentId: "agent-1", kind: "dialog", title: "A", revision: 1, reply: { kind: "choice" }, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
+        { id: "b", agentId: "agent-1", kind: "question", title: "B", revision: 1, reply: { kind: "choice" }, options: [], createdAt: "2026-01-01T00:00:00.000Z" },
       ],
     };
     const result = applyGatewayEvent(withAttention, { kind: "agent.attention_resolved", payload: { id: "a" } });
@@ -50,6 +50,21 @@ describe("applyGatewayEvent", () => {
       payload: { ...snapshot, revision: 4 },
     });
     expect(result).toBe(newer);
+  });
+
+  it("carries a replacement's queue through untouched", () => {
+    const withQueue: AgentSnapshot = {
+      ...snapshot,
+      revision: 2,
+      queue: {
+        steering: [{ text: "do this next", truncated: false }],
+        followUp: [],
+        queuedCount: 1,
+      },
+    };
+    const result = applyGatewayEvent(snapshot, { kind: "agent.replaced", payload: withQueue });
+    expect(result).toBe(withQueue);
+    expect(result.queue).toEqual(withQueue.queue);
   });
 });
 

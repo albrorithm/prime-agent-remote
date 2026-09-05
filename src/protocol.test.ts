@@ -15,6 +15,7 @@ import {
   cellOutputSchema,
   readPairingFragment,
   sessionDashboardSchema,
+  MAX_QUEUE_ENTRIES_PER_LANE,
   type AgentSummary,
 } from "./protocol.js";
 
@@ -348,5 +349,128 @@ describe("strict mutation request schemas", () => {
     const base = { token: TOKEN };
     expect(pairRequestSchema.safeParse(base).success).toBe(true);
     expect(pairRequestSchema.safeParse({ ...base, extra: true }).success).toBe(false);
+  });
+});
+
+describe("attentionResponseSchema", () => {
+  const base = { requestId: crypto.randomUUID(), expectedRevision: 1 };
+
+  it("accepts optionId alone", () => {
+    expect(attentionResponseSchema.safeParse({ ...base, optionId: "confirm" }).success).toBe(true);
+  });
+
+  it("accepts text alone, including an empty string", () => {
+    expect(attentionResponseSchema.safeParse({ ...base, text: "an answer" }).success).toBe(true);
+    expect(attentionResponseSchema.safeParse({ ...base, text: "" }).success).toBe(true);
+  });
+
+  it("rejects both optionId and text together", () => {
+    expect(attentionResponseSchema.safeParse({ ...base, optionId: "confirm", text: "an answer" }).success).toBe(false);
+  });
+
+  it("rejects neither optionId nor text", () => {
+    expect(attentionResponseSchema.safeParse(base).success).toBe(false);
+  });
+
+  it("rejects an unknown field", () => {
+    expect(attentionResponseSchema.safeParse({ ...base, optionId: "confirm", extra: true }).success).toBe(false);
+  });
+});
+
+describe("sendMessageRequestSchema delivery", () => {
+  const base = { requestId: crypto.randomUUID(), expectedRevision: 1, text: "hi" };
+
+  it("defaults to steer when omitted", () => {
+    const parsed = sendMessageRequestSchema.parse(base);
+    expect(parsed.delivery).toBe("steer");
+  });
+
+  it("accepts an explicit follow_up", () => {
+    const parsed = sendMessageRequestSchema.parse({ ...base, delivery: "follow_up" });
+    expect(parsed.delivery).toBe("follow_up");
+  });
+
+  it("rejects a delivery value that is not one of the two lanes", () => {
+    expect(sendMessageRequestSchema.safeParse({ ...base, delivery: "immediate" }).success).toBe(false);
+  });
+});
+
+describe("agentSnapshotSchema queue", () => {
+  const queueEntry = { text: "do this next", truncated: false };
+
+  it("accepts a snapshot with a well-formed queue", () => {
+    const snapshot = {
+      ...snapshotWith(undefined),
+      queue: {
+        steering: [queueEntry],
+        followUp: [],
+        queuedCount: 1,
+        active: { kind: "turn", phase: "running" },
+      },
+    };
+    expect(agentSnapshotSchema.safeParse(snapshot).success).toBe(true);
+  });
+
+  it("accepts a snapshot with no queue at all", () => {
+    expect(agentSnapshotSchema.safeParse(snapshotWith(undefined)).success).toBe(true);
+  });
+
+  it("rejects a lane over MAX_QUEUE_ENTRIES_PER_LANE", () => {
+    const snapshot = {
+      ...snapshotWith(undefined),
+      queue: {
+        steering: Array.from({ length: MAX_QUEUE_ENTRIES_PER_LANE + 1 }, () => queueEntry),
+        followUp: [],
+        queuedCount: MAX_QUEUE_ENTRIES_PER_LANE + 1,
+      },
+    };
+    expect(agentSnapshotSchema.safeParse(snapshot).success).toBe(false);
+  });
+
+  it("rejects an unknown active.phase", () => {
+    const snapshot = {
+      ...snapshotWith(undefined),
+      queue: {
+        steering: [],
+        followUp: [],
+        queuedCount: 0,
+        active: { kind: "turn", phase: "thinking" },
+      },
+    };
+    expect(agentSnapshotSchema.safeParse(snapshot).success).toBe(false);
+  });
+});
+
+describe("attentionRequestSchema reply", () => {
+  function snapshotWithAttention(attention: unknown): unknown {
+    return { ...snapshotWith(undefined), attention: [attention] };
+  }
+
+  it("parses a text request carrying multiline, prefill and expiresAt", () => {
+    const request = {
+      id: "attention-1",
+      agentId: "agent-1",
+      kind: "question",
+      title: "Rename this?",
+      revision: 1,
+      reply: { kind: "text", multiline: true, prefill: "current-name" },
+      options: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-01-01T00:05:00.000Z",
+    };
+    expect(agentSnapshotSchema.safeParse(snapshotWithAttention(request)).success).toBe(true);
+  });
+
+  it("rejects an attention request missing reply", () => {
+    const request = {
+      id: "attention-1",
+      agentId: "agent-1",
+      kind: "question",
+      title: "Rename this?",
+      revision: 1,
+      options: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    expect(agentSnapshotSchema.safeParse(snapshotWithAttention(request)).success).toBe(false);
   });
 });

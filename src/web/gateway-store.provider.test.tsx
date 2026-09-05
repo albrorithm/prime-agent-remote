@@ -1051,6 +1051,7 @@ describe("GatewayProvider recovery and state ownership", () => {
       kind: "question",
       title: "Question",
       revision: 1,
+      reply: { kind: "choice" },
       options: [],
       createdAt: "2026-01-01T00:00:00.000Z",
     }];
@@ -1062,7 +1063,7 @@ describe("GatewayProvider recovery and state ownership", () => {
     await waitFor(() => expect(result.current.selectedSnapshot?.agentId).toBe("agent-a"));
 
     let responding!: Promise<void>;
-    act(() => { responding = result.current.respond("attention", 1, "yes"); });
+    act(() => { responding = result.current.respond("attention", 1, { optionId: "yes" }); });
     await act(() => result.current.selectAgent("agent-b"));
     response.resolve({ accepted: true, requestId: "request", revision: 9 });
     await act(() => responding);

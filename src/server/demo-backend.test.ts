@@ -26,6 +26,7 @@ describe("DemoBackend", () => {
       expectedRevision: initial!.revision,
       text: "first",
       images: [],
+      delivery: "steer",
     });
     const second = await backend.sendMessage({
       agentId,
@@ -33,6 +34,7 @@ describe("DemoBackend", () => {
       expectedRevision: first.revision,
       text: "second",
       images: [],
+      delivery: "steer",
     });
 
     const superseded = (await backend.agentSnapshot(agentId))!.messages
@@ -61,6 +63,7 @@ describe("DemoBackend", () => {
       expectedRevision: snapshot!.revision,
       text: "image",
       images,
+      delivery: "steer",
     })).rejects.toBeInstanceOf(BackendCapabilityError);
     expect((await backend.agentSnapshot("root-mobile"))?.revision).toBe(snapshot?.revision);
     await backend.close();
@@ -149,6 +152,7 @@ describe("DemoBackend", () => {
           expectedRevision: revision,
           text: `${index}:`.padEnd(100_000, "x"),
           images: [],
+          delivery: "steer",
         });
         revision = accepted.revision;
       }
@@ -187,6 +191,7 @@ describe("DemoBackend", () => {
         expectedRevision: initial.revision,
         text: "stream this",
         images: [],
+        delivery: "steer",
       });
       const internal = (Reflect.get(backend, "snapshots") as Map<string, AgentSnapshot>).get(agentId)!;
       const currentChars = internal.messages.reduce((total, message) => total + message.text.length, 0);
@@ -210,6 +215,90 @@ describe("DemoBackend", () => {
       expect((await backend.agentSnapshot(agentId))?.messages.some((message) => message.id === "old-large-message"))
         .toBe(false);
       attached?.detach();
+    } finally {
+      await backend.close();
+      hub.close();
+    }
+  });
+
+  it("resolves attention requests according to their reply kind", async () => {
+    const backend = new DemoBackend();
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    // The seeded dialog for child-review answers with a choice; text requests
+    // aren't part of the fixed demo state, so this test builds one by reaching
+    // into the backend's internal snapshot, the same seam the transcript-trim
+    // test above uses.
+    const agentId = "root-mobile";
+    const internal = (Reflect.get(backend, "snapshots") as Map<string, AgentSnapshot>).get(agentId)!;
+    const seedTextAttention = (id: string, multiline: boolean): void => {
+      internal.attention.push({
+        id,
+        agentId,
+        kind: "question",
+        title: "What should the file be named?",
+        revision: 1,
+        reply: { kind: "text", multiline },
+        options: [{ id: "__demo_cancel__", label: "Cancel", tone: "danger" }],
+        createdAt: new Date().toISOString(),
+      });
+    };
+    try {
+      // A choice request refuses a typed reply outright.
+      await expect(backend.resolveAttention({
+        attentionId: "attention-demo-dialog",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        text: "not a choice",
+      })).rejects.toThrow("This request expects a choice");
+
+      // A single-line text request refuses a reply with a line break.
+      seedTextAttention("attention-single-line", false);
+      await expect(backend.resolveAttention({
+        attentionId: "attention-single-line",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        text: "line one\nline two",
+      })).rejects.toThrow("This request expects a single line");
+
+      // An optionId naming anything other than the text request's own cancel
+      // option is refused, same as an unknown option on a choice request.
+      await expect(backend.resolveAttention({
+        attentionId: "attention-single-line",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        optionId: "not-a-real-option",
+      })).rejects.toThrow("Unknown response option");
+
+      // A well-formed single-line reply resolves the request.
+      const resolved = await backend.resolveAttention({
+        attentionId: "attention-single-line",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        text: "a single line",
+      });
+      expect(resolved.accepted).toBe(true);
+      expect(internal.attention.some((item) => item.id === "attention-single-line")).toBe(false);
+
+      // A multiline text request accepts a reply carrying a line break.
+      seedTextAttention("attention-multiline", true);
+      const multilineResolved = await backend.resolveAttention({
+        attentionId: "attention-multiline",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        text: "line one\nline two",
+      });
+      expect(multilineResolved.accepted).toBe(true);
+
+      // The text request's own cancel option is still a valid response.
+      seedTextAttention("attention-cancel", false);
+      const cancelled = await backend.resolveAttention({
+        attentionId: "attention-cancel",
+        requestId: crypto.randomUUID(),
+        expectedRevision: 1,
+        optionId: "__demo_cancel__",
+      });
+      expect(cancelled.accepted).toBe(true);
     } finally {
       await backend.close();
       hub.close();

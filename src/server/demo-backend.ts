@@ -676,6 +676,7 @@ function initialSnapshot(summary: AgentSummary): AgentSnapshot {
           title: "Confirm before deleting the stale build cache?",
           detail: "The active extension is asking to confirm before it proceeds. Demo mode never performs the underlying action — this card exercises the extension dialog flow.",
           revision: 1,
+          reply: { kind: "choice" },
           options: [
             { id: "__demo_cancel__", label: "Decline", tone: "danger" },
             { id: "confirm", label: "Confirm", tone: "safe" },
@@ -761,6 +762,8 @@ export class DemoBackend implements AgentBackend {
     if (input.expectedRevision !== snapshot.revision) throw new BackendConflictError("The agent changed. Refresh and try again.");
     if (input.text.trimStart().startsWith("/")) throw new BackendCapabilityError("Use the session command endpoint");
     if (input.images.length > 0) throw new BackendCapabilityError("Demo mode does not accept image attachments");
+    // input.delivery (steer vs follow_up) is accepted and ignored: demo has no
+    // run boundary for a message to wait on, so every message starts at once.
     if (!summary.capabilities.send) this.wakeAgent(summary, snapshot);
 
     this.clearTimers(input.agentId);
@@ -1093,7 +1096,19 @@ export class DemoBackend implements AgentBackend {
     if (!snapshot) throw new BackendNotFoundError("Attention request not found");
     const request = snapshot.attention.find((item) => item.id === input.attentionId)!;
     if (input.expectedRevision !== request.revision) throw new BackendConflictError("This request has already changed");
-    if (!request.options.some((option) => option.id === input.optionId)) throw new BackendCapabilityError("Unknown response option");
+    if (request.reply.kind === "choice") {
+      if (input.text !== undefined) throw new BackendCapabilityError("This request expects a choice");
+      if (!request.options.some((option) => option.id === input.optionId)) throw new BackendCapabilityError("Unknown response option");
+    } else {
+      // A text request carries only its cancel option, so an optionId is only
+      // ever valid if it names that option.
+      if (input.optionId !== undefined && !request.options.some((option) => option.id === input.optionId)) {
+        throw new BackendCapabilityError("Unknown response option");
+      }
+      if (input.text !== undefined && request.reply.multiline === false && /[\r\n\u2028\u2029]/u.test(input.text)) {
+        throw new BackendCapabilityError("This request expects a single line");
+      }
+    }
     snapshot.attention = snapshot.attention.filter((item) => item.id !== input.attentionId);
     snapshot.revision += 1;
     this.markAgent(snapshot.agentId, "idle", null);

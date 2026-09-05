@@ -7,7 +7,10 @@ import { StringDecoder } from "node:string_decoder";
 import { resolvePrimeModule } from "./prime-module.js";
 import {
   DIRECT_SLASH_COMMAND_NAMES,
+  MAX_ATTENTION_TEXT_CHARS,
   MAX_IMAGE_REQUEST_BASE64_CHARS,
+  MAX_QUEUE_ENTRIES_PER_LANE,
+  MAX_QUEUE_ENTRY_CHARS,
   SESSION_SLASH_COMMAND_NAMES,
 } from "../protocol.js";
 import type {
@@ -16,6 +19,7 @@ import type {
   AgentMessageRelationship,
   AgentSnapshot,
   AgentSummary,
+  AttentionReply,
   AttentionRequest,
   CatalogSnapshot,
   CellOutput,
@@ -30,6 +34,8 @@ import type {
   SessionDashboard,
   SessionDashboardChild,
   SessionDashboardRefine,
+  SessionQueue,
+  SessionQueueEntry,
   SlashCommandAccepted,
   SlashCommandCatalog,
   SlashCommandCatalogEntry,
@@ -44,6 +50,7 @@ import {
   BackendConflictError,
   BackendNotFoundError,
   CoalescedRefreshQueue,
+  TEXT_ATTENTION_PROJECTION_DEFAULT,
   uniqueSessionName,
   withSerialLock,
   type AttachmentData,
@@ -115,6 +122,19 @@ interface PrimeSessionSummary {
   model?: { input?: string[] };
 }
 
+/**
+ * Prime's own queue for this session, as the connection snapshot reports it.
+ * Absent on builds that predate it — which is why every field below is only
+ * ever read through a validated copy, and why the projection distinguishes
+ * "no queue reported" from "queue is empty".
+ */
+interface PrimeSessionActions {
+  queuedCount?: number;
+  steering: string[];
+  followUps: string[];
+  active?: { kind: "turn" | "session_command"; phase: "preparing" | "committing" | "running" };
+}
+
 interface PrimeSnapshot {
   state: {
     activeSessionId?: string;
@@ -124,6 +144,7 @@ interface PrimeSnapshot {
     isCompacting: boolean;
     isBashRunning: boolean;
     recap?: string;
+    sessionActions?: PrimeSessionActions;
     goal?: {
       active?: boolean;
       status?: string;
@@ -260,14 +281,32 @@ interface ConnectionRecord {
   contextStatsPending?: Promise<void>;
 }
 
+/** The daemon extension dialogs this adapter can carry to a client. */
+type PendingExtensionMethod = "confirm" | "select" | "input" | "editor";
+
 interface PendingExtension {
   publicAgentId: string;
   connection: PrimeConnection;
-  method: "confirm" | "select";
+  method: PendingExtensionMethod;
   payload: Record<string, unknown>;
   revision: number;
   createdAt: string;
+  /**
+   * When the daemon gave the request a deadline, the instant it lapses. The
+   * timer below is what actually drops it; this is so a client can say how
+   * long is left rather than watching a card vanish without warning.
+   */
+  expiresAt?: string;
   timer?: NodeJS.Timeout;
+}
+
+export interface PrimeBackendOptions {
+  /**
+   * Project `input`/`editor` requests as attention instead of cancelling them
+   * on arrival. Defaults to TEXT_ATTENTION_PROJECTION_DEFAULT, whose doc
+   * comment explains why the default is what it is.
+   */
+  projectTextRequests?: boolean;
 }
 
 const ATTACHMENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
@@ -281,6 +320,8 @@ const MAX_MESSAGE_PARTS = 250;
 const MAX_PROJECTED_ATTACHMENTS = 8;
 const MAX_PENDING_EXTENSIONS_PER_AGENT = 8;
 const MAX_PENDING_EXTENSIONS_GLOBAL = 128;
+/** Ceiling on a daemon-supplied dialog timeout, so a silly one cannot park a timer for years. */
+const MAX_ATTENTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const MAX_TRANSCRIPT_TEXT_CHARS = 2 * 1024 * 1024;
 const MAX_TRANSCRIPT_MESSAGE_CHARS = 120_000;
 const THINKING_FULL_MAX_CHARS = 16_000;
@@ -533,6 +574,36 @@ function validatePrimeSummary(value: unknown): PrimeSessionSummary | undefined {
   };
 }
 
+const QUEUE_ACTIVE_KINDS = ["turn", "session_command"] as const;
+const QUEUE_ACTIVE_PHASES = ["preparing", "committing", "running"] as const;
+
+function queueLane(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  /* One character past the wire bound on purpose: it is what tells the
+     projection whether the daemon's entry was longer than we will send. */
+  return value.slice(0, MAX_QUEUE_ENTRIES_PER_LANE).flatMap((entry) =>
+    typeof entry === "string" ? [entry.slice(0, MAX_QUEUE_ENTRY_CHARS + 1)] : []);
+}
+
+function validateSessionActions(value: unknown): PrimeSessionActions | undefined {
+  const record = primeRecord(value);
+  if (!record) return undefined;
+  const activeRecord = primeRecord(record.active);
+  const kind = QUEUE_ACTIVE_KINDS.find((candidate) => candidate === activeRecord?.kind);
+  const phase = QUEUE_ACTIVE_PHASES.find((candidate) => candidate === activeRecord?.phase);
+  /* A kind or phase this build has never heard of drops `active` rather than
+     picking a plausible one: "Prime is not saying" is a truthful projection
+     and "running a turn" would be a guess. `label` is deliberately not read —
+     it is prompt text, and nothing on the wire carries conversation text. */
+  const active = kind && phase ? { kind, phase } : undefined;
+  return {
+    queuedCount: numeric(record.queuedCount),
+    steering: queueLane(record.steering),
+    followUps: queueLane(record.followUps),
+    ...(active ? { active } : {}),
+  };
+}
+
 function validatePrimeSnapshot(value: unknown): PrimeSnapshot {
   const record = primeRecord(value);
   const state = primeRecord(record?.state);
@@ -583,6 +654,7 @@ function validatePrimeSnapshot(value: unknown): PrimeSnapshot {
       isCompacting: state.isCompacting === true,
       isBashRunning: state.isBashRunning === true,
       recap: boundedString(state.recap, 4_000, true),
+      sessionActions: validateSessionActions(state.sessionActions),
       goal,
     },
     messages: Array.isArray(record.messages) ? record.messages : [],
@@ -1456,6 +1528,35 @@ function projectGoal(source: PrimeSnapshot["state"]["goal"]): AgentGoal | undefi
   };
 }
 
+function queueEntry(text: string): SessionQueueEntry {
+  return text.length > MAX_QUEUE_ENTRY_CHARS
+    ? { text: text.slice(0, MAX_QUEUE_ENTRY_CHARS), truncated: true }
+    : { text, truncated: false };
+}
+
+/**
+ * Prime's queue, projected. Undefined when the daemon reported no queue at
+ * all: a build that does not say is not a build with nothing queued, and a
+ * client shown an empty queue for the first would trust a number nobody gave
+ * it. `queuedCount` is the daemon's own total — it counts the session commands
+ * the two lanes never list, and the entries past the per-lane bound.
+ */
+function projectSessionQueue(source: PrimeSessionActions | undefined): SessionQueue | undefined {
+  if (!source) return undefined;
+  const steering = source.steering.map(queueEntry);
+  const followUp = source.followUps.map(queueEntry);
+  return {
+    steering,
+    followUp,
+    // Clamped, not trusted: the wire schema says a non-negative integer, and a
+    // daemon that reports otherwise should not be able to fail the client's parse.
+    queuedCount: source.queuedCount !== undefined
+      ? Math.max(0, Math.trunc(source.queuedCount))
+      : steering.length + followUp.length,
+    ...(source.active ? { active: source.active } : {}),
+  };
+}
+
 function cellOutputBytes(cell: CellOutput): number {
   return (cell.code?.length ?? 0)
     + (cell.stdout?.length ?? 0)
@@ -1574,10 +1675,15 @@ export class PrimeBackend implements AgentBackend {
   private reconnectPromise?: Promise<void>;
   private closed = false;
 
+  private readonly projectTextRequests: boolean;
+
   constructor(
     private readonly moduleSpecifier?: string,
     private readonly socketOverride?: string,
-  ) {}
+    options: PrimeBackendOptions = {},
+  ) {
+    this.projectTextRequests = options.projectTextRequests ?? TEXT_ATTENTION_PROJECTION_DEFAULT;
+  }
 
   onAttentionAdded(listener: AttentionListener): void {
     this.attentionListeners.push(listener);
@@ -1761,7 +1867,9 @@ export class PrimeBackend implements AgentBackend {
       try {
         await record.connection.prompt(input.text || "Image attached.", {
           queueIfBusy: true,
-          streamingBehavior: "steer",
+          // Prime spells the two lanes differently to the wire; this is the
+          // one place the two names are allowed to meet.
+          streamingBehavior: input.delivery === "follow_up" ? "followUp" : "steer",
           images,
         });
       } catch {
@@ -2145,14 +2253,37 @@ export class PrimeBackend implements AgentBackend {
     const pending = this.pendingExtensions.get(input.attentionId);
     if (!pending) throw new BackendNotFoundError("Attention request not found");
     if (pending.revision !== input.expectedRevision) throw new BackendConflictError("This request has already changed");
-    const options = this.extensionOptions(pending);
-    if (!options.some((option) => option.id === input.optionId)) {
-      throw new BackendCapabilityError("Unknown response option");
-    }
+    /* Validated before the claim below, not after: a reply this request cannot
+       accept is a refusal, and a refusal must leave the request answerable. */
     let response: { value: string } | { confirmed: boolean } | { cancelled: true };
-    if (pending.method === "confirm") response = { confirmed: input.optionId === "confirm" };
-    else if (input.optionId === "__prime_cancel__") response = { cancelled: true };
-    else response = { value: input.optionId };
+    if (input.text !== undefined) {
+      if (pending.method !== "input" && pending.method !== "editor") {
+        throw new BackendCapabilityError("This request expects a choice");
+      }
+      // The schema caps this too, but the backend is the authority on what the
+      // daemon is handed: a client is not the last word on its own bounds.
+      if (input.text.length > MAX_ATTENTION_TEXT_CHARS) {
+        throw new BackendCapabilityError("This reply is too long");
+      }
+      /* An `input` extension asked for one line and will paste the answer
+         somewhere that expects one. Folding the breaks away would answer a
+         different question than the one that was asked. */
+      if (pending.method === "input" && /[\r\n\u2028\u2029]/u.test(input.text)) {
+        throw new BackendCapabilityError("This request expects a single line");
+      }
+      response = { value: input.text };
+    } else {
+      const optionId = input.optionId;
+      const options = this.extensionOptions(pending);
+      // A text request's only option is its cancel, so this is also what turns
+      // a chosen option on one of them into a refusal.
+      if (optionId === undefined || !options.some((option) => option.id === optionId)) {
+        throw new BackendCapabilityError("Unknown response option");
+      }
+      if (pending.method === "confirm") response = { confirmed: optionId === "confirm" };
+      else if (optionId === "__prime_cancel__") response = { cancelled: true };
+      else response = { value: optionId };
+    }
 
     // Claim synchronously before the daemon call. A concurrent retry now sees
     // not-found instead of sending a second response.
@@ -2161,7 +2292,15 @@ export class PrimeBackend implements AgentBackend {
     }
     try {
       await pending.connection.respondToExtensionUiRequest(input.attentionId, response);
-    } catch {
+    } catch (error) {
+      /* The daemon tells nobody when a request is answered on another client
+         or when its own timeout fires. A rejection naming the request it no
+         longer holds is the only notice we ever get, so it becomes the "this
+         is gone" answer rather than a generic failure the phone would offer to
+         retry. The daemon's own wording is not echoed: it carries the id. */
+      if (error instanceof Error && /^Unknown extension UI request\b/.test(error.message)) {
+        throw new BackendNotFoundError("This request was already answered or has expired");
+      }
       throw new Error("Prime attention response failed");
     } finally {
       // A failed refresh must not mask the outcome of the response itself.
@@ -2570,31 +2709,37 @@ export class PrimeBackend implements AgentBackend {
       const requestId = boundedId(request?.id);
       const method = request?.method;
       const rawPayload = primeRecord(request?.payload) ?? {};
-      if (requestId && (method === "input" || method === "editor")) {
+      const textRequest = method === "input" || method === "editor";
+      if (requestId && textRequest && !this.projectTextRequests) {
         void record.connection.respondToExtensionUiRequest(requestId, { cancelled: true }).catch(() =>
           console.error("Could not cancel unsupported Prime text dialog"),
         );
-      } else if (requestId && (method === "confirm" || method === "select")) {
+      } else if (requestId && (method === "confirm" || method === "select" || method === "input" || method === "editor")) {
         const previous = this.pendingExtensions.get(requestId);
         if (previous) this.cancelPendingAttention(requestId, previous);
         this.makePendingAttentionRoom(record.publicId);
         const payload = this.sanitizeExtensionPayload(rawPayload);
         const revision = (this.snapshots.get(record.publicId)?.revision ?? 0) + 1;
+        const receivedAt = Date.now();
         const pending: PendingExtension = {
           publicAgentId: record.publicId,
           connection: record.connection,
           method,
           payload,
           revision,
-          createdAt: new Date().toISOString(),
+          createdAt: new Date(receivedAt).toISOString(),
         };
         const timeout = Number(payload.timeout);
         if (Number.isFinite(timeout) && timeout > 0) {
+          const lapsesIn = Math.min(timeout, MAX_ATTENTION_TIMEOUT_MS);
+          // The deadline the client is told and the timer that enforces it are
+          // computed from the same instant, so a card cannot outlive its clock.
+          pending.expiresAt = new Date(receivedAt + lapsesIn).toISOString();
           pending.timer = setTimeout(() => {
             if (this.pendingExtensions.get(requestId) !== pending) return;
             this.removePendingAttention(requestId, pending, true);
             this.queueConnectionRefresh(record);
-          }, Math.min(timeout, 24 * 60 * 60 * 1_000));
+          }, lapsesIn);
         }
         this.pendingExtensions.set(requestId, pending);
         this.publishAttentionAdded(requestId, pending);
@@ -2722,6 +2867,7 @@ export class PrimeBackend implements AgentBackend {
     const attention = [...this.pendingExtensions.entries()]
       .filter(([, pending]) => pending.publicAgentId === record.publicId)
       .map(([id, pending]) => this.projectAttention(id, pending));
+    const queue = projectSessionQueue(source.state.sessionActions);
     const snapshot: AgentSnapshot = {
       revision: record.revision,
       agentId: record.publicId,
@@ -2729,6 +2875,7 @@ export class PrimeBackend implements AgentBackend {
       dashboard,
       attention,
       goal: projectGoal(source.state.goal),
+      ...(queue ? { queue } : {}),
     };
     this.snapshots.set(record.publicId, snapshot);
     const streamId = `agent:${record.publicId}`;
@@ -2832,9 +2979,14 @@ export class PrimeBackend implements AgentBackend {
     const projected: PrimeRecord = {
       title: boundedString(payload.title, 200, true),
       message: boundedString(payload.message, 4_000, true),
+      // A hint inside an empty field, so it is bounded like a label rather
+      // than like body text. `prefill` is the opposite: it is the document the
+      // extension wants edited, and only its length is ours to decide.
+      placeholder: boundedString(payload.placeholder, 200, true),
+      prefill: boundedString(payload.prefill, MAX_ATTENTION_TEXT_CHARS, true),
     };
     const timeout = numeric(payload.timeout);
-    if (timeout !== undefined) projected.timeout = Math.min(timeout, 24 * 60 * 60 * 1_000);
+    if (timeout !== undefined) projected.timeout = Math.min(timeout, MAX_ATTENTION_TIMEOUT_MS);
     if (Array.isArray(payload.options)) {
       const options: unknown[] = [];
       for (const value of payload.options.slice(0, 50)) {
@@ -2956,6 +3108,8 @@ export class PrimeBackend implements AgentBackend {
     if (pending.method === "confirm") {
       return [cancel, { id: "confirm", label: "Confirm", tone: "safe" as const }];
     }
+    // A text request is answered by typing, so cancel is the only button it
+    // has; the same is true of a select whose options the daemon omitted.
     if (pending.method !== "select" || !Array.isArray(pending.payload.options)) return [cancel];
     const projected = pending.payload.options.slice(0, 50).flatMap((value) => {
       if (typeof value === "string") {
@@ -2973,8 +3127,30 @@ export class PrimeBackend implements AgentBackend {
     return [...projected, cancel];
   }
 
+  /**
+   * How the request wants to be answered. `input` and `editor` are the two
+   * text methods, and the difference between them is exactly `multiline`: one
+   * asks for a line and the other for a document.
+   */
+  private attentionReply(pending: PendingExtension): AttentionReply {
+    if (pending.method === "confirm" || pending.method === "select") return { kind: "choice" };
+    // safeLabel, not the stored bound alone: a placeholder sits on one line in
+    // a field, so it gets the same control-character scrub a title gets.
+    const placeholder = safeLabel(pending.payload.placeholder, "", 200);
+    const prefill = boundedString(pending.payload.prefill, MAX_ATTENTION_TEXT_CHARS, true);
+    return {
+      kind: "text",
+      multiline: pending.method === "editor",
+      ...(placeholder ? { placeholder } : {}),
+      ...(prefill ? { prefill } : {}),
+    };
+  }
+
   private projectAttention(id: string, pending: PendingExtension): AttentionRequest {
     const options = this.extensionOptions(pending);
+    // Only `confirm` carries a message; a text request has no second line to
+    // show, so it goes out with no detail rather than an invented one.
+    const detail = boundedString(pending.payload.message, 4_000, true);
     return {
       id,
       agentId: pending.publicAgentId,
@@ -2984,10 +3160,12 @@ export class PrimeBackend implements AgentBackend {
         pending.method === "confirm" ? "Confirmation required" : "Input required",
         200,
       ),
-      detail: boundedString(pending.payload.message, 4_000, true),
+      ...(detail !== undefined ? { detail } : {}),
       revision: pending.revision,
+      reply: this.attentionReply(pending),
       options,
       createdAt: pending.createdAt,
+      ...(pending.expiresAt ? { expiresAt: pending.expiresAt } : {}),
     };
   }
 

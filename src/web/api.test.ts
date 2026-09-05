@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, resume, signOut, stopAgent } from "./api";
+import { bootstrap, createSession, deleteAgent, executeSlashCommand, listDirectories, loadSlashCommandCatalog, onUnauthorized, renameAgent, respondToAttention, resume, sendMessage, signOut, stopAgent } from "./api";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
 
@@ -293,6 +293,73 @@ describe("deleteAgent", () => {
       expectedRevision: 8,
       confirmName: "Previous session",
     });
+  });
+});
+
+describe("sendMessage", () => {
+  it("defaults to steer delivery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 6,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendMessage("agent-1", "csrf", 5, "Hello", [], requestId);
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      requestId,
+      expectedRevision: 5,
+      text: "Hello",
+      images: [],
+      delivery: "steer",
+    });
+  });
+
+  it("carries an explicit follow_up delivery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 6,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendMessage("agent-1", "csrf", 5, "Hello", [], requestId, "follow_up");
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ delivery: "follow_up" });
+  });
+});
+
+describe("respondToAttention", () => {
+  it("sends an optionId reply", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 4,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await respondToAttention("attention-1", "csrf", 3, { optionId: "confirm" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/attention/attention-1/respond");
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toMatchObject({ expectedRevision: 3, optionId: "confirm" });
+    expect(body).not.toHaveProperty("text");
+  });
+
+  it("sends a text reply", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      accepted: true,
+      requestId,
+      revision: 4,
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await respondToAttention("attention-1", "csrf", 3, { text: "the value" });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toMatchObject({ expectedRevision: 3, text: "the value" });
+    expect(body).not.toHaveProperty("optionId");
   });
 });
 

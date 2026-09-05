@@ -13,6 +13,7 @@ const request: AttentionRequest = {
   kind: "dialog",
   title: "Proceed with this action?",
   revision: 3,
+  reply: { kind: "choice" },
   options: [
     { id: "__prime_cancel__", label: "Decline", tone: "danger" },
     { id: "confirm", label: "Confirm", tone: "safe" },
@@ -32,7 +33,7 @@ describe("AttentionCard", () => {
     await user.click(confirm);
     await user.click(decline);
     expect(gatewayMock.respond).toHaveBeenCalledTimes(1);
-    expect(gatewayMock.respond).toHaveBeenCalledWith("attention-1", 3, "confirm");
+    expect(gatewayMock.respond).toHaveBeenCalledWith("attention-1", 3, { optionId: "confirm" });
     expect(confirm).toBeDisabled();
     expect(decline).toBeDisabled();
 

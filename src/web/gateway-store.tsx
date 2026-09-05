@@ -16,6 +16,7 @@ import type {
   EventEnvelope,
   GatewayEvent,
   ImageAttachmentInput,
+  MessageDelivery,
   ServerFrame,
   StreamCursor,
   TranscriptMessage,
@@ -26,7 +27,7 @@ import type {
 } from "../protocol";
 import { attentionAgentCount, PROTOCOL_VERSION, readPairingFragment, serverFrameSchema } from "../protocol";
 import * as api from "./api";
-import { ApiError, humanizeError } from "./api";
+import { ApiError, humanizeError, type AttentionReplyInput } from "./api";
 import { deviceLabel } from "./device-label";
 import { loadSettings } from "./settings";
 import { useAppBadge } from "./hooks/useAppBadge";
@@ -444,14 +445,14 @@ interface GatewayContextValue extends State {
   pair: (token: string) => Promise<void>;
   selectAgent: (id: string) => Promise<void>;
   createSession: (cwd: string, name?: string, requestId?: string) => Promise<string>;
-  send: (text: string, images?: PreparedImage[], requestId?: string) => Promise<void>;
+  send: (text: string, images?: PreparedImage[], requestId?: string, delivery?: MessageDelivery) => Promise<void>;
   loadSlashCommands: (agentId: string) => Promise<SlashCommandCatalog>;
   runSlashCommand: (name: string, args: string, requestId?: string) => Promise<SlashCommandResult>;
   abort: (agentId?: string) => Promise<void>;
   rename: (agentId: string, name: string) => Promise<void>;
   stop: (agentId: string) => Promise<void>;
   deleteSession: (agentId: string, confirmName: string) => Promise<void>;
-  respond: (attentionId: string, revision: number, optionId: string) => Promise<void>;
+  respond: (attentionId: string, revision: number, reply: AttentionReplyInput) => Promise<void>;
   signOut: () => Promise<void>;
   reconnect: () => void;
   /** Try a failed transcript again, from the panel that is showing the failure. */
@@ -1226,7 +1227,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   );
 
   const send = useCallback(
-    async (text: string, images: PreparedImage[] = [], requestId: string = crypto.randomUUID()) => {
+    async (text: string, images: PreparedImage[] = [], requestId: string = crypto.randomUUID(), delivery: MessageDelivery = "steer") => {
       const current = stateRef.current;
       const id = current.selectedAgentId;
       const snapshot = id ? current.snapshots[id] : null;
@@ -1263,7 +1264,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
       }
       try {
         const requestImages = imageInputsForRequest(images);
-        const result = await runMutation(id, (revision) => api.sendMessage(id, current.csrfToken, revision, text, requestImages, requestId));
+        const result = await runMutation(id, (revision) => api.sendMessage(id, current.csrfToken, revision, text, requestImages, requestId, delivery));
         requestBaselinesRef.current.delete(requestId);
         dispatch({ type: "agent_revision", agentId: id, revision: result.revision });
         showError(null);
@@ -1376,14 +1377,14 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   }, [guardedMutation]);
 
   const respond = useCallback(
-    async (attentionId: string, revision: number, optionId: string) => {
+    async (attentionId: string, revision: number, reply: AttentionReplyInput) => {
       const current = stateRef.current;
       const generation = sessionGeneration.current;
       const agentId = Object.values(current.snapshots)
         .flatMap((snapshot) => snapshot.attention)
         .find((request) => request.id === attentionId)?.agentId ?? current.selectedAgentId;
       try {
-        const result = await api.respondToAttention(attentionId, current.csrfToken, revision, optionId);
+        const result = await api.respondToAttention(attentionId, current.csrfToken, revision, reply);
         if (generation !== sessionGeneration.current) return;
         if (agentId) dispatch({ type: "agent_revision", agentId, revision: result.revision });
         showError(null);

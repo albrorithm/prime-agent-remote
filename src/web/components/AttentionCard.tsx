@@ -11,7 +11,7 @@ export function AttentionCard({ request }: { request: AttentionRequest }) {
     if (responding) return;
     setResponding(true);
     try {
-      await respond(request.id, request.revision, optionId);
+      await respond(request.id, request.revision, { optionId });
     } catch {
       // The gateway store exposes the error and keeps the request available.
     } finally {

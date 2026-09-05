@@ -12,7 +12,7 @@ The gateway currently permits these live operations:
 
 - list projected agents;
 - read projected transcripts and activity;
-- send a text prompt or explicitly user-selected image prompt with queue-if-busy semantics, waking a daemon-projected saved session first when needed;
+- send a text prompt or explicitly user-selected image prompt, choosing a steer or follow-up delivery lane, with queue-if-busy semantics, waking a daemon-projected saved session first when needed;
 - execute four enumerated session commands and five explicit `AgentConnection` adapters with bounded single-line arguments;
 - detect additional installed extension, prompt, and skill command names through a metadata-stripping projection;
 - experimentally execute an exact currently detected command after a live catalog re-check;
@@ -21,7 +21,7 @@ The gateway currently permits these live operations:
 - rename one agent, by its id: a live session through the same `AgentConnection` adapter the `/name` command already uses, and a saved one through the daemon's own recorded session path — never a path the browser supplies. The name is schema-validated as a single line of at most 200 characters before it leaves the gateway;
 - end one agent's live session, by its id, through the daemon's `kill` for that session's own active id. The session is left saved and resumable; this is not daemon shutdown, and the browser cannot express one;
 - permanently delete one saved session and its transcript, by its id, through the daemon's `delete_saved_session` on that session's own recorded path. This is irreversible and the gateway keeps no copy. The request must carry the session's current name as confirmation, which the gateway checks server-side and refuses on any mismatch, so a browser cannot skip the confirmation and a stale catalog deletes nothing rather than the wrong session. A live session is refused outright and must be stopped first;
-- answer supported extension confirmation and selection requests;
+- answer supported extension confirmation and selection requests, and typed replies to extension text requests: a paired browser can supply free text to a trusted local extension that asked for it, bounded to 32,000 characters, with a single-line request refusing a reply that contains a line break, and only while the request is still held by the daemon. The extension is trusted local code and the browser could already run experimental extension commands, so this widens what can be *said* to an extension, not what an extension can do. The live adapter does not yet project a daemon's text requests as attention by default (`TEXT_ATTENTION_PROJECTION_DEFAULT` is `false`), so today's boundary is unchanged until that flips;
 - create a new daemon session in a chosen working directory;
 - list directory names for the new-session picker;
 - register and revoke a browser push subscription for this device;
@@ -200,7 +200,7 @@ Before a broad deployment:
   Revoking a *device* now takes all of its sessions, which covers the case
   that matters most — a phone you no longer have — but two tabs of one device
   are still not separable;
-- validate all Prime extension UI request shapes before adding free-text responses;
+- the daemon does not signal a request answered from its own terminal UI, so a card for it stays on the phone until it is submitted and refused with a `404`. A request answered from another paired device goes through this gateway, which does drop the card everywhere;
 - perform a physical-device and reverse-proxy security test, including a real push delivered to an installed PWA with the app closed;
 - list and revoke individual push subscriptions. A single subscription cannot
   be revoked without revoking the device that made it or signing out the

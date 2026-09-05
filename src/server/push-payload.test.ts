@@ -13,6 +13,7 @@ function attention(overrides: Partial<AttentionRequest> = {}): AttentionRequest 
     title: "Run migrations against production?",
     detail: "This will drop the sessions table and recreate it from scratch.",
     revision: 4,
+    reply: { kind: "choice" },
     options: [
       { id: "confirm", label: "Yes, drop the sessions table", tone: "safe" },
       { id: "__prime_cancel__", label: "Decline", tone: "danger" },
@@ -34,6 +35,8 @@ describe("buildAttentionPushPayload", () => {
       "SENTINEL-DETAIL-must-not-leak",
       "SENTINEL-OPTION-must-not-leak",
       "SENTINEL-CANCEL-must-not-leak",
+      "SENTINEL-PLACEHOLDER-must-not-leak",
+      "SENTINEL-PREFILL-must-not-leak",
     ];
     const payload = buildAttentionPushPayload(attention({
       title: sentinels[0],
@@ -42,10 +45,13 @@ describe("buildAttentionPushPayload", () => {
         { id: "confirm", label: sentinels[2], tone: "safe" },
         { id: "__prime_cancel__", label: sentinels[3], tone: "danger" },
       ],
+      reply: { kind: "text", multiline: false, placeholder: sentinels[4], prefill: sentinels[5] },
+      expiresAt: "2026-01-01T00:05:00.000Z",
     }), "release-planning", 2);
 
     const serialized = JSON.stringify(payload);
     for (const sentinel of sentinels) expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toContain("2026-01-01T00:05:00.000Z");
     expect(payload).toEqual({
       version: 1,
       title: "release-planning",

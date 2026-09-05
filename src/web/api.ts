@@ -18,6 +18,7 @@ import {
   type DeviceListSnapshot,
   type DirectoryListing,
   type ImageAttachmentInput,
+  type MessageDelivery,
   type MutationAccepted,
   type ProblemDetails,
   type PushAccepted,
@@ -25,6 +26,9 @@ import {
   type SlashCommandAccepted,
   type SlashCommandCatalog,
 } from "../protocol";
+
+/** What a caller answers an attention request with; the request's `reply` kind decides which. */
+export type AttentionReplyInput = { optionId: string } | { text: string };
 
 export const API_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -218,6 +222,7 @@ export function sendMessage(
   text: string,
   images: ImageAttachmentInput[] = [],
   requestId: string = crypto.randomUUID(),
+  delivery: MessageDelivery = "steer",
   options?: ApiRequestOptions,
 ) {
   return mutate(`/api/v1/agents/${encodeURIComponent(agentId)}/messages`, csrfToken, {
@@ -225,6 +230,7 @@ export function sendMessage(
     expectedRevision,
     text,
     images,
+    delivery,
   }, options, mutationAcceptedSchema);
 }
 
@@ -319,13 +325,13 @@ export function respondToAttention(
   attentionId: string,
   csrfToken: string,
   expectedRevision: number,
-  optionId: string,
+  reply: AttentionReplyInput,
   options?: ApiRequestOptions,
 ) {
   return mutate(`/api/v1/attention/${encodeURIComponent(attentionId)}/respond`, csrfToken, {
     requestId: crypto.randomUUID(),
     expectedRevision,
-    optionId,
+    ...reply,
   }, options, mutationAcceptedSchema);
 }
 

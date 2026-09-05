@@ -6,6 +6,30 @@ export type AgentLifecycle = "starting" | "live" | "inactive" | "stopped" | "fai
 export type AgentActivityState = "working" | "idle" | "blocked";
 export type AttentionKind = "dialog" | "question" | "error";
 
+/**
+ * How an attention request wants to be answered. `choice` is answered with one
+ * of the request's `options`; `text` with a typed reply, or with the one
+ * option a text request carries, its cancel. A daemon extension asks for a
+ * single line (`input`) or a document (`editor`), and `multiline` is that
+ * distinction carried through: a single-line request refuses a reply with a
+ * line break in it rather than folding one in.
+ */
+export type AttentionReply =
+  | { kind: "choice" }
+  | { kind: "text"; multiline: boolean; placeholder?: string; prefill?: string };
+
+/** Bound on a typed attention reply, and on the prefill a request may carry. */
+export const MAX_ATTENTION_TEXT_CHARS = 32_000;
+
+/**
+ * When Prime should hand a message to the model. `steer` reaches the current
+ * run at its next boundary; `follow_up` waits until the run is idle. Both
+ * start at once when nothing is running. Named after Prime's own heartbeat
+ * delivery modes so the two never describe the same lane differently.
+ */
+export const MESSAGE_DELIVERIES = ["steer", "follow_up"] as const;
+export type MessageDelivery = typeof MESSAGE_DELIVERIES[number];
+
 export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
 export const DIRECT_SLASH_COMMAND_NAMES = ["model", "effort", "name", "context", "heartbeat"] as const;
 export type DirectSlashCommandName = typeof DIRECT_SLASH_COMMAND_NAMES[number];
@@ -299,12 +323,19 @@ export interface AttentionRequest {
   title: string;
   detail?: string;
   revision: number;
+  reply: AttentionReply;
   options: Array<{
     id: string;
     label: string;
     tone: "default" | "safe" | "danger";
   }>;
   createdAt: string;
+  /**
+   * When the daemon gave the request a deadline, the instant it lapses; the
+   * gateway drops the request then and publishes `agent.attention_resolved`.
+   * Absent when there is no known deadline, which is not the same as none.
+   */
+  expiresAt?: string;
 }
 
 export type AgentGoalStatus = "active" | "paused" | "budget_limited" | "complete" | "error";
@@ -321,6 +352,34 @@ export interface AgentGoal {
   lastError?: string;
 }
 
+export const MAX_QUEUE_ENTRY_CHARS = 2_000;
+export const MAX_QUEUE_ENTRIES_PER_LANE = 25;
+
+export interface SessionQueueEntry {
+  /** The instruction's text, cut at MAX_QUEUE_ENTRY_CHARS. */
+  text: string;
+  truncated: boolean;
+}
+
+/**
+ * What Prime holds for this session but has not yet handed to the model.
+ * Prime owns the queue; this is a projection of its state and never a promise
+ * about when an entry will be consumed.
+ */
+export interface SessionQueue {
+  /** Delivered at the current run's next boundary, in order. */
+  steering: SessionQueueEntry[];
+  /** Started once the current run is idle, in order. */
+  followUp: SessionQueueEntry[];
+  /**
+   * Everything queued, including session commands the two lanes above do not
+   * list and entries past MAX_QUEUE_ENTRIES_PER_LANE.
+   */
+  queuedCount: number;
+  /** What Prime is running now, when it says so. */
+  active?: { kind: "turn" | "session_command"; phase: "preparing" | "committing" | "running" };
+}
+
 export interface AgentSnapshot {
   revision: number;
   agentId: string;
@@ -328,6 +387,8 @@ export interface AgentSnapshot {
   dashboard?: SessionDashboard;
   attention: AttentionRequest[];
   goal?: AgentGoal;
+  /** Absent when the daemon build does not report queue state, which is unknown, not empty. */
+  queue?: SessionQueue;
 }
 
 /**
@@ -609,6 +670,16 @@ export const cellOutputSchema = z.object({
 
 export type CellOutput = z.infer<typeof cellOutputSchema>;
 
+const attentionReplySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("choice") }),
+  z.object({
+    kind: z.literal("text"),
+    multiline: z.boolean(),
+    placeholder: z.string().max(200).optional(),
+    prefill: z.string().max(MAX_ATTENTION_TEXT_CHARS).optional(),
+  }),
+]);
+
 const attentionRequestSchema = z.object({
   id: z.string(),
   agentId: z.string(),
@@ -616,12 +687,29 @@ const attentionRequestSchema = z.object({
   title: z.string(),
   detail: z.string().optional(),
   revision: z.number().int().nonnegative(),
+  reply: attentionReplySchema,
   options: z.array(z.object({
     id: z.string(),
     label: z.string(),
     tone: z.enum(["default", "safe", "danger"]),
   })),
   createdAt: z.string(),
+  expiresAt: z.string().optional(),
+});
+
+const sessionQueueEntrySchema = z.object({
+  text: z.string().max(MAX_QUEUE_ENTRY_CHARS),
+  truncated: z.boolean(),
+});
+
+export const sessionQueueSchema = z.object({
+  steering: z.array(sessionQueueEntrySchema).max(MAX_QUEUE_ENTRIES_PER_LANE),
+  followUp: z.array(sessionQueueEntrySchema).max(MAX_QUEUE_ENTRIES_PER_LANE),
+  queuedCount: z.number().int().nonnegative(),
+  active: z.object({
+    kind: z.enum(["turn", "session_command"]),
+    phase: z.enum(["preparing", "committing", "running"]),
+  }).optional(),
 });
 
 const agentGoalSchema = z.object({
@@ -643,6 +731,7 @@ export const agentSnapshotSchema = z.object({
   dashboard: sessionDashboardSchema.optional(),
   attention: z.array(attentionRequestSchema),
   goal: agentGoalSchema.optional(),
+  queue: sessionQueueSchema.optional(),
 });
 
 export const bootstrapResponseSchema = z.object({
@@ -783,6 +872,11 @@ export const sendMessageRequestSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   text: z.string().trim().max(100_000),
   images: z.array(imageAttachmentRequestSchema).max(MAX_IMAGE_ATTACHMENTS).default([]),
+  /**
+   * Defaults to `steer`, which is what every message did before the field
+   * existed. The composer decides whether to offer the other; the wire does not.
+   */
+  delivery: z.enum(MESSAGE_DELIVERIES).default("steer"),
 }).strict().superRefine((value, context) => {
   if (!value.text && value.images.length === 0) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "A message or image is required" });
@@ -804,11 +898,23 @@ export const executeSlashCommandRequestSchema = z.object({
   args: z.string().trim().max(4_000).refine((value) => !/[\r\n\u2028\u2029]/u.test(value), "Command arguments must be one line"),
 }).strict();
 
+/**
+ * Exactly one of `optionId` and `text`. Which one a request accepts is its
+ * `reply` kind, and the backend refuses the other: a typed reply to a
+ * confirmation, or a chosen option other than cancel on a text request, is a
+ * mismatched response and not a best effort. An empty `text` is a reply — an
+ * extension asking for a value may take blank as "use the default".
+ */
 export const attentionResponseSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().nonnegative(),
-  optionId: z.string().min(1).max(160),
-}).strict();
+  optionId: z.string().min(1).max(160).optional(),
+  text: z.string().max(MAX_ATTENTION_TEXT_CHARS).optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.optionId === undefined) === (value.text === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Answer with exactly one of optionId or text" });
+  }
+});
 
 export const abortRequestSchema = z.object({
   requestId: z.string().uuid(),

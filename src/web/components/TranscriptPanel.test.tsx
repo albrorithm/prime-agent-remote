@@ -454,6 +454,7 @@ describe("agent switching resets scroll state", () => {
       kind: "question",
       title: "Needs input",
       revision: 1,
+      reply: { kind: "choice" },
       options: [{ id: "ok", label: "OK", tone: "default" }],
       createdAt: "2026-01-01T00:00:00.000Z",
     }];

@@ -867,6 +867,61 @@ describe("gateway mutation guards", () => {
     });
     expect(conflicting.status).toBe(409);
   });
+
+  it("accepts either delivery lane, 400s a bogus one, and dedups identically when it's omitted", async () => {
+    const t = await startGateway();
+    const client = await pairClient(t);
+    const agents = (await bootstrap(t, client)).catalog.agents;
+    const agentId = agents.find((agent) => agent.capabilities.send)?.id;
+    if (!agentId) throw new Error("No send-capable demo agent");
+    const messagesUrl = `${t.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/messages`;
+
+    const followUp = await fetch(messagesUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, agentId),
+        text: "queue this for later",
+        delivery: "follow_up",
+      }),
+    });
+    expect(followUp.status).toBe(202);
+
+    const bogus = await fetch(messagesUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        expectedRevision: await agentRevision(t, client, agentId),
+        text: "nope",
+        delivery: "sideways",
+      }),
+    });
+    expect(bogus.status).toBe(400);
+
+    // The mutation cache binds on the parsed body, not the raw one — a retry
+    // that omits `delivery` after a first request that also omitted it gets
+    // the same "steer" default both times, so the replay still matches and
+    // comes back from cache instead of running again.
+    const revision = await agentRevision(t, client, agentId);
+    const requestId = randomUUID();
+    const first = await fetch(messagesUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId, expectedRevision: revision, text: "default lane" }),
+    });
+    expect(first.status).toBe(202);
+    const firstBody = await first.json();
+
+    const replayed = await fetch(messagesUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId, expectedRevision: revision, text: "default lane" }),
+    });
+    expect(replayed.status).toBe(202);
+    expect(await replayed.json()).toEqual(firstBody);
+  });
 });
 
 describe("gateway API routes", () => {
@@ -1240,6 +1295,24 @@ describe("gateway API routes", () => {
       body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1 }),
     });
     expect(invalid.status).toBe(400);
+
+    // Both an optionId and a text reply on the same body is exactly as
+    // malformed as neither: the schema requires exactly one.
+    const both = await fetch(respondUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, optionId: "confirm", text: "also this" }),
+    });
+    expect(both.status).toBe(400);
+
+    // A well-formed text reply passes the schema, but the demo dialog answers
+    // with a choice, so the backend refuses the mismatched kind with 403.
+    const mismatchedKind = await fetch(respondUrl, {
+      method: "POST",
+      headers: mutationHeaders(client),
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, text: "a typed reply" }),
+    });
+    expect(mismatchedKind.status).toBe(403);
 
     const resolved = await fetch(respondUrl, {
       method: "POST",
@@ -1779,6 +1852,7 @@ describe("attention fan-out to push", () => {
         title: "SENTINEL-daemon-authored-title",
         detail: "SENTINEL-daemon-authored-detail",
         revision: 3,
+        reply: { kind: "choice" },
         options: [{ id: "confirm", label: "SENTINEL-daemon-authored-option", tone: "safe" }],
         createdAt: "2026-01-01T00:00:00.000Z",
       });
@@ -1808,6 +1882,7 @@ describe("attention fan-out to push", () => {
       kind: "dialog",
       title: "Anything",
       revision: 3,
+      reply: { kind: "choice" },
       options: [],
       createdAt: "2026-01-01T00:00:00.000Z",
     })).not.toThrow();

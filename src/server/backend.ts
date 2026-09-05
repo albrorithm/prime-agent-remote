@@ -6,6 +6,7 @@ import type {
   CellOutput,
   DirectoryListing,
   ImageMimeType,
+  MessageDelivery,
   MutationAccepted,
   SessionCreated,
   SlashCommandAccepted,
@@ -20,6 +21,7 @@ export interface SendMessageInput {
   expectedRevision: number;
   text: string;
   images: ValidatedImageAttachment[];
+  delivery: MessageDelivery;
 }
 
 export interface ExecuteSlashCommandInput {
@@ -35,11 +37,16 @@ export interface AttachmentData {
   bytes: Uint8Array;
 }
 
+/**
+ * Exactly one of `optionId` and `text`, as `attentionResponseSchema` already
+ * enforced; the backend still checks it against the request's reply kind.
+ */
 export interface ResolveAttentionInput {
   attentionId: string;
   requestId: string;
   expectedRevision: number;
-  optionId: string;
+  optionId?: string;
+  text?: string;
 }
 
 export interface AbortInput {
@@ -78,6 +85,19 @@ export interface CreateSessionInput {
 export class BackendConflictError extends Error {}
 export class BackendNotFoundError extends Error {}
 export class BackendCapabilityError extends Error {}
+
+/**
+ * Whether a backend projects a daemon's text requests (`input`, `editor`) as
+ * attention, or cancels them on arrival as it always has.
+ *
+ * Transient. The backend can carry a text request end to end, but the
+ * attention card cannot yet answer one, and a card with nothing but Cancel on
+ * it would leave the extension hanging where today it gets its fallback at
+ * once. The default flips, and this constant goes, in the change that gives
+ * the card a field. Tests pass the option explicitly so the path is covered
+ * either way.
+ */
+export const TEXT_ATTENTION_PROJECTION_DEFAULT = false;
 
 export function uniqueSessionName(base: string, existingNames: string[]): string {
   const taken = new Set(existingNames.map((name) => name.trim().toLowerCase()));

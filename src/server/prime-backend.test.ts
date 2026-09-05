@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
+import { MAX_ATTENTION_TEXT_CHARS, MAX_IMAGE_REQUEST_BASE64_CHARS } from "../protocol.js";
 import type { AgentSnapshot, AttentionRequest, ServerFrame } from "../protocol.js";
-import { BackendCapabilityError, BackendConflictError } from "./backend.js";
+import { BackendCapabilityError, BackendConflictError, BackendNotFoundError } from "./backend.js";
 import { EventHub } from "./event-hub.js";
 import { validateImageAttachments } from "./image-attachments.js";
 import {
@@ -65,6 +65,13 @@ interface FixtureState {
   maxConcurrentSnapshotRequests: number;
   disposed: number;
   responseDelayMs: number;
+  /**
+   * Message the daemon rejects an extension response with. The real daemon
+   * throws `Unknown extension UI request: <id>` for a request it no longer
+   * holds, which is the only way another client's answer or a lapsed timeout
+   * ever reaches us.
+   */
+  responseError?: string;
 }
 
 const fixture: FixtureState = {
@@ -347,7 +354,10 @@ const connection = {
   async abort() { state.aborts += 1; },
   async respondToExtensionUiRequest(id, response) {
     if (state.responseDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.responseDelayMs));
+    // Recorded before the throw: the daemon did receive the call, it just no
+    // longer had a request to hand it to.
     state.responses.push({ id, response });
+    if (state.responseError) throw new Error(state.responseError);
   },
   async dispose() { state.disposed += 1; },
 };
@@ -816,6 +826,7 @@ describe("PrimeBackend", () => {
         expectedRevision: snapshot!.revision,
         text: "Hello",
         images: [],
+        delivery: "steer",
       });
       expect(fixture.prompts).toEqual([{ message: "Hello", options: { queueIfBusy: true, streamingBehavior: "steer", images: [] } }]);
 
@@ -829,6 +840,7 @@ describe("PrimeBackend", () => {
           mimeType: "image/jpeg",
           data: FIXTURE_JPEG_DATA,
         }]),
+        delivery: "steer",
       });
       expect(fixture.prompts[1]).toEqual({
         message: "Image attached.",
@@ -856,6 +868,7 @@ describe("PrimeBackend", () => {
         expectedRevision: snapshot!.revision,
         text: "/model gpt",
         images: [],
+        delivery: "steer",
       })).rejects.toBeInstanceOf(BackendCapabilityError);
       expect(fixture.prompts).toHaveLength(3);
 
@@ -979,6 +992,7 @@ describe("PrimeBackend", () => {
           expectedRevision: clearedHeartbeat.revision,
           text: "sensitive prompt text",
           images: [],
+          delivery: "steer",
         });
       } catch (error) {
         promptError = error;
@@ -1242,6 +1256,7 @@ describe("PrimeBackend", () => {
         expectedRevision: snapshot!.revision,
         text: "Continue this thread",
         images: [],
+        delivery: "steer",
       });
 
       expect(fixture.creates).toEqual([{ type: "create", sessionPath: "/fixture/saved-session.jsonl" }]);
@@ -1274,6 +1289,7 @@ describe("PrimeBackend", () => {
         expectedRevision: snapshot!.revision,
         text: "A stale retry",
         images: [],
+        delivery: "steer",
       })).rejects.toBeInstanceOf(BackendConflictError);
       expect(fixture.creates).toHaveLength(1);
       expect(fixture.prompts).toHaveLength(1);
@@ -2259,6 +2275,434 @@ describe("PrimeBackend", () => {
       expect(Buffer.byteLength(JSON.stringify(snapshot), "utf8")).toBeLessThan(4 * 1024 * 1024);
     } finally {
       fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  /* The daemon's `input` and `editor` dialogs. The adapter can carry one end
+     to end, but whether it does at all is a construction-time decision — see
+     TEXT_ATTENTION_PROJECTION_DEFAULT — so both sides of that switch are
+     covered here rather than only the one the default happens to pick. */
+
+  it("cancels a daemon text request on arrival unless the backend was built to project one", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "extension_ui_request",
+        request: { id: "text-default-line", method: "input", payload: { title: "Name the branch" } },
+      });
+      listener({
+        type: "extension_ui_request",
+        request: { id: "text-default-doc", method: "editor", payload: { title: "Write the notes" } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+
+      // Cancelled at once, so the extension gets its fallback instead of
+      // hanging on a card nothing can answer.
+      expect(fixture.responses).toEqual([
+        { id: "text-default-line", response: { cancelled: true } },
+        { id: "text-default-doc", response: { cancelled: true } },
+      ]);
+      expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
+      expect(backend.catalog().agents[0].attention).toBeNull();
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("projects text requests as attention when built to, and says how each wants answering", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: true });
+    const hub = new EventHub();
+    const seen: AttentionRequest[] = [];
+    backend.onAttentionAdded((attention) => seen.push(attention));
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "extension_ui_request",
+        request: {
+          id: "input-request",
+          method: "input",
+          // A control character in the hint: it sits on one line in a field.
+          payload: { title: "Branch name", placeholder: "feature/\u0007mobile" },
+        },
+      });
+      listener({
+        type: "extension_ui_request",
+        request: {
+          id: "editor-request",
+          method: "editor",
+          payload: { title: "Release notes", prefill: "First line\nSecond line" },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+
+      expect(fixture.responses).toEqual([]);
+      const snapshot = (await backend.agentSnapshot(agentId))!;
+      const line = snapshot.attention.find((request) => request.id === "input-request")!;
+      const document = snapshot.attention.find((request) => request.id === "editor-request")!;
+      expect(line).toMatchObject({
+        kind: "question",
+        title: "Branch name",
+        reply: { kind: "text", multiline: false, placeholder: "feature/ mobile" },
+      });
+      // An input payload carries no message, so there is no second line to show.
+      expect(line.detail).toBeUndefined();
+      expect(line.reply).not.toHaveProperty("prefill");
+      expect(line.options).toEqual([{ id: "__prime_cancel__", label: "Cancel", tone: "danger" }]);
+      expect(document).toMatchObject({
+        kind: "question",
+        title: "Release notes",
+        reply: { kind: "text", multiline: true, prefill: "First line\nSecond line" },
+      });
+      expect(document.options).toEqual([{ id: "__prime_cancel__", label: "Cancel", tone: "danger" }]);
+      expect(backend.catalog().agents[0].attention).toBe("question");
+      // Both reach the listener push depends on, not only the stream.
+      expect(seen.map((attention) => attention.id)).toEqual(["input-request", "editor-request"]);
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("bounds a daemon placeholder and prefill before either reaches the wire", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: true });
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "extension_ui_request",
+        request: {
+          id: "oversized-text-request",
+          method: "editor",
+          payload: {
+            title: "t".repeat(1_000),
+            placeholder: "p".repeat(1_000),
+            prefill: "f".repeat(MAX_ATTENTION_TEXT_CHARS + 500),
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+
+      const request = (await backend.agentSnapshot(agentId))!.attention[0];
+      expect(request.title).toHaveLength(200);
+      expect(request.reply).toMatchObject({ kind: "text", multiline: true });
+      const reply = request.reply as { placeholder?: string; prefill?: string };
+      expect(reply.placeholder).toHaveLength(200);
+      expect(reply.prefill).toHaveLength(MAX_ATTENTION_TEXT_CHARS);
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("answers a text request with typed text and refuses a reply of the wrong shape", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responseDelayMs = 0;
+    fixture.responses = [];
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: true });
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      for (const [id, method] of [
+        ["input-line", "input"],
+        ["editor-doc", "editor"],
+        ["editor-abandoned", "editor"],
+        ["confirm-choice", "confirm"],
+      ] as const) {
+        listener({
+          type: "extension_ui_request",
+          request: { id, method, payload: { title: `Answer ${id}` } },
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      const snapshot = (await backend.agentSnapshot(agentId))!;
+      const revisionOf = (id: string) => snapshot.attention.find((request) => request.id === id)!.revision;
+      const pending = Reflect.get(backend, "pendingExtensions") as Map<string, unknown>;
+      const answer = (attentionId: string, reply: { optionId?: string; text?: string }) =>
+        backend.resolveAttention({
+          attentionId,
+          requestId: crypto.randomUUID(),
+          expectedRevision: revisionOf(attentionId),
+          ...reply,
+        });
+
+      // Each refusal below is checked before the request is claimed, so a
+      // rejected reply leaves the request answerable rather than consuming it.
+      await expect(answer("input-line", { text: "one\ntwo" })).rejects.toBeInstanceOf(BackendCapabilityError);
+      await expect(answer("input-line", { text: "one\u2028two" })).rejects.toBeInstanceOf(BackendCapabilityError);
+      await expect(answer("input-line", { optionId: "confirm" })).rejects.toBeInstanceOf(BackendCapabilityError);
+      await expect(answer("confirm-choice", { text: "yes" })).rejects.toBeInstanceOf(BackendCapabilityError);
+      await expect(answer("editor-doc", { text: "f".repeat(MAX_ATTENTION_TEXT_CHARS + 1) }))
+        .rejects.toBeInstanceOf(BackendCapabilityError);
+      expect(fixture.responses).toEqual([]);
+      expect(["input-line", "editor-doc", "confirm-choice"].every((id) => pending.has(id))).toBe(true);
+
+      await answer("input-line", { text: "release/1.2" });
+      // A document is exactly what a line break is allowed in.
+      await answer("editor-doc", { text: "line one\nline two" });
+      await answer("editor-abandoned", { optionId: "__prime_cancel__" });
+      await answer("confirm-choice", { optionId: "confirm" });
+      expect(fixture.responses).toEqual([
+        { id: "input-line", response: { value: "release/1.2" } },
+        { id: "editor-doc", response: { value: "line one\nline two" } },
+        { id: "editor-abandoned", response: { cancelled: true } },
+        { id: "confirm-choice", response: { confirmed: true } },
+      ]);
+      expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
+    } finally {
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("carries a daemon timeout as an expiry and drops the request when it lapses", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responses = [];
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-01T12:00:00.000Z"));
+    const backend = new PrimeBackend(moduleSpecifier(), undefined, { projectTextRequests: true });
+    // The poll would queue a refresh every two seconds across the minute this
+    // test advances; the deadline is what is under test, not the poll.
+    Reflect.set(backend, "catalogPollIntervalMs", 10 * 60_000);
+    const hub = new EventHub();
+    try {
+      const initializing = backend.initialize(hub);
+      await vi.advanceTimersByTimeAsync(10);
+      await initializing;
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      await vi.advanceTimersByTimeAsync(10);
+      const frames: ServerFrame[] = [];
+      const attached = hub.attach(`agent:${agentId}`, null, (frame) => { frames.push(frame); });
+
+      vi.setSystemTime(new Date("2026-03-01T12:00:30.000Z"));
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "extension_ui_request",
+        request: { id: "expiring", method: "input", payload: { title: "Answer soon", timeout: 60_000 } },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+
+      const request = (await backend.agentSnapshot(agentId))!.attention[0];
+      expect(request.id).toBe("expiring");
+      expect(request.expiresAt).toBe("2026-03-01T12:01:30.000Z");
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
+      expect((Reflect.get(backend, "pendingExtensions") as Map<string, unknown>).has("expiring")).toBe(false);
+      expect(frames.some((frame) => frame.type === "event"
+        && frame.envelope.event.kind === "agent.attention_resolved"
+        && frame.envelope.event.payload.id === "expiring")).toBe(true);
+      // Nothing was sent to the daemon: its own timer answered the extension.
+      expect(fixture.responses).toEqual([]);
+      attached?.detach();
+    } finally {
+      vi.useRealTimers();
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("reports a request the daemon no longer holds as gone rather than as a failure", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.responseDelayMs = 0;
+    fixture.responses = [];
+    fixture.responseError = "Unknown extension UI request: private-daemon-request-id";
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      listener({
+        type: "extension_ui_request",
+        request: { id: "answered-elsewhere", method: "confirm", payload: { title: "Approve?" } },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      const request = (await backend.agentSnapshot(agentId))!.attention[0];
+
+      let failure: unknown;
+      try {
+        await backend.resolveAttention({
+          attentionId: request.id,
+          requestId: crypto.randomUUID(),
+          expectedRevision: request.revision,
+          optionId: "confirm",
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(BackendNotFoundError);
+      expect((failure as Error).message).toBe("This request was already answered or has expired");
+      // The daemon's wording carries the request id, so it is not echoed on.
+      expect((failure as Error).message).not.toContain("private-daemon-request-id");
+      expect((await backend.agentSnapshot(agentId))?.attention).toEqual([]);
+      expect((Reflect.get(backend, "pendingExtensions") as Map<string, unknown>).has("answered-elsewhere")).toBe(false);
+    } finally {
+      delete fixture.responseError;
+      fixture.responses = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("sends a follow-up down Prime's follow-up lane and everything else as steering", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    fixture.prompts = [];
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      // The context-stat probe lands right after the first projection and
+      // advances the revision; settle before spending one.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      await backend.sendMessage({
+        agentId,
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot(agentId))!.revision,
+        text: "After this run",
+        images: [],
+        delivery: "follow_up",
+      });
+      await backend.sendMessage({
+        agentId,
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot(agentId))!.revision,
+        text: "Right now",
+        images: [],
+        delivery: "steer",
+      });
+      expect(fixture.prompts).toEqual([
+        { message: "After this run", options: { queueIfBusy: true, streamingBehavior: "followUp", images: [] } },
+        { message: "Right now", options: { queueIfBusy: true, streamingBehavior: "steer", images: [] } },
+      ]);
+
+      // A session command is not a message and has no lane to choose.
+      await backend.executeSlashCommand({
+        agentId,
+        requestId: crypto.randomUUID(),
+        expectedRevision: (await backend.agentSnapshot(agentId))!.revision,
+        name: "compact",
+        args: "",
+      });
+      expect(fixture.prompts[2]).toEqual({
+        message: "/compact",
+        options: { queueIfBusy: true, streamingBehavior: "steer" },
+      });
+    } finally {
+      fixture.prompts = [];
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("projects Prime's queue when the daemon reports one and leaves it off when it does not", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const originalSnapshot = fixture.snapshot;
+    fixture.snapshot = structuredClone(originalSnapshot);
+    fixture.listError = false;
+    fixture.snapshotDelayMs = 0;
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const agentId = backend.catalog().agents[0].id;
+      await backend.agentSnapshot(agentId);
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      const listener = Reflect.get(fixture, "listener") as (event: unknown) => void;
+      const refreshed = async () => {
+        listener({ type: "session_event", event: { type: "session_action_update" } });
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return (await backend.agentSnapshot(agentId))!;
+      };
+
+      // A build that reports nothing has an unknown queue, not an empty one.
+      expect((await backend.agentSnapshot(agentId))?.queue).toBeUndefined();
+
+      const state = fixture.snapshot.state as Record<string, unknown>;
+      state.sessionActions = {
+        queuedCount: 31,
+        steering: [
+          "y".repeat(2_001),
+          ...Array.from({ length: 25 }, (_, index) => `steering-${index}`),
+        ],
+        followUps: ["Later", 42, null, "Later still"],
+        active: { kind: "turn", phase: "running", label: "private prompt text" },
+      };
+      const queued = await refreshed();
+      expect(queued.queue?.steering).toHaveLength(25);
+      expect(queued.queue?.steering[0]).toEqual({ text: "y".repeat(2_000), truncated: true });
+      expect(queued.queue?.steering[1]).toEqual({ text: "steering-0", truncated: false });
+      expect(queued.queue?.steering.at(-1)).toEqual({ text: "steering-23", truncated: false });
+      // Entries the daemon did not send as text are skipped, not coerced.
+      expect(queued.queue?.followUp).toEqual([
+        { text: "Later", truncated: false },
+        { text: "Later still", truncated: false },
+      ]);
+      // The daemon's own total, which counts what the bounded lanes do not.
+      expect(queued.queue?.queuedCount).toBe(31);
+      expect(queued.queue?.active).toEqual({ kind: "turn", phase: "running" });
+      expect(JSON.stringify(queued)).not.toContain("private prompt text");
+
+      state.sessionActions = {
+        steering: ["Only this"],
+        followUps: [],
+        active: { kind: "napping", phase: "running" },
+      };
+      const malformed = await refreshed();
+      expect(malformed.queue?.active).toBeUndefined();
+      // No count from the daemon, so what the lanes themselves add up to.
+      expect(malformed.queue?.queuedCount).toBe(1);
+
+      delete state.sessionActions;
+      expect((await refreshed()).queue).toBeUndefined();
+    } finally {
+      fixture.snapshot = originalSnapshot;
       hub.close();
       await backend.close();
     }
