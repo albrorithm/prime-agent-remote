@@ -1967,6 +1967,23 @@ describe("pairing grants", () => {
     expect(await revoked.json()).toEqual({ revoked: 1 });
     expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: voided }) })).status).toBe(401);
   });
+
+  it("says 429 with a Retry-After once an address has spent its minting budget, not 401", async () => {
+    const t = await startGateway();
+    const url = `${t.baseUrl}/api/v1/auth/grants`;
+    for (let index = 0; index < 5; index += 1) {
+      expect((await fetch(url, { method: "POST", headers: { Authorization: "Bearer nope" } })).status).toBe(401);
+    }
+    const throttled = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${PAIRING_TOKEN}` } });
+    expect(throttled.status).toBe(429);
+    expect(Number(throttled.headers.get("retry-after"))).toBeGreaterThan(0);
+    const revoke = await fetch(`${t.baseUrl}/api/v1/auth/grants/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${PAIRING_TOKEN}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(revoke.status).toBe(429);
+  });
 });
 
 describe("diagnostics", () => {

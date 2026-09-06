@@ -354,17 +354,25 @@ function decodeSegment(value: string): string | null {
     if (req.method === "POST" && (pathname === "/api/v1/auth/grants" || pathname === "/api/v1/auth/grants/revoke")) {
       const presented = bearerToken(req);
       if (!presented) { problem(res, 401, "Setup token required"); return true; }
+      const refuse = (outcome: { failure: "invalid" } | { failure: "throttled"; retryAfterMs: number }) => {
+        if (outcome.failure === "throttled") {
+          res.setHeader("Retry-After", String(Math.ceil(outcome.retryAfterMs / 1000)));
+          problem(res, 429, "Too many pairing-link requests");
+        } else {
+          problem(res, 401, "Invalid setup token");
+        }
+      };
       if (pathname === "/api/v1/auth/grants") {
-        const grant = await auth.mintGrant(req, presented);
-        if (!grant) { problem(res, 401, "Invalid setup token"); return true; }
-        json(res, 201, { token: grant.token, expiresAt: new Date(grant.expiresAt).toISOString() });
+        const outcome = await auth.mintGrant(req, presented);
+        if ("failure" in outcome) { refuse(outcome); return true; }
+        json(res, 201, { token: outcome.value.token, expiresAt: new Date(outcome.value.expiresAt).toISOString() });
         return true;
       }
       const parsed = revokeGrantsRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) { problem(res, 400, "Invalid revoke request"); return true; }
-      const revoked = await auth.revokeGrants(req, presented, parsed.data.token);
-      if (revoked === null) { problem(res, 401, "Invalid setup token"); return true; }
-      json(res, 200, { revoked });
+      const outcome = await auth.revokeGrants(req, presented, parsed.data.token);
+      if ("failure" in outcome) { refuse(outcome); return true; }
+      json(res, 200, { revoked: outcome.value });
       return true;
     }
 

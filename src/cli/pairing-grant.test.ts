@@ -25,6 +25,13 @@ describe("mintPairingGrant", () => {
     await expect(mintPairingGrant("http://x", "s", async () => answer(201, { nope: true })))
       .rejects.toThrow(/not a pairing link/);
   });
+
+  it("tells a throttled address to wait, not to restart the gateway", async () => {
+    const throttled = () => new Response("{}", { status: 429, headers: { "Retry-After": "42" } });
+    await expect(mintPairingGrant("http://x", "s", async () => throttled())).rejects.toThrow(/try again in 42 seconds/);
+    await expect(mintPairingGrant("http://x", "s", async () => throttled())).rejects.not.toThrow(/restart/);
+    await expect(revokePairingGrants("http://x", "s", async () => throttled())).rejects.toThrow(/try again in 42 seconds/);
+  });
 });
 
 describe("revokePairingGrants", () => {

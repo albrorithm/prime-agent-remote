@@ -63,7 +63,11 @@ The two grant routes are not origin-checked, because the CLI sends no
 to a grant budget of its own: five attempts per remote address per minute,
 the same size as pairing's and separate from it, so guessing the setup token
 costs what it always did while a mint followed by a pair still counts as one
-device joining rather than two attempts against a shared address. A lapsed
+device joining rather than two attempts against a shared address. An address
+over its budget is answered `429` with a `Retry-After`, distinct from the
+`401` a wrong bearer gets: these are the operator's routes, so revealing the
+limiter tells a guesser nothing they could not learn by counting, and it
+keeps the CLI from advising a restart for what is a minute's wait. A lapsed
 grant is refused as `Pairing link expired` and a wrong one as
 `Invalid pairing code`, which tells the person holding a stale screenshot
 what to do and tells a guesser nothing they can use.

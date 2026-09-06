@@ -23,6 +23,9 @@ export async function mintPairingGrant(origin: string, setupToken: string, fetch
   if (response.status === 401) {
     throw new PairingGrantError("The gateway did not accept this setup token. It may have been started with a different one; restart it.");
   }
+  if (response.status === 429) {
+    throw new PairingGrantError(`The gateway is refusing pairing-link requests from this address for the moment; try again in ${retryAfterWords(response)}.`);
+  }
   if (!response.ok) throw new PairingGrantError(`The gateway refused to mint a pairing link (${response.status}).`);
   const parsed = pairingGrantSchema.safeParse(await response.json().catch(() => null));
   if (!parsed.success) throw new PairingGrantError("The gateway answered with something that is not a pairing link.");
@@ -42,9 +45,19 @@ export async function revokePairingGrants(origin: string, setupToken: string, fe
   } catch {
     throw new PairingGrantError("Could not reach the gateway to void its pairing links.");
   }
+  if (response.status === 429) {
+    throw new PairingGrantError(`The gateway is refusing pairing-link requests from this address for the moment; try again in ${retryAfterWords(response)}.`);
+  }
   if (!response.ok) throw new PairingGrantError(`The gateway refused to void its pairing links (${response.status}).`);
   const body = await response.json().catch(() => null) as { revoked?: unknown } | null;
   return typeof body?.revoked === "number" ? body.revoked : 0;
+}
+
+/** The Retry-After header as words, or "a minute" when it is missing. */
+function retryAfterWords(response: Response): string {
+  const seconds = Number(response.headers.get("retry-after"));
+  if (!Number.isFinite(seconds) || seconds <= 0) return "a minute";
+  return seconds < 60 ? `${Math.ceil(seconds)} seconds` : `${Math.ceil(seconds / 60)} minute${seconds >= 120 ? "s" : ""}`;
 }
 
 /** "10:42" in the local clock, which is how a person reads a deadline off a terminal. */

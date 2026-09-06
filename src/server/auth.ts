@@ -64,6 +64,16 @@ function parseCookies(header: string | undefined): Record<string, string> {
 
 export type PairOutcome = { session: Session } | { failure: "invalid" | "expired" };
 
+/**
+ * A throttled request is told apart from a wrong token: these routes are the
+ * operator's, so revealing the limiter costs nothing, and the CLI's advice
+ * for the two ("wait a minute" against "restart it") is not the same.
+ */
+export type GrantOutcome<T> =
+  | { value: T }
+  | { failure: "invalid" }
+  | { failure: "throttled"; retryAfterMs: number };
+
 export class AuthService {
   private readonly sessions = new Map<string, Session>();
   /** One-time grants a pairing link carries; see pairing-grants.ts. */
@@ -123,20 +133,22 @@ export class AuthService {
    * grant budget before the check, so a wrong guess costs the same as a
    * right one and five of them shut the address out for the window.
    */
-  async mintGrant(req: IncomingMessage, presented: string): Promise<{ token: string; expiresAt: number } | null> {
+  async mintGrant(req: IncomingMessage, presented: string): Promise<GrantOutcome<{ token: string; expiresAt: number }>> {
     const key = req.socket.remoteAddress ?? "unknown";
     const now = Date.now();
-    if (!this.grantAttempts.allow(key, now).allowed) return null;
-    if (!(await this.isSetupToken(presented))) return null;
-    return this.grants.mint(now);
+    const decision = this.grantAttempts.allow(key, now);
+    if (!decision.allowed) return { failure: "throttled", retryAfterMs: decision.retryAfterMs };
+    if (!(await this.isSetupToken(presented))) return { failure: "invalid" };
+    return { value: this.grants.mint(now) };
   }
 
-  /** Voids one grant, or all of them, for whoever holds the setup token. Null when refused. */
-  async revokeGrants(req: IncomingMessage, presented: string, token?: string): Promise<number | null> {
+  /** Voids one grant, or all of them, for whoever holds the setup token. */
+  async revokeGrants(req: IncomingMessage, presented: string, token?: string): Promise<GrantOutcome<number>> {
     const key = req.socket.remoteAddress ?? "unknown";
-    if (!this.grantAttempts.allow(key, Date.now()).allowed) return null;
-    if (!(await this.isSetupToken(presented))) return null;
-    return this.grants.revoke(token);
+    const decision = this.grantAttempts.allow(key, Date.now());
+    if (!decision.allowed) return { failure: "throttled", retryAfterMs: decision.retryAfterMs };
+    if (!(await this.isSetupToken(presented))) return { failure: "invalid" };
+    return { value: this.grants.revoke(token) };
   }
 
   async pair(req: IncomingMessage, res: ServerResponse, token: string, deviceName?: string): Promise<PairOutcome> {

@@ -174,12 +174,17 @@ describe("pairing grants", () => {
   it("mints only for the setup token, charging guesses to the address budget", async () => {
     const auth = new AuthService(config());
     for (let index = 0; index < 5; index += 1) {
-      expect(await auth.mintGrant(request({}, "100.64.0.7"), "wrong")).toBeNull();
+      expect(await auth.mintGrant(request({}, "100.64.0.7"), "wrong")).toEqual({ failure: "invalid" });
     }
-    expect(await auth.mintGrant(request({}, "100.64.0.7"), "correct-token")).toBeNull();
-    const grant = await auth.mintGrant(request({}, "100.64.0.8"), "correct-token");
-    expect(grant?.token.length).toBeGreaterThanOrEqual(43);
-    expect(await auth.revokeGrants(request({}, "100.64.0.8"), "correct-token")).toBe(1);
-    expect(await auth.pair(request(), response().value, grant!.token)).toEqual({ failure: "invalid" });
+    // The sixth is refused for its address, not its token, and says so.
+    const throttled = await auth.mintGrant(request({}, "100.64.0.7"), "correct-token");
+    expect(throttled).toMatchObject({ failure: "throttled" });
+    expect((throttled as { retryAfterMs: number }).retryAfterMs).toBeGreaterThan(0);
+    const minted = await auth.mintGrant(request({}, "100.64.0.8"), "correct-token");
+    if ("failure" in minted) throw new Error(`mint refused: ${minted.failure}`);
+    const grant = minted.value;
+    expect(grant.token.length).toBeGreaterThanOrEqual(43);
+    expect(await auth.revokeGrants(request({}, "100.64.0.8"), "correct-token")).toEqual({ value: 1 });
+    expect(await auth.pair(request(), response().value, grant.token)).toEqual({ failure: "invalid" });
   });
 });
