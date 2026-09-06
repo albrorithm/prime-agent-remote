@@ -122,6 +122,18 @@ describe("applyGatewayEvent", () => {
     expect(result.queue).toEqual(queue);
   });
 
+  it("takes the history count a patch carries, so rows pushed out of the window stay reachable", () => {
+    const base: AgentSnapshot = { ...snapshot, revision: 1, messages: [message("m1", "one"), message("m2", "two")], history: { olderCount: 50, exhaustive: false } };
+    const result = applyGatewayEvent(base, {
+      kind: "agent.patched",
+      payload: { revision: 2, removed: ["m1"], added: [message("m3", "three")], history: { olderCount: 51, exhaustive: false } },
+    });
+    expect(result.history).toEqual({ olderCount: 51, exhaustive: false });
+    expect(result.messages.map((row) => row.id)).toEqual(["m2", "m3"]);
+    const silent = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 2, added: [message("m3", "three")] } });
+    expect(silent.history).toEqual({ olderCount: 50, exhaustive: false });
+  });
+
   it("ignores a patch at or below the snapshot's revision", () => {
     const base: AgentSnapshot = { ...snapshot, revision: 5, messages: [message("m1", "one")] };
     const stale = applyGatewayEvent(base, { kind: "agent.patched", payload: { revision: 5, added: [message("m2", "two")] } });

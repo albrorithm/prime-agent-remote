@@ -360,6 +360,9 @@ export function applyGatewayEvent(snapshot: AgentSnapshot, event: GatewayEvent):
         if (patch.queue === null) delete next.queue;
         else next.queue = patch.queue;
       }
+      // Rows pushed out of the window are counted here; without it "load
+      // earlier" would stop short of them until the next full replacement.
+      if (patch.history !== undefined) next.history = patch.history;
       return next;
     }
     case "agent.message_added":
