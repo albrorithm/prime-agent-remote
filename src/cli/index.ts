@@ -400,7 +400,7 @@ async function start(options: Options): Promise<number> {
   // Refuse the port before spawning anything. A gateway cannot recognise
   // itself over HTTP (see `waitForOurGateway`), so once a second one is in
   // the picture every later check reads the first one's replies as proof that
-  // our child came up — and we go on to print a URL, and a setup token, for
+  // our child came up — and we go on to print a URL, and a pairing link, for
   // somebody else's gateway. The state file only knows about instances this
   // CLI started, so it cannot catch this on its own.
   if (await respondsAsGateway(gatewayOrigin(exposure.host, port))) {
@@ -713,7 +713,7 @@ async function devices(options: Options): Promise<number> {
   await store.load();
   const paired = store.list();
   if (!paired.length) {
-    line("No paired devices. Open the address on a phone and enter the setup token.");
+    line("No paired devices. `prime-agent-remote token` prints a pairing link for a phone.");
     return 0;
   }
   for (const device of paired) {
@@ -783,7 +783,7 @@ async function revokeDevices(config: GatewayConfig, revoke: string): Promise<num
     throw error;
   }
   if (outcome.kind === "revoked-all") {
-    line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs the setup token again.`);
+    line(`Revoked ${outcome.count} device${outcome.count === 1 ? "" : "s"}. Every phone needs a fresh pairing link; \`prime-agent-remote token\` prints one.`);
   } else if (outcome.kind === "revoked") {
     line(`Revoked ${outcome.id}.`);
   } else {

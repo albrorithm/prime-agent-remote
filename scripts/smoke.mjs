@@ -12,7 +12,10 @@ import { CONFIG_FILE_VARIABLES } from "../dist-server/server/config.js";
 
 const port = 18787;
 const origin = `http://127.0.0.1:${port}`;
-const pairingToken = "smoke-test-token";
+// The setup token. Since 70581de it never pairs a device by itself: it is the
+// bearer that mints a one-time grant, and the grant is what the pairing screen
+// takes. mintGrant() below is that step.
+const setupToken = "smoke-test-token";
 // A real generated pair, used only for its shape: nothing here reaches a push
 // service. The default deployment mints its own; these are the explicit
 // PRIME_WEB_VAPID_* keys an operator can still supply to override that.
@@ -54,7 +57,7 @@ function startGateway(gatewayPort, extraEnv = {}) {
       PRIME_WEB_PORT: String(gatewayPort),
       PRIME_WEB_HOST: "127.0.0.1",
       PRIME_WEB_ALLOWED_ORIGINS: gatewayOrigin,
-      PRIME_WEB_PAIRING_TOKEN: pairingToken,
+      PRIME_WEB_PAIRING_TOKEN: setupToken,
       PRIME_WEB_BACKEND: "demo",
       PRIME_WEB_SECURE_COOKIE: "false",
       // Never the operator's real stores.
@@ -121,6 +124,17 @@ function sha256(bytes) {
 // own. Everything below has to work in it.
 const defaultGateway = startGateway(port);
 
+/** A fresh one-time pairing grant from `gatewayOrigin`, the way the CLI gets one. */
+async function mintGrant(gatewayOrigin) {
+  const response = await fetch(`${gatewayOrigin}/api/v1/auth/grants`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${setupToken}` },
+  });
+  const grant = await json(response);
+  if (typeof grant.token !== "string" || !grant.token) throw new Error("Grant did not carry a token");
+  return grant.token;
+}
+
 async function json(response) {
   const value = await response.json();
   if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(value)}`);
@@ -160,21 +174,42 @@ try {
   const unauthenticatedCommands = await fetch(`${origin}/api/v1/agents/unknown/commands`, { headers: { Origin: origin } });
   if (unauthenticatedCommands.status !== 401) throw new Error(`Expected unauthenticated command catalog 401, got ${unauthenticatedCommands.status}`);
 
+  const noBearer = await fetch(`${origin}/api/v1/auth/grants`, { method: "POST" });
+  if (noBearer.status !== 401) throw new Error(`Expected grant without a bearer 401, got ${noBearer.status}`);
+  const grantToken = await mintGrant(origin);
+
   const wrongOrigin = await fetch(`${origin}/api/v1/auth/pair`, {
     method: "POST",
     headers: { Origin: "https://untrusted.invalid", "Content-Type": "application/json" },
-    body: JSON.stringify({ token: pairingToken }),
+    body: JSON.stringify({ token: grantToken }),
   });
   if (wrongOrigin.status !== 403) throw new Error(`Expected wrong-origin 403, got ${wrongOrigin.status}`);
+
+  // The setup token is not a pairing code any more. A browser that somehow
+  // held it must still be turned away.
+  const setupTokenAsCode = await fetch(`${origin}/api/v1/auth/pair`, {
+    method: "POST",
+    headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: setupToken }),
+  });
+  if (setupTokenAsCode.status !== 401) throw new Error(`Expected the setup token to be refused as a pairing code, got ${setupTokenAsCode.status}`);
 
   const pairResponse = await fetch(`${origin}/api/v1/auth/pair`, {
     method: "POST",
     headers: { Origin: origin, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: pairingToken }),
+    body: JSON.stringify({ token: grantToken }),
   });
   const pairBody = await json(pairResponse);
   const cookie = pairResponse.headers.get("set-cookie")?.split(";", 1)[0];
   if (!cookie || !pairBody.csrfToken) throw new Error("Pairing did not issue a cookie and CSRF token");
+
+  // A grant is spent by the pairing above; a second device on the same link is refused.
+  const spentGrant = await fetch(`${origin}/api/v1/auth/pair`, {
+    method: "POST",
+    headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ token: grantToken }),
+  });
+  if (spentGrant.status !== 401) throw new Error(`Expected a spent grant to be refused, got ${spentGrant.status}`);
 
   const bootstrap = await json(await fetch(`${origin}/api/v1/bootstrap`, { headers: { Origin: origin, Cookie: cookie } }));
   if (bootstrap.protocolVersion !== 1 || bootstrap.catalog.agents.length < 1) throw new Error("Bootstrap projection is invalid");
@@ -545,7 +580,7 @@ try {
   const configuredPairResponse = await fetch(`${configured.origin}/api/v1/auth/pair`, {
     method: "POST",
     headers: { Origin: configured.origin, "Content-Type": "application/json" },
-    body: JSON.stringify({ token: pairingToken }),
+    body: JSON.stringify({ token: await mintGrant(configured.origin) }),
   });
   const configuredPair = await json(configuredPairResponse);
   const configuredCookie = configuredPairResponse.headers.get("set-cookie")?.split(";", 1)[0];

@@ -40,9 +40,9 @@ Then, from a Prime Agent session:
 ```
 
 or from a terminal, `prime-agent-remote start`. Either way the launcher finds
-your Prime Agent build, checks whether Tailscale is running, generates a setup
-token on first run and reuses it afterwards, and prints the address to open
-along with the token.
+your Prime Agent build, checks whether Tailscale is running, and prints the
+address to open along with a pairing link. The link is good for ten minutes and
+pairs one phone; `prime-agent-remote token` prints another.
 
 ### From a checkout
 

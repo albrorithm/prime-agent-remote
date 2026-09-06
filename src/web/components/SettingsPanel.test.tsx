@@ -377,7 +377,7 @@ describe("SettingsPanel paired devices", () => {
   });
 
   // Revoking is irreversible from the phone's side — it has to pair again with
-  // the setup token — so it takes the same two taps a session delete does.
+  // a fresh pairing link — so it takes the same two taps a session delete does.
   it("takes two taps to revoke, and offers a way back from the first", async () => {
     const user = userEvent.setup();
     apiMock.listDevices.mockResolvedValue({ devices: [device({ name: "Old iPad" })] });

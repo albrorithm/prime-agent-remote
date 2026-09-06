@@ -260,7 +260,7 @@ export function takeRequestedAgentId(): string | null {
 }
 
 /**
- * The setup token a pairing link carries, read once per app launch and removed
+ * The one-time grant a pairing link carries, read once per app launch and removed
  * from the URL in the same breath.
  *
  * Stripped before anything is sent anywhere. A fragment never reaches a server

@@ -192,7 +192,7 @@ function DevicesGroup() {
     <section className="settings-group" aria-labelledby="settings-devices">
       <h3 id="settings-devices">Paired devices</h3>
       <p className="settings-hint">
-        Every device that can sign back in without the setup token. Revoking one ends its
+        Every device that can sign back in without a new pairing link. Revoking one ends its
         sessions and its notifications straight away.
       </p>
       <ul className="settings-devices">

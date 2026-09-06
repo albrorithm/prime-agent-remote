@@ -40,7 +40,7 @@ const ACTIONS = [
 	{ value: "status", description: "Where the UI is served, and whether it is up" },
 	{ value: "start", description: "Start the gateway in the background" },
 	{ value: "stop", description: "Stop the running gateway" },
-	{ value: "token", description: "Print the setup token, to pair a new device" },
+	{ value: "token", description: "Print a fresh pairing link, good for one phone for ten minutes" },
 	{ value: "help", description: "List these actions" },
 ] as const;
 
