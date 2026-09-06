@@ -34,6 +34,7 @@ export function useScrollFollowing({
   followingRef.current = following;
 
   const previousOlderCount = useRef(olderRowCount);
+  const previousOlderAgentId = useRef(selectedAgentId);
   const heightBeforeCommit = useRef(0);
   const pinFrames = useRef<number[]>([]);
 
@@ -75,14 +76,19 @@ export function useScrollFollowing({
   // effect after this one, so the correction is exactly what was inserted.
   // Declared before the recorder on purpose: layout effects run in order.
   // jsdom has no layout, so no test can see this move; the harness can.
+  // A switch of session is not a page: the count and the recorded height both
+  // belong to the session that was showing, and the agent-change effect below
+  // pins the new one to its end regardless.
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    const grew = olderRowCount > previousOlderCount.current;
+    const sameAgent = previousOlderAgentId.current === selectedAgentId;
+    const grew = sameAgent && olderRowCount > previousOlderCount.current;
     previousOlderCount.current = olderRowCount;
+    previousOlderAgentId.current = selectedAgentId;
     if (!element || !grew || followingRef.current) return;
     const delta = element.scrollHeight - heightBeforeCommit.current;
     if (delta > 0) element.scrollTop += delta;
-  }, [olderRowCount]);
+  }, [olderRowCount, selectedAgentId]);
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element) heightBeforeCommit.current = element.scrollHeight;

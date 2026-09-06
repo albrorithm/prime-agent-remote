@@ -154,6 +154,39 @@ describe("useScrollFollowing", () => {
     expect(scroller.scrollTop).toBe(scroller.scrollHeight);
   });
 
+  /* A session opened with pages already loaded arrives in the same commit as
+     the switch. That growth in older rows is not a prepend to correct for: the
+     height on record belongs to the session that was showing, and a
+     correction from it would put the reader somewhere in the middle of the new
+     one for a paint before the pin lands. The only write must be the pin. */
+  it("does not treat a session switch as a page of older rows", () => {
+    const { result, rerender } = renderHook((props) => useScrollFollowing(props), {
+      initialProps: baseOptions({ olderRowCount: 0 }),
+    });
+    const scroller = document.createElement("div");
+    constrainScroll(scroller);
+    Object.defineProperty(result.current.scrollRef, "current", { configurable: true, value: scroller, writable: true });
+    const writes: number[] = [];
+    let scrollTop = 100;
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { writes.push(value); scrollTop = value; },
+    });
+    act(() => {
+      result.current.updateFollowing();
+    });
+    expect(result.current.following).toBe(false);
+    writes.length = 0;
+
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 5000 });
+    rerender(baseOptions({ selectedAgentId: "agent-b", selectedSnapshotAgentId: "agent-b", renderedMessageCount: 8, olderRowCount: 3 }));
+    // The pin lands more than once (agent change, then the following flip);
+    // what must not appear is a correction computed from the old session.
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((value) => value === 5000)).toBe(true);
+  });
+
   it("does not vibrate for attention already present when a session is selected", () => {
     const vibrate = vi.fn();
     Object.defineProperty(navigator, "vibrate", { configurable: true, value: vibrate });
