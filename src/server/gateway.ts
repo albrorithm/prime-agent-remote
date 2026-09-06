@@ -378,7 +378,7 @@ function decodeSegment(value: string): string | null {
         // A lapsed link is told apart from a wrong one: the first wants a
         // fresh link, the second wants a look at what was typed. Neither
         // helps a guesser, who is holding neither.
-        problem(res, 401, outcome.failure === "expired" ? "Pairing link expired" : "Invalid pairing token");
+        problem(res, 401, outcome.failure === "expired" ? "Pairing link expired" : "Invalid pairing code");
         return true;
       }
       json(res, 200, { paired: true, csrfToken: outcome.session.csrfToken });

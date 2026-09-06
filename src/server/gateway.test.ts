@@ -1954,7 +1954,7 @@ describe("pairing grants", () => {
     // The setup token itself no longer pairs.
     const raw = await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: PAIRING_TOKEN }) });
     expect(raw.status).toBe(401);
-    expect(((await raw.json()) as { title: string }).title).toBe("Invalid pairing token");
+    expect(((await raw.json()) as { title: string }).title).toBe("Invalid pairing code");
     expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: body.token }) })).status).toBe(200);
     expect((await fetch(pairUrl, { method: "POST", headers, body: JSON.stringify({ token: body.token }) })).status).toBe(401);
 

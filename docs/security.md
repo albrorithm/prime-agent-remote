@@ -65,7 +65,7 @@ the same size as pairing's and separate from it, so guessing the setup token
 costs what it always did while a mint followed by a pair still counts as one
 device joining rather than two attempts against a shared address. A lapsed
 grant is refused as `Pairing link expired` and a wrong one as
-`Invalid pairing token`, which tells the person holding a stale screenshot
+`Invalid pairing code`, which tells the person holding a stale screenshot
 what to do and tells a guesser nothing they can use.
 
 ### Device credentials

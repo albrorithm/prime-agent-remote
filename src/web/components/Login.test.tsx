@@ -51,14 +51,14 @@ describe("Login", () => {
   });
 
   it("shows an error message and keeps the code when pairing fails", async () => {
-    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
+    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing code"));
     const user = userEvent.setup();
     render(<Login />);
 
     await user.type(screen.getByLabelText("Pairing code"), "bad-code");
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid pairing token");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid pairing code");
     expect(screen.getByLabelText("Pairing code")).toHaveValue("bad-code");
   });
 
@@ -93,7 +93,7 @@ describe("Login", () => {
   });
 
   it("never shows a raw status number for any pairing failure", async () => {
-    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
+    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing code"));
     const user = userEvent.setup();
     const { container } = render(<Login />);
 
@@ -153,7 +153,7 @@ describe("Login after a pairing code expired", () => {
   });
 
   it("does not add the recovery line for an ordinary wrong code", async () => {
-    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
+    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing code"));
     const user = userEvent.setup();
     render(<Login />);
 
