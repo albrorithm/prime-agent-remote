@@ -195,7 +195,7 @@ describe("mobile shell navigation", () => {
     const hiddenDismiss = document.querySelector<HTMLButtonElement>(".gesture-hint button")!;
     hiddenDismiss.focus();
     fireEvent.keyDown(hiddenDismiss, { key: "Tab" });
-    expect(screen.getByRole("button", { name: "Open settings" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Close sessions" })).toHaveFocus();
 
     await user.click(screen.getByRole("button", { name: "Close sessions" }));
     expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();

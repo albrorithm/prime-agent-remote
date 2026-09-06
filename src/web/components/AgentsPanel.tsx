@@ -1,5 +1,5 @@
 import { Archive, Bot, CircleAlert, Plus, RotateCcw, Search, Settings, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
 import { useSessionOrganization } from "../hooks/useSessionOrganization";
@@ -7,6 +7,7 @@ import { needsAttention, withAncestors } from "./agent-tree-utils";
 import { AgentTree } from "./AgentTree";
 import { NewSessionPanel } from "./NewSessionPanel";
 import { SessionActions } from "./SessionActions";
+import { SessionMenu } from "./SessionMenu";
 import { SettingsPanel } from "./SettingsPanel";
 
 /** The two state filters the summary counts open. Null is "everything". */
@@ -29,9 +30,12 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manageId, setManageId] = useState<string | null>(null);
+  // The row menu: which session, and the row control it opened from.
+  const [menu, setMenu] = useState<{ id: string; anchor: HTMLElement } | null>(null);
   // Resolved from the catalog every render rather than held as a copy, so the
   // view reflects a rename (or a session going away) as it happens.
   const managed = catalog.agents.find((agent) => agent.id === manageId) ?? null;
+  const menuAgent = catalog.agents.find((agent) => agent.id === menu?.id) ?? null;
   // Settings is a detour, not work in progress, so closing the drawer should
   // leave it. `creating` deliberately survives: it holds a chosen directory and
   // a typed name that would be destructive to discard behind a swipe.
@@ -47,6 +51,12 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   useEffect(() => {
     if (manageId && !managed) setManageId(null);
   }, [manageId, managed]);
+  // The row menu is the same kind of state: it names one row, and the row
+  // can go, or the drawer can close under it.
+  useEffect(() => {
+    if (menu && (!menuAgent || !visible)) setMenu(null);
+  }, [menu, menuAgent, visible]);
+  const closeMenu = useCallback(() => setMenu(null), []);
   // The panel is hidden (not unmounted) on mobile, so a search typed before
   // closing the drawer would otherwise survive to the next open and silently
   // filter sessions the user no longer remembers searching for. Reset only on
@@ -121,12 +131,15 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
             <img src="/prime-mark.svg" alt="" />
             <div><p className="eyebrow">Prime Agent</p><h1>Sessions</h1></div>
           </div>
+          {/* On desktop the panel is permanent and its header is within reach, so
+              both actions live there. On a phone they float at the bottom right
+              instead, under the thumb; see the end of the list. */}
           {persistentDesktop && (
-            <button className="icon-button" onClick={() => setCreating(true)} aria-label="Start a new session"><Plus /></button>
+            <>
+              <button className="icon-button" onClick={() => setCreating(true)} aria-label="Start a new session"><Plus /></button>
+              <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings"><Settings /></button>
+            </>
           )}
-          {/* Deliberately not `.drawer-close`: that class hides at ≥1100px, but settings
-              must stay reachable on desktop, where this panel is permanent. */}
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings"><Settings /></button>
           {onClose && <button className="icon-button drawer-close" onClick={onClose} aria-label="Close sessions"><X /></button>}
         </header>
       )}
@@ -140,6 +153,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           archived={archived.has(managed.id)}
           onTogglePin={organization.togglePin}
           onToggleArchive={organization.toggleArchive}
+          initialSection="controls"
         />
       ) : creating ? (
         <NewSessionPanel
@@ -196,7 +210,7 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
                 selectedId={selectedAgentId}
                 onSelect={navigate}
                 onAbort={abort}
-                onManage={setManageId}
+                onManage={(id, anchor) => setMenu({ id, anchor })}
                 drawerOpen={visible}
                 pinned={pinned}
                 archived={archived}
@@ -212,10 +226,27 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
               </p>
             )}
           </div>
+          {menu && menuAgent && (
+            <SessionMenu
+              agent={menuAgent}
+              anchor={menu.anchor}
+              onClose={closeMenu}
+              onOpenControls={setManageId}
+              pinned={pinned.has(menuAgent.id)}
+              archived={archived.has(menuAgent.id)}
+              onTogglePin={organization.togglePin}
+              onToggleArchive={organization.toggleArchive}
+            />
+          )}
           {!persistentDesktop && (
-            <button className="new-session-fab" onClick={() => setCreating(true)} aria-label="Start a new session">
-              <Plus />
-            </button>
+            <div className="drawer-fabs">
+              <button className="settings-fab" onClick={() => setSettingsOpen(true)} aria-label="Open settings">
+                <Settings />
+              </button>
+              <button className="new-session-fab" onClick={() => setCreating(true)} aria-label="Start a new session">
+                <Plus />
+              </button>
+            </div>
           )}
         </>
       )}

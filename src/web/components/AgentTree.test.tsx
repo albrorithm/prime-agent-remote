@@ -188,7 +188,8 @@ describe("AgentTree", () => {
 
     // Managing must not also open the session the row points at.
     fireEvent.click(screen.getByRole("button", { name: "Manage root" }));
-    expect(onManage).toHaveBeenCalledWith("root");
+    // The control comes along so a menu can open beside the row that asked.
+    expect(onManage).toHaveBeenCalledWith("root", screen.getByRole("button", { name: "Manage root" }));
   });
 
   it("shows no manage entry point at all without a handler", async () => {

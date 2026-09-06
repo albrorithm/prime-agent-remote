@@ -12,7 +12,8 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAbort?: (id: string) => Promise<void>;
-  onManage?: (id: string) => void;
+  /** Called with the row control that asked, so a menu can sit beside it. */
+  onManage?: (id: string, anchor: HTMLElement) => void;
   drawerOpen?: boolean;
   /** Device-local root ids kept at the top of the list. See useSessionOrganization. */
   pinned?: ReadonlySet<string>;
@@ -286,10 +287,11 @@ export function AgentTree({
               <button
                 className="row-manage"
                 aria-label={`Manage ${agent.name}`}
+                aria-haspopup="menu"
                 onKeyDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onManage(agent.id);
+                  onManage(agent.id, event.currentTarget);
                 }}
               >
                 <SlidersHorizontal aria-hidden="true" />

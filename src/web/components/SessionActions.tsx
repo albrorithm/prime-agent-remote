@@ -1,5 +1,5 @@
 import { Archive, ArchiveRestore, LoaderCircle, Pin, PinOff, Power, SlidersHorizontal, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentSummary, SlashCommandResult } from "../../protocol";
 import { MAX_SESSION_NAME_CHARS } from "../../protocol";
 import { useGateway } from "../gateway-store";
@@ -14,6 +14,8 @@ interface SessionActionsProps {
   archived?: boolean;
   onTogglePin?: (id: string) => void;
   onToggleArchive?: (id: string) => void;
+  /** Where to land: the row menu opens this view for the controls it cannot hold. */
+  initialSection?: "controls";
 }
 
 const HEARTBEAT_STATUS_LABELS: Record<HeartbeatResult["status"], string> = {
@@ -56,8 +58,18 @@ export function SessionActions({
   archived = false,
   onTogglePin,
   onToggleArchive,
+  initialSection,
 }: SessionActionsProps) {
   const { deleteSession, rename, runSlashCommand, selectedAgentId, selectedSnapshot, stop } = useGateway();
+  const controlsHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (initialSection !== "controls") return;
+    try {
+      controlsHeadingRef.current?.scrollIntoView({ block: "start" });
+    } catch {
+      // Unavailable in some environments (jsdom); landing at the top is fine.
+    }
+  }, [initialSection]);
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -239,7 +251,7 @@ export function SessionActions({
         )}
         {controlsAvailable && (
           <section className="session-action-group session-controls" aria-labelledby="session-controls-heading">
-            <h3 id="session-controls-heading">Controls</h3>
+            <h3 id="session-controls-heading" ref={controlsHeadingRef}>Controls</h3>
             {!controlsEnabled && (
               <p className="session-action-note">Open this session to change it.</p>
             )}

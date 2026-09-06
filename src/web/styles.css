@@ -340,6 +340,22 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .row-manage { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 50%; color: var(--muted); background: transparent; }
 .row-manage:hover { border-color: var(--border-emphasis); color: var(--text); background: var(--panel-raised-3); }
 .row-manage svg { width: 13px; height: 13px; }
+/* The row's options, beside the row. Positioned in .agents-panel's box (see
+   SessionMenu.placeMenu), above the list but under the drawer's own header. */
+.session-menu { position: absolute; z-index: 20; display: grid; width: min(264px, calc(100% - 12px)); gap: 2px; padding: 6px; border: 1px solid var(--border-mid); border-radius: 14px; background: var(--overlay-menu); box-shadow: 0 16px 48px var(--shadow-deep); backdrop-filter: blur(18px); }
+.session-menu > [role="menuitem"] { display: flex; min-height: 46px; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 9px; color: var(--text); background: transparent; font-size: .8125rem; font-weight: 600; text-align: left; }
+.session-menu > [role="menuitem"]:not(:disabled):hover { background: var(--panel-raised-3); }
+.session-menu > [role="menuitem"]:disabled { opacity: .45; }
+.session-menu > [role="menuitem"] > svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--text-soft); }
+.session-menu > .session-menu-danger { color: var(--tone-danger-text); }
+.session-menu > .session-menu-danger > svg { color: var(--tone-danger); }
+.session-menu-step { gap: 10px; padding: 10px; }
+.session-menu-step input { width: 100%; min-width: 0; min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 11px; outline: 0; background: var(--bg); }
+.session-menu-step input:focus { border-color: var(--border-active); box-shadow: 0 0 0 2px var(--focus-ring); }
+.session-menu-note { margin: 0; color: var(--text-soft); font-size: .75rem; line-height: 1.45; }
+.session-menu-note strong { color: var(--text); }
+.session-menu-step-actions { display: grid; grid-template-columns: 1fr 1.5fr; gap: 8px; }
+.session-menu-step-actions > button { min-height: 42px; font-size: .75rem; }
 
 .session-actions-scroll { display: grid; align-content: start; gap: 14px; padding: 12px; }
 .session-action-group { display: grid; gap: 8px; padding: 13px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel-soft); }
@@ -721,9 +737,15 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
 .composer-action svg { width: 17px; height: 17px; }
 
 .agents-panel { width: 100%; min-width: 0; overflow: hidden; }
-.new-session-fab { position: absolute; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 10; display: grid; width: 52px; height: 52px; place-items: center; border: 0; border-radius: 50%; color: var(--on-accent); background: var(--accent); box-shadow: 0 8px 28px var(--shadow); }
+.drawer-fabs { position: absolute; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 10; display: flex; align-items: center; gap: 12px; }
+.new-session-fab { display: grid; width: 52px; height: 52px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 50%; color: var(--on-accent); background: var(--accent); box-shadow: 0 8px 28px var(--shadow); }
 .new-session-fab:hover { opacity: .88; }
 .new-session-fab svg { width: 22px; height: 22px; }
+/* The quieter of the two: settings is reached far less often than a new
+   session, so it sits beside the primary as a raised panel-coloured disc. */
+.settings-fab { display: grid; width: 46px; height: 46px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-soft); background: var(--panel-raised-3); box-shadow: 0 8px 28px var(--shadow); }
+.settings-fab:hover { color: var(--text); background: var(--panel-raised-4); }
+.settings-fab svg { width: 20px; height: 20px; }
 .agents-panel { position: relative; }
 .agents-panel > .new-session-panel { width: 100%; min-height: 0; flex: 1; }
 .directory-bar { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; padding-right: 8px; border-bottom: 1px solid var(--border); }

@@ -146,7 +146,7 @@ describe("AgentsPanel", () => {
     expect(screen.getByRole("button", { name: "Close new session" })).toBeInTheDocument();
   });
 
-  it("opens settings from the drawer header and takes over the panel", async () => {
+  it("opens settings from the floating button and takes over the panel", async () => {
     const user = userEvent.setup();
     renderPanel({ visible: true });
 
