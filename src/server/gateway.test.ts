@@ -1982,11 +1982,5 @@ describe("diagnostics", () => {
     expect(diagnostics.backend).toBe("demo");
     // Demo has no Prime build behind it: unknown, reported as null rather than as anything.
     expect(diagnostics.prime).toEqual({ version: null, module: null, connected: true });
-    expect(diagnostics.features).toEqual({
-      textAttention: false,
-      messageDelivery: ["steer", "follow_up"],
-      transcriptPaging: false,
-      transcriptSearch: true,
-    });
   });
 });

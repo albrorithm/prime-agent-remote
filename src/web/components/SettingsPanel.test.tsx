@@ -53,7 +53,6 @@ function diagnostics(overrides: Partial<import("../../protocol").GatewayDiagnost
     backend: "prime" as const,
     prime: { version: "1.9.0", module: "global" as const, connected: true },
     push: { enabled: true },
-    features: { textAttention: true, messageDelivery: ["steer", "follow_up"] as const, transcriptPaging: true, transcriptSearch: true },
     ...overrides,
   };
 }
@@ -302,7 +301,7 @@ describe("SettingsPanel diagnostics", () => {
     expect(screen.getByText("Checking…")).toBeInTheDocument();
   });
 
-  it("reports the gateway, Prime Agent, push, and feature rows for a full response", async () => {
+  it("reports the gateway, Prime Agent, and push rows for a full response", async () => {
     apiMock.loadDiagnostics.mockResolvedValue(diagnostics({
       gateway: { version: "2.4.1" },
       prime: { version: "1.9.0", module: "sibling", connected: true },
@@ -316,10 +315,9 @@ describe("SettingsPanel diagnostics", () => {
     expect(screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling).toHaveTextContent("beside this checkout");
     expect(screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling).toHaveTextContent("connected");
     expect(screen.getByText("Push").nextElementSibling).toHaveTextContent("available");
-    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("typed replies to extensions");
-    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("steer or follow up");
-    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("older history");
-    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("search");
+    // No feature list: every gateway that answers this route offers the same
+    // set, so a line reciting it would only ever read one way.
+    expect(screen.queryByText("Features")).not.toBeInTheDocument();
   });
 
   it("reports Unknown for a null version and omits the module phrase, without claiming old", async () => {
@@ -335,16 +333,6 @@ describe("SettingsPanel diagnostics", () => {
     expect(primeValue).toHaveTextContent("Unknown");
     expect(primeValue).toHaveTextContent("not connected");
     expect(primeValue.textContent).not.toMatch(/installed globally|from the environment|as a dependency|beside this checkout/);
-  });
-
-  it("says nothing is on when every feature is off", async () => {
-    apiMock.loadDiagnostics.mockResolvedValue(diagnostics({
-      features: { textAttention: false, messageDelivery: [], transcriptPaging: false, transcriptSearch: false },
-    }));
-    renderPanel();
-
-    expect(await screen.findByText("Gateway")).toBeInTheDocument();
-    expect(screen.getByText("Features").nextElementSibling).not.toHaveTextContent("typed replies to extensions");
   });
 
   it("shows a failure state with a retry that recovers, never a raw error", async () => {

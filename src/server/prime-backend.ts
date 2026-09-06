@@ -1910,8 +1910,6 @@ export class PrimeBackend implements AgentBackend {
       primeVersion: this.primeVersion,
       primeModule: this.primeModuleOrigin,
       connected: this.client !== undefined && !this.closed && this.reconnectPromise === undefined,
-      textAttention: this.projectTextRequests,
-      transcriptPaging: true,
     };
   }
 

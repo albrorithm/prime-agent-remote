@@ -298,8 +298,6 @@ export interface BackendDescription {
   primeVersion: string | null;
   primeModule: PrimeModuleOrigin | null;
   connected: boolean;
-  textAttention: boolean;
-  transcriptPaging: boolean;
 }
 
 export interface AgentBackend {

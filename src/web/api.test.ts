@@ -438,11 +438,9 @@ describe("loadDiagnostics", () => {
       backend: "prime",
       prime: { version: null, module: "global", connected: false },
       push: { enabled: true },
-      features: { textAttention: false, messageDelivery: ["steer", "follow_up"], transcriptPaging: true, transcriptSearch: true },
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
     const diagnostics = await loadDiagnostics();
     expect(diagnostics.prime).toEqual({ version: null, module: "global", connected: false });
-    expect(diagnostics.features.messageDelivery).toEqual(["steer", "follow_up"]);
   });
 });

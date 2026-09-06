@@ -7,7 +7,6 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   DEFAULT_HISTORY_PAGE_ROWS,
-  MESSAGE_DELIVERIES,
   MAX_HISTORY_PAGE_ROWS,
   MAX_SEARCH_MATCHES,
   MAX_SEARCH_QUERY_CHARS,
@@ -421,14 +420,6 @@ function decodeSegment(value: string): string | null {
         backend: backend.kind,
         prime: { version: described.primeVersion, module: described.primeModule, connected: described.connected },
         push: { enabled: Boolean(config.webPush) },
-        // From the same constants the routes check, so what is shown and what
-        // is refused cannot drift apart.
-        features: {
-          textAttention: described.textAttention,
-          messageDelivery: [...MESSAGE_DELIVERIES],
-          transcriptPaging: described.transcriptPaging,
-          transcriptSearch: true,
-        },
       });
       return true;
     }

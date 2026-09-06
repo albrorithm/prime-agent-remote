@@ -341,29 +341,11 @@ function primeAgentLine(prime: GatewayDiagnostics["prime"]): string {
   return parts.join(" · ");
 }
 
-/**
- * One line of plain words rather than four rows of on/off, because these are
- * the features a control elsewhere on the phone might already be offering or
- * withholding — this line is here to explain that control, not to repeat it
- * as a second set of switches nobody can flip from here.
- */
-function featuresLine(features: GatewayDiagnostics["features"]): string {
-  const on: string[] = [];
-  if (features.textAttention) on.push("typed replies to extensions");
-  if (features.messageDelivery.includes("steer") && features.messageDelivery.includes("follow_up")) {
-    on.push("steer or follow up");
-  }
-  if (features.transcriptPaging) on.push("older history");
-  if (features.transcriptSearch) on.push("search");
-  return on.length ? on.join(", ") : "None of these on this gateway";
-}
-
 type DiagnosticsState = { phase: "loading" } | { phase: "error" } | { phase: "ready"; data: GatewayDiagnostics };
 
 /**
  * What this phone would be checking before it guesses: the gateway's own
- * build, whether Prime Agent is even reachable, and which of the newer
- * features this particular gateway understands. Read-only — there is
+ * build and whether Prime Agent is even reachable. Read-only — there is
  * nothing here to change, only to explain a screen that looks different
  * from one gateway to the next.
  */
@@ -398,7 +380,6 @@ function DiagnosticsGroup() {
           <div><dt>Gateway</dt><dd>{state.data.gateway.version ?? "Unknown"}</dd></div>
           <div><dt>Prime Agent</dt><dd>{primeAgentLine(state.data.prime)}</dd></div>
           <div><dt>Push</dt><dd>{state.data.push.enabled ? "available" : "not configured"}</dd></div>
-          <div><dt>Features</dt><dd>{featuresLine(state.data.features)}</dd></div>
         </dl>
       )}
     </section>

@@ -1142,7 +1142,7 @@ export class DemoBackend implements AgentBackend {
   }
 
   describe(): BackendDescription {
-    return { primeVersion: null, primeModule: null, connected: true, textAttention: false, transcriptPaging: false };
+    return { primeVersion: null, primeModule: null, connected: true };
   }
 
   /**

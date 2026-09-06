@@ -420,8 +420,6 @@ export type PrimeModuleOrigin = "env" | "dependency" | "global" | "sibling";
 /**
  * What a client can ask before it guesses. Versions are reported where they
  * can be read and null where they cannot; a null is "unknown", never "old".
- * `features` come from the same constants the code paths check, so a control
- * shown from here and a call refused later cannot disagree.
  */
 export interface GatewayDiagnostics {
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -435,13 +433,6 @@ export interface GatewayDiagnostics {
     connected: boolean;
   };
   push: { enabled: boolean };
-  features: {
-    /** Whether daemon text requests reach the phone as answerable attention. */
-    textAttention: boolean;
-    messageDelivery: MessageDelivery[];
-    transcriptPaging: boolean;
-    transcriptSearch: boolean;
-  };
 }
 
 export const gatewayDiagnosticsSchema = z.object({
@@ -454,12 +445,6 @@ export const gatewayDiagnosticsSchema = z.object({
     connected: z.boolean(),
   }),
   push: z.object({ enabled: z.boolean() }),
-  features: z.object({
-    textAttention: z.boolean(),
-    messageDelivery: z.array(z.enum(MESSAGE_DELIVERIES)),
-    transcriptPaging: z.boolean(),
-    transcriptSearch: z.boolean(),
-  }),
 });
 
 export const MAX_SEARCH_QUERY_CHARS = 200;
