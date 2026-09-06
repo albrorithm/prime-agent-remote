@@ -35,6 +35,38 @@ export function useScrollFollowing({
 
   const previousOlderCount = useRef(olderRowCount);
   const heightBeforeCommit = useRef(0);
+  const pinFrames = useRef<number[]>([]);
+
+  /* Pin to the bottom now, and again over the next two frames if still
+     following. The second assignment is for iOS: a session that lands in a
+     box that was not scrollable a moment ago (the "Loading transcript…" state
+     is exactly that tall) can have its first `scrollTop = scrollHeight` clamped
+     against the old, zero-sized scroll range, which the compositor has not yet
+     been told has grown. The reader then opens an old thread at its first
+     message. Headless WebKit on a desktop does not do this, so the harness
+     cannot see it either way; the retry is idempotent where the first pin held. */
+  function pinToBottom() {
+    const element = scrollRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+    for (const frame of pinFrames.current) cancelAnimationFrame(frame);
+    pinFrames.current = [];
+    if (typeof requestAnimationFrame !== "function") return;
+    const again = (remaining: number) => {
+      const frame = requestAnimationFrame(() => {
+        pinFrames.current = pinFrames.current.filter((item) => item !== frame);
+        const current = scrollRef.current;
+        if (!current || !followingRef.current) return;
+        current.scrollTop = current.scrollHeight;
+        if (remaining > 1) again(remaining - 1);
+      });
+      pinFrames.current.push(frame);
+    };
+    again(2);
+  }
+  useEffect(() => () => {
+    for (const frame of pinFrames.current) cancelAnimationFrame(frame);
+  }, []);
 
   // A page of older rows lands above everything the reader can see. Left
   // alone, the content under their thumb moves down by the page's height and
@@ -60,7 +92,7 @@ export function useScrollFollowing({
     const element = scrollRef.current;
     if (!element) return;
     if (following) {
-      element.scrollTop = element.scrollHeight;
+      pinToBottom();
       setUnseen(0);
     } else {
       setUnseen((count) => count + countUnseen(previousCount.current, renderedMessageCount));
@@ -72,9 +104,8 @@ export function useScrollFollowing({
     const changed = previousContentKey.current !== lastContentKey;
     previousContentKey.current = lastContentKey;
     if (!changed) return;
-    const element = scrollRef.current;
     if (following) {
-      if (element) element.scrollTop = element.scrollHeight;
+      pinToBottom();
     } else {
       // A streamed reply can grow without increasing the message count.
       setUnseen((count) => Math.max(1, count));
@@ -102,8 +133,10 @@ export function useScrollFollowing({
       setFollowing(true);
       setUnseen(0);
     }
-    const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
+    // The ref, not the state: a change of agent has just decided to follow,
+    // and the frame retries inside must not read the value being replaced.
+    followingRef.current = true;
+    pinToBottom();
   }, [selectedAgentId, selectedSnapshotAgentId, renderedMessageCount, lastContentKey, snapshotAttention]);
 
   useEffect(() => {
@@ -133,6 +166,22 @@ export function useScrollFollowing({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  // The content growing under a follower is the same case from the other
+  // side: math, highlighting and late layout all add height after the effects
+  // above have run, and a pin taken before that growth is short by exactly
+  // that much. Watching the content box rather than each of those sources
+  // keeps the rule in one place. Absent in jsdom, and inert there.
+  useEffect(() => {
+    const element = scrollRef.current;
+    const content = element?.firstElementChild;
+    if (!element || !content || typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(() => {
+      if (followingRef.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [selectedSnapshotAgentId]);
 
   function handleTranscriptImageLoad() {
     const element = scrollRef.current;

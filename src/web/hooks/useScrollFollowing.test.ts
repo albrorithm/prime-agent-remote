@@ -53,6 +53,53 @@ describe("useScrollFollowing", () => {
     expect(result.current.unseen).toBe(0);
   });
 
+  /* iOS can clamp the first pin against a scroll range it has not updated
+     yet, so the pin is taken again on the next frames. Here the first write is
+     made to fail the way the phone fails it: the range grows only afterwards. */
+  it("pins to the bottom again on the next frame, but only while still following", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    try {
+      const { result, rerender } = renderHook((props) => useScrollFollowing(props), {
+        initialProps: baseOptions(),
+      });
+      const scroller = document.createElement("div");
+      let range = 0;
+      // The scroll range the compositor knows about: nothing until a frame has passed.
+      let knownMax = 0;
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, get: () => 1000 });
+      Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+      Object.defineProperty(scroller, "scrollTop", {
+        configurable: true,
+        get: () => range,
+        set: (value: number) => { range = Math.min(value, knownMax); },
+      });
+      Object.defineProperty(result.current.scrollRef, "current", { configurable: true, value: scroller, writable: true });
+
+      rerender(baseOptions({ renderedMessageCount: 3 }));
+      // The first write was clamped away, exactly as on the phone.
+      expect(scroller.scrollTop).toBe(0);
+      expect(frames.length).toBeGreaterThan(0);
+      knownMax = 1000;
+      act(() => { frames.splice(0).forEach((frame) => frame(0)); });
+      expect(scroller.scrollTop).toBe(1000);
+
+      // A reader who scrolled up between frames is not yanked back down.
+      range = 0;
+      Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => 300, set: (value: number) => { range = value; } });
+      act(() => {
+        Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => 100, set: (value: number) => { range = value; } });
+        result.current.updateFollowing();
+      });
+      rerender(baseOptions({ renderedMessageCount: 4 }));
+      act(() => { frames.splice(0).forEach((frame) => frame(0)); });
+      expect(range).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("accumulates unseen once following is turned off", () => {
     const { result, rerender } = renderHook((props) => useScrollFollowing(props), {
       initialProps: baseOptions(),
