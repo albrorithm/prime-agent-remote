@@ -26,6 +26,7 @@ vi.mock("../push", () => pushMock);
 const apiMock = vi.hoisted(() => ({
   listDevices: vi.fn(),
   revokeDevice: vi.fn(),
+  loadDiagnostics: vi.fn(),
 }));
 // `humanizeError` is real: the panel renders whatever it returns, and a stub
 // would let a test pass on a message no user would ever see.
@@ -41,6 +42,18 @@ function device(overrides: Partial<import("../../protocol").DeviceSummary> = {})
     createdAt: "2026-08-01T00:00:00.000Z",
     lastSeenAt: new Date().toISOString(),
     current: false,
+    ...overrides,
+  };
+}
+
+function diagnostics(overrides: Partial<import("../../protocol").GatewayDiagnostics> = {}) {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    gateway: { version: "2.4.1" },
+    backend: "prime" as const,
+    prime: { version: "1.9.0", module: "global" as const, connected: true },
+    push: { enabled: true },
+    features: { textAttention: true, messageDelivery: ["steer", "follow_up"] as const, transcriptPaging: true, transcriptSearch: true },
     ...overrides,
   };
 }
@@ -67,6 +80,7 @@ beforeEach(() => {
   pushMock.updatePushPreference.mockReset().mockResolvedValue("on");
   apiMock.listDevices.mockReset().mockResolvedValue({ devices: [] });
   apiMock.revokeDevice.mockReset().mockResolvedValue({ revoked: true, self: false });
+  apiMock.loadDiagnostics.mockReset().mockResolvedValue(diagnostics());
 });
 
 // The panel stamps --text-scale on the document, which outlives the render.
@@ -277,6 +291,88 @@ describe("SettingsPanel notifications", () => {
 
     await user.click(await screen.findByRole("button", { name: /Turn on notifications/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Push notifications are not configured");
+  });
+});
+
+describe("SettingsPanel diagnostics", () => {
+  it("shows Checking… before the response arrives", () => {
+    apiMock.loadDiagnostics.mockReturnValue(new Promise(() => {}));
+    renderPanel();
+
+    expect(screen.getByText("Checking…")).toBeInTheDocument();
+  });
+
+  it("reports the gateway, Prime Agent, push, and feature rows for a full response", async () => {
+    apiMock.loadDiagnostics.mockResolvedValue(diagnostics({
+      gateway: { version: "2.4.1" },
+      prime: { version: "1.9.0", module: "sibling", connected: true },
+      push: { enabled: true },
+    }));
+    renderPanel();
+
+    expect(await screen.findByText("Gateway")).toBeInTheDocument();
+    expect(screen.getByText("Gateway").nextElementSibling).toHaveTextContent("2.4.1");
+    expect(screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling).toHaveTextContent("1.9.0");
+    expect(screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling).toHaveTextContent("beside this checkout");
+    expect(screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling).toHaveTextContent("connected");
+    expect(screen.getByText("Push").nextElementSibling).toHaveTextContent("available");
+    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("typed replies to extensions");
+    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("steer or follow up");
+    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("older history");
+    expect(screen.getByText("Features").nextElementSibling).toHaveTextContent("search");
+  });
+
+  it("reports Unknown for a null version and omits the module phrase, without claiming old", async () => {
+    apiMock.loadDiagnostics.mockResolvedValue(diagnostics({
+      gateway: { version: null },
+      prime: { version: null, module: null, connected: false },
+    }));
+    renderPanel();
+
+    expect(await screen.findByText("Gateway")).toBeInTheDocument();
+    expect(screen.getByText("Gateway").nextElementSibling).toHaveTextContent("Unknown");
+    const primeValue = screen.getByText("Prime Agent", { selector: "dt" }).nextElementSibling!;
+    expect(primeValue).toHaveTextContent("Unknown");
+    expect(primeValue).toHaveTextContent("not connected");
+    expect(primeValue.textContent).not.toMatch(/installed globally|from the environment|as a dependency|beside this checkout/);
+  });
+
+  it("says nothing is on when every feature is off", async () => {
+    apiMock.loadDiagnostics.mockResolvedValue(diagnostics({
+      features: { textAttention: false, messageDelivery: [], transcriptPaging: false, transcriptSearch: false },
+    }));
+    renderPanel();
+
+    expect(await screen.findByText("Gateway")).toBeInTheDocument();
+    expect(screen.getByText("Features").nextElementSibling).not.toHaveTextContent("typed replies to extensions");
+  });
+
+  it("shows a failure state with a retry that recovers, never a raw error", async () => {
+    const user = userEvent.setup();
+    apiMock.loadDiagnostics.mockRejectedValueOnce(new Error("network explode 500"));
+    renderPanel();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Could not read diagnostics.");
+    expect(alert.textContent).not.toMatch(/network explode|500/);
+
+    apiMock.loadDiagnostics.mockResolvedValue(diagnostics());
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Gateway")).toBeInTheDocument();
+  });
+
+  it("cancels a stale load rather than setting state after unmount", async () => {
+    let resolveDiagnostics: (value: ReturnType<typeof diagnostics>) => void = () => {};
+    apiMock.loadDiagnostics.mockReturnValue(new Promise((resolve) => { resolveDiagnostics = resolve; }));
+    const { unmount } = renderPanel();
+
+    unmount();
+    // No assertion beyond "this doesn't throw": React warns loudly (and the
+    // house rule against console noise in tests would catch it) if a state
+    // setter fires after the component holding it is gone.
+    resolveDiagnostics(diagnostics());
+    await Promise.resolve();
   });
 });
 

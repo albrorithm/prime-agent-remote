@@ -16,47 +16,50 @@ describe("Login", () => {
   it("prompts for a fresh pairing on a true first pair", () => {
     render(<Login />);
     expect(screen.getByRole("heading", { name: "Pair this device" })).toBeInTheDocument();
+    expect(screen.getByText(/A code is good for ten minutes/)).toBeInTheDocument();
   });
 
   it("frames the prompt as a session expiry when a prior session existed", () => {
     gatewayMock.hadSession = true;
     render(<Login />);
     expect(screen.getByRole("heading", { name: "Session expired" })).toBeInTheDocument();
+    expect(screen.getByText(/Your session ended/)).toBeInTheDocument();
+    expect(screen.getByText("prime-agent-remote token")).toBeInTheDocument();
   });
 
-  it("disables submit until a token is entered", async () => {
+  it("disables submit until a code is entered", async () => {
     const user = userEvent.setup();
     render(<Login />);
     const submit = screen.getByRole("button", { name: "Pair device" });
     expect(submit).toBeDisabled();
 
-    await user.type(screen.getByLabelText("Pairing token"), "secret-token");
+    await user.type(screen.getByLabelText("Pairing code"), "secret-code");
     expect(submit).toBeEnabled();
   });
 
-  it("pairs with the entered token and clears the field on success", async () => {
+  it("pairs with the entered code and clears the field on success", async () => {
     gatewayMock.pair.mockResolvedValue(undefined);
     const user = userEvent.setup();
     render(<Login />);
 
-    const input = screen.getByLabelText("Pairing token");
-    await user.type(input, "secret-token");
+    const input = screen.getByLabelText("Pairing code");
+    await user.type(input, "secret-code");
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
-    await waitFor(() => expect(gatewayMock.pair).toHaveBeenCalledWith("secret-token"));
+    await waitFor(() => expect(gatewayMock.pair).toHaveBeenCalledWith("secret-code"));
     await waitFor(() => expect(input).toHaveValue(""));
   });
 
-  it("shows an error message and keeps the token when pairing fails", async () => {
+  it("shows an error message and keeps the code when pairing fails", async () => {
     gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
     const user = userEvent.setup();
     render(<Login />);
 
-    await user.type(screen.getByLabelText("Pairing token"), "bad-token");
+    await user.type(screen.getByLabelText("Pairing code"), "bad-code");
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid pairing token");
-    expect(screen.getByLabelText("Pairing token")).toHaveValue("bad-token");
+    expect(screen.getByLabelText("Pairing code")).toHaveValue("bad-code");
   });
 
   it("ignores a second submit while the first pairing call is still in flight", async () => {
@@ -65,7 +68,7 @@ describe("Login", () => {
     const user = userEvent.setup();
     render(<Login />);
 
-    await user.type(screen.getByLabelText("Pairing token"), "secret-token");
+    await user.type(screen.getByLabelText("Pairing code"), "secret-code");
     const form = screen.getByRole("button", { name: "Pair device" }).closest("form")!;
 
     // Fire two submits back to back, before React has re-rendered the
@@ -83,10 +86,22 @@ describe("Login", () => {
     const user = userEvent.setup();
     render(<Login />);
 
-    await user.type(screen.getByLabelText("Pairing token"), "bad-token");
+    await user.type(screen.getByLabelText("Pairing code"), "bad-code");
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Pairing failed");
+  });
+
+  it("never shows a raw status number for any pairing failure", async () => {
+    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
+    const user = userEvent.setup();
+    const { container } = render(<Login />);
+
+    await user.type(screen.getByLabelText("Pairing code"), "bad-code");
+    await user.click(screen.getByRole("button", { name: "Pair device" }));
+
+    await screen.findByRole("alert");
+    expect(container.textContent).not.toMatch(/\b[1-5]\d{2}\b/);
   });
 });
 
@@ -102,13 +117,50 @@ describe("Login after a pairing link failed", () => {
 
   it("hands the message over to the user's own attempt", async () => {
     gatewayMock.linkError = "Pairing failed";
-    gatewayMock.pair.mockRejectedValue(new Error("Wrong token"));
+    gatewayMock.pair.mockRejectedValue(new Error("Wrong code"));
     const user = userEvent.setup();
     render(<Login />);
 
-    await user.type(screen.getByLabelText("Pairing token"), "another-token");
+    await user.type(screen.getByLabelText("Pairing code"), "another-code");
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Wrong token"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Wrong code"));
+  });
+});
+
+/* An expired code is not a typo, so it earns a recovery line the plain
+   "wrong token" case does not get — the fix is a fresh code, not a retype. */
+describe("Login after a pairing code expired", () => {
+  it("adds a recovery line under the error when the gateway's title is the expiry one", async () => {
+    gatewayMock.pair.mockRejectedValue(new Error("Pairing link expired"));
+    const user = userEvent.setup();
+    render(<Login />);
+
+    await user.type(screen.getByLabelText("Pairing code"), "stale-code");
+    await user.click(screen.getByRole("button", { name: "Pair device" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pairing link expired");
+    expect(screen.getByText(/Codes last ten minutes/)).toBeInTheDocument();
+    expect(screen.getAllByText("prime-agent-remote token").length).toBeGreaterThan(0);
+  });
+
+  it("shows the recovery line for an expired link the same way", () => {
+    gatewayMock.linkError = "Pairing link expired";
+    render(<Login />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Pairing link expired");
+    expect(screen.getByText(/Codes last ten minutes/)).toBeInTheDocument();
+  });
+
+  it("does not add the recovery line for an ordinary wrong code", async () => {
+    gatewayMock.pair.mockRejectedValue(new Error("Invalid pairing token"));
+    const user = userEvent.setup();
+    render(<Login />);
+
+    await user.type(screen.getByLabelText("Pairing code"), "bad-code");
+    await user.click(screen.getByRole("button", { name: "Pair device" }));
+
+    await screen.findByRole("alert");
+    expect(screen.queryByText(/Codes last ten minutes/)).not.toBeInTheDocument();
   });
 });

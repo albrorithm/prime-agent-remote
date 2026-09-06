@@ -1,6 +1,11 @@
 import { Bell, BellOff, LogOut, Settings as SettingsIcon, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { PROTOCOL_VERSION, type DeviceSummary } from "../../protocol";
+import {
+  PROTOCOL_VERSION,
+  type DeviceSummary,
+  type GatewayDiagnostics,
+  type PrimeModuleOrigin,
+} from "../../protocol";
 import * as api from "../api";
 import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
@@ -320,6 +325,86 @@ function NotificationsGroup() {
   );
 }
 
+function primeModuleLabel(origin: PrimeModuleOrigin): string {
+  switch (origin) {
+    case "global": return "installed globally";
+    case "env": return "from the environment";
+    case "dependency": return "as a dependency";
+    case "sibling": return "beside this checkout";
+  }
+}
+
+function primeAgentLine(prime: GatewayDiagnostics["prime"]): string {
+  const parts = [prime.version ?? "Unknown"];
+  if (prime.module) parts.push(primeModuleLabel(prime.module));
+  parts.push(prime.connected ? "connected" : "not connected");
+  return parts.join(" · ");
+}
+
+/**
+ * One line of plain words rather than four rows of on/off, because these are
+ * the features a control elsewhere on the phone might already be offering or
+ * withholding — this line is here to explain that control, not to repeat it
+ * as a second set of switches nobody can flip from here.
+ */
+function featuresLine(features: GatewayDiagnostics["features"]): string {
+  const on: string[] = [];
+  if (features.textAttention) on.push("typed replies to extensions");
+  if (features.messageDelivery.includes("steer") && features.messageDelivery.includes("follow_up")) {
+    on.push("steer or follow up");
+  }
+  if (features.transcriptPaging) on.push("older history");
+  if (features.transcriptSearch) on.push("search");
+  return on.length ? on.join(", ") : "None of these on this gateway";
+}
+
+type DiagnosticsState = { phase: "loading" } | { phase: "error" } | { phase: "ready"; data: GatewayDiagnostics };
+
+/**
+ * What this phone would be checking before it guesses: the gateway's own
+ * build, whether Prime Agent is even reachable, and which of the newer
+ * features this particular gateway understands. Read-only — there is
+ * nothing here to change, only to explain a screen that looks different
+ * from one gateway to the next.
+ */
+function DiagnosticsGroup() {
+  const [state, setState] = useState<DiagnosticsState>({ phase: "loading" });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let current = true;
+    setState({ phase: "loading" });
+    api.loadDiagnostics().then(
+      (data) => { if (current) setState({ phase: "ready", data }); },
+      () => { if (current) setState({ phase: "error" }); },
+    );
+    return () => { current = false; };
+  }, [attempt]);
+
+  return (
+    <section className="settings-group" aria-labelledby="settings-diagnostics">
+      <h3 id="settings-diagnostics">Diagnostics</h3>
+      {state.phase === "loading" && <p className="settings-hint">Checking…</p>}
+      {state.phase === "error" && (
+        <>
+          <p className="settings-hint settings-error" role="alert">Could not read diagnostics.</p>
+          <div className="settings-actions">
+            <button className="settings-quiet" onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+          </div>
+        </>
+      )}
+      {state.phase === "ready" && (
+        <dl className="settings-diagnostics">
+          <div><dt>Gateway</dt><dd>{state.data.gateway.version ?? "Unknown"}</dd></div>
+          <div><dt>Prime Agent</dt><dd>{primeAgentLine(state.data.prime)}</dd></div>
+          <div><dt>Push</dt><dd>{state.data.push.enabled ? "available" : "not configured"}</dd></div>
+          <div><dt>Features</dt><dd>{featuresLine(state.data.features)}</dd></div>
+        </dl>
+      )}
+    </section>
+  );
+}
+
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const { backend, signOut } = useGateway();
   const { settings, setSetting } = useSettings();
@@ -388,6 +473,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </section>
 
         <NotificationsGroup />
+        <DiagnosticsGroup />
         <DevicesGroup />
 
         <section className="settings-group" aria-labelledby="settings-reading">

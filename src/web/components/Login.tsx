@@ -3,9 +3,15 @@ import { KeyRound, LoaderCircle } from "lucide-react";
 import { humanizeError } from "../api";
 import { useGateway } from "../gateway-store";
 
+// The gateway puts this exact title on a 401 for a code past its ten-minute
+// window (see the pairing handler in the gateway). humanizeError only
+// forwards whatever title it's given, so this string is the one place its
+// meaning is known on this side.
+const EXPIRED_PAIRING_TITLE = "Pairing link expired";
+
 export function Login() {
   const { pair, hadSession, linkError } = useGateway();
-  const [token, setToken] = useState("");
+  const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -15,14 +21,17 @@ export function Login() {
     setBusy(true);
     setError("");
     try {
-      await pair(token);
-      setToken("");
+      await pair(code);
+      setCode("");
     } catch (cause) {
       setError(humanizeError(cause, "Pairing failed"));
     } finally {
       setBusy(false);
     }
   }
+
+  const shownError = error || linkError;
+  const expired = shownError === EXPIRED_PAIRING_TITLE;
 
   return (
     <main className="login-shell">
@@ -32,24 +41,38 @@ export function Login() {
           <p className="eyebrow">Prime Agent</p>
           <h1>{hadSession ? "Session expired" : "Pair this device"}</h1>
           <p className="muted">
-            {hadSession
-              ? "Your pairing session ended. Enter the pairing token shown by the local gateway to continue."
-              : "Enter the pairing token shown by the local gateway."}
+            {hadSession ? (
+              <>
+                Your session ended. Ask the gateway for a new pairing code with{" "}
+                <code className="inline-code">prime-agent-remote token</code> and enter it here.
+              </>
+            ) : (
+              "Scan the code the gateway printed, or type it here. A code is good for ten minutes and pairs one phone."
+            )}
           </p>
         </div>
-        <label htmlFor="pairing-token">Pairing token</label>
+        <label htmlFor="pairing-code">Pairing code</label>
         <input
-          id="pairing-token"
+          id="pairing-code"
           type="password"
           autoComplete="one-time-code"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
           required
         />
         {/* A link that failed is the reason this screen is up at all, so it
             is shown until the user's own attempt has something to say. */}
-        {(error || linkError) && <p className="form-error" role="alert">{error || linkError}</p>}
-        <button className="primary-button" disabled={busy || !token.trim()}>
+        {shownError && <p className="form-error" role="alert">{shownError}</p>}
+        {/* A code lapsing on its own ten-minute clock is not a typo, so it
+            gets a line of its own naming that instead of leaving the person
+            to guess whether retyping the same code will work this time. */}
+        {expired && (
+          <p className="form-error-hint">
+            Codes last ten minutes. Run <code className="inline-code">prime-agent-remote token</code> on the
+            machine for a new one.
+          </p>
+        )}
+        <button className="primary-button" disabled={busy || !code.trim()}>
           {busy && <LoaderCircle className="spin" aria-hidden="true" />}
           Pair device
         </button>
