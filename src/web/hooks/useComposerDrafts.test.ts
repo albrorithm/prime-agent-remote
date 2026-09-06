@@ -1,10 +1,15 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DRAFTS_KEY, loadDrafts, MAX_DRAFT_LENGTH, MAX_STORED_DRAFT_BYTES, MAX_STORED_DRAFTS, useComposerDrafts } from "./useComposerDrafts";
+import { DRAFTS_KEY, loadDrafts, MAX_DRAFT_LENGTH, MAX_STORED_DRAFT_BYTES, MAX_STORED_DRAFTS, resetComposerDraftsStoreForTests, useComposerDrafts } from "./useComposerDrafts";
 
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  // The drafts map is a module singleton (shared across every mounted
+  // caller in a tab — see the comment in useComposerDrafts.ts), so it
+  // otherwise survives from the previous test and ignores the storage
+  // clears above.
+  resetComposerDraftsStoreForTests();
 });
 
 describe("loadDrafts", () => {
@@ -133,6 +138,33 @@ describe("useComposerDrafts", () => {
     const { result } = renderHook(() => useComposerDrafts("agent-1"));
     expect(result.current.draft).toBe("from an old tab");
     expect(sessionStorage.getItem(DRAFTS_KEY)).toBeNull();
+  });
+
+  describe("same-tab sharing", () => {
+    // The composer isn't the only mounted caller: a quote action writes into
+    // another agent's draft from a component that never renders that
+    // agent's textarea. Nothing but this shared store makes that visible
+    // without a page reload — a `storage` event never fires for a write this
+    // same document just made.
+    it("reflects a write from one instance in another instance for the same id, with no storage event", () => {
+      const a = renderHook(() => useComposerDrafts("agent-1"));
+      const b = renderHook(() => useComposerDrafts("agent-1"));
+      act(() => {
+        a.result.current.setDrafts((current) => ({ ...current, "agent-1": "written by a" }));
+      });
+      expect(b.result.current.draft).toBe("written by a");
+    });
+
+    it("lets one component write into a different agent's draft than the one it displays", () => {
+      const composer = renderHook(() => useComposerDrafts("child-agent"));
+      const quoteAction = renderHook(() => useComposerDrafts("parent-agent"));
+      act(() => {
+        quoteAction.result.current.setDrafts((current) => ({ ...current, "parent-agent": "quoted up" }));
+      });
+      expect(composer.result.current.draft).toBe("");
+      const parentComposer = renderHook(() => useComposerDrafts("parent-agent"));
+      expect(parentComposer.result.current.draft).toBe("quoted up");
+    });
   });
 
   describe("cross-tab reconciliation", () => {

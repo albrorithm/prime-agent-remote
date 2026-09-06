@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useSyncExternalStore } from "react";
 
 export const DRAFTS_KEY = "prime-web-drafts";
 export const MAX_STORED_DRAFTS = 100;
@@ -58,79 +58,129 @@ export interface ComposerDrafts {
   setDrafts: (update: (current: Record<string, string>) => Record<string, string>) => void;
 }
 
-// Drafts persist across agent switches (keyed by agent id), so unlike the
-// other composer hooks this one has no reset effect tied to `id`.
+/*
+ * The drafts map lives here as one module-level singleton rather than one
+ * React state per `useComposerDrafts` call. That used to be per-instance
+ * state, which was fine while the composer was the only caller — but a quote
+ * action needs to write into an agent's draft from a component that isn't
+ * that agent's composer (its own session, to hand a quotation to whoever
+ * reads it next; or another session entirely, forwarding one up to a parent),
+ * and per-instance state has no way to tell the composer's already-mounted
+ * instance that anything changed: the `storage` DOM event this file also
+ * listens for is real only for a *different* document, never for a write
+ * this same tab just made. A second independent copy of the drafts map would
+ * either miss the write (nothing tells the composer to re-read) or race it
+ * (two stale snapshots each thinking they hold the latest text).
+ *
+ * A shared store sidesteps both: every `setDrafts` call, from whichever
+ * component made it, is a synchronous update to the one object every mounted
+ * caller reads via `useSyncExternalStore`, so no caller needs telling.
+ */
+let store: Record<string, string> | null = null;
+// Baseline against which "has this tab edited this id since the last thing it
+// agreed with storage" is judged. Only ever moved by adopting a cross-tab
+// write (see `onStorage`) — never by this tab's own edits, which is what
+// makes an id "still locally dirty" a real question to ask of it.
+let synced: Record<string, string> = {};
+const listeners = new Set<() => void>();
+
+function ensureLoaded(): Record<string, string> {
+  if (store === null) {
+    store = loadDrafts();
+    synced = store;
+  }
+  return store;
+}
+
+function notify() {
+  for (const listener of listeners) listener();
+}
+
+function commit(next: Record<string, string>) {
+  store = next;
+  try {
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
+  } catch {
+    // Storage may be unavailable; drafts still work in memory.
+  }
+  notify();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): Record<string, string> {
+  return ensureLoaded();
+}
+
+// Two tabs open on the same session each keep their own copy of this drafts
+// map; without this, whichever tab's keystroke happens to write last silently
+// overwrites the other's unsent text. This reconciles on the `storage` event
+// (which fires only in *other* tabs, never this one — this tab's own writes
+// reach every caller directly through `commit` above): per agent id, adopt
+// the incoming value only where this tab has no edit of its own since its
+// last known sync — an id this tab is actively typing into is left alone
+// rather than merged or clobbered, since a real conflict here isn't worth a
+// CRDT for a draft textbox.
+function onStorage(event: StorageEvent) {
+  if (event.key !== DRAFTS_KEY) return;
+  const current = ensureLoaded();
+  let incoming: Record<string, string>;
+  try {
+    incoming = event.newValue === null ? {} : parseDraftsPayload(event.newValue);
+  } catch {
+    return;
+  }
+  const next: Record<string, string> = { ...current };
+  const adopted: Record<string, string> = {};
+  for (const agentId of new Set([...Object.keys(current), ...Object.keys(incoming)])) {
+    const incomingValue = incoming[agentId] ?? "";
+    const currentValue = current[agentId] ?? "";
+    const syncedValue = synced[agentId] ?? "";
+    if (incomingValue === currentValue || currentValue !== syncedValue) continue;
+    next[agentId] = incomingValue;
+    adopted[agentId] = incomingValue;
+  }
+  if (Object.keys(adopted).length === 0) return;
+  /* Only the ids actually adopted advance the baseline. Assigning `next`
+     wholesale marked every id as in sync, including the ones the loop had
+     just skipped for being locally edited — so a remote write to a
+     different agent quietly made this tab's own unsent draft look
+     untouched, and the next write to it clobbered mid-typing. Which is
+     precisely what the conflict rule above exists to prevent. */
+  synced = { ...synced, ...adopted };
+  store = next;
+  notify();
+}
+
+let listening = false;
+function ensureListening() {
+  if (listening || typeof window === "undefined") return;
+  window.addEventListener("storage", onStorage);
+  listening = true;
+}
+
+/**
+ * Test-only escape hatch: the store above is a module singleton so every
+ * caller in a tab shares it, which means it also survives across `it()`
+ * blocks in the same test file unless something clears it. Production code
+ * has no reason to call this — the store should only ever go away with the
+ * page.
+ */
+export function resetComposerDraftsStoreForTests(): void {
+  store = null;
+  synced = {};
+}
+
 export function useComposerDrafts(id: string): ComposerDrafts {
-  const [drafts, setDraftsState] = useState<Record<string, string>>(loadDrafts);
-  // Per id, the last value this tab knows both it and storage agree on: the
-  // value at mount, or the value last adopted from another tab's write.
-  // Deliberately NOT updated by this tab's own edits (setDrafts below) — a
-  // draft's current value staying equal to this baseline is what marks it
-  // "untouched since last sync" (safe to adopt an incoming remote write);
-  // once a local edit makes them differ, that id stays a "this tab is
-  // actively editing it" conflict until the tab reloads, rather than
-  // silently adopting a remote write and clobbering what's being typed.
-  const syncedRef = useRef(drafts);
+  ensureListening();
+  const drafts = useSyncExternalStore(subscribe, getSnapshot);
 
   function setDrafts(update: (current: Record<string, string>) => Record<string, string>) {
-    setDraftsState((current) => {
-      const next = update(current);
-      try {
-        localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
-      } catch {
-        // Storage may be unavailable; drafts still work in memory.
-      }
-      return next;
-    });
+    commit(update(ensureLoaded()));
   }
-
-  // Two tabs open on the same session each keep their own in-memory copy of
-  // this draft map; without this, whichever tab's keystroke happens to write
-  // last silently overwrites the other's unsent text. This reconciles on the
-  // `storage` event (which only ever fires in *other* tabs, never the one
-  // that wrote): per agent id, adopt the incoming value only where this tab
-  // has no edit of its own since its last known sync — an id this tab is
-  // actively typing into is left alone rather than merged or clobbered, since
-  // a real conflict here isn't worth a CRDT for a draft textbox.
-  useEffect(() => {
-    function onStorage(event: StorageEvent) {
-      // sessionStorage is only ever read once (legacy migration) and then
-      // cleared, never written going forward, so nothing else can raise a
-      // same-key `storage` event that isn't this hook's own localStorage
-      // write in another tab.
-      if (event.key !== DRAFTS_KEY) return;
-      let incoming: Record<string, string>;
-      try {
-        incoming = event.newValue === null ? {} : parseDraftsPayload(event.newValue);
-      } catch {
-        return;
-      }
-      setDraftsState((current) => {
-        const synced = syncedRef.current;
-        const next: Record<string, string> = { ...current };
-        const adopted: Record<string, string> = {};
-        for (const agentId of new Set([...Object.keys(current), ...Object.keys(incoming)])) {
-          const incomingValue = incoming[agentId] ?? "";
-          const currentValue = current[agentId] ?? "";
-          const syncedValue = synced[agentId] ?? "";
-          if (incomingValue === currentValue || currentValue !== syncedValue) continue;
-          next[agentId] = incomingValue;
-          adopted[agentId] = incomingValue;
-        }
-        if (Object.keys(adopted).length === 0) return current;
-        /* Only the ids actually adopted advance the baseline. Assigning `next`
-           wholesale marked every id as in sync, including the ones the loop had
-           just skipped for being locally edited — so a remote write to a
-           different agent quietly made this tab's own unsent draft look
-           untouched, and the next write to it clobbered mid-typing. Which is
-           precisely what the conflict rule above exists to prevent. */
-        syncedRef.current = { ...synced, ...adopted };
-        return next;
-      });
-    }
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
 
   return { draft: drafts[id] ?? "", setDrafts };
 }
