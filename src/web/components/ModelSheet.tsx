@@ -47,7 +47,19 @@ export function ModelSheet({ agentId, catalog, onCatalogChange, onClose }: Model
   const primaryModels = models.filter((option) => option.scoped || option.current);
 
   useEffect(() => {
+    // The sheet portals beside the app root, so `aria-modal` alone would leave
+    // the composer behind the scrim reachable by Tab and by a screen reader's
+    // swipe. Same shape as ImageViewer: the root goes inert for the sheet's
+    // lifetime, and focus goes back where it came from when the sheet closes.
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const appRoot = document.getElementById("root");
+    const rootWasInert = appRoot?.hasAttribute("inert") ?? false;
+    appRoot?.setAttribute("inert", "");
     closeRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (!rootWasInert) appRoot?.removeAttribute("inert");
+      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    };
   }, []);
 
   useEffect(() => {

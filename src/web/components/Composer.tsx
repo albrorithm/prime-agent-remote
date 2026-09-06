@@ -416,7 +416,13 @@ export function Composer() {
           agentId={id}
           catalog={slashMenu.slashCatalog}
           onCatalogChange={slashMenu.setSlashCatalog}
-          onClose={() => setModelSheetOpen(false)}
+          onClose={() => {
+            setModelSheetOpen(false);
+            // The menu item that opened the sheet is gone with the menu, so the
+            // sheet's own focus return has nowhere to land; the "+" that opened
+            // the menu is the place a keyboard user was.
+            queueMicrotask(() => composerRef.current?.querySelector<HTMLElement>(".composer-options-trigger")?.focus({ preventScroll: true }));
+          }}
         />
       )}
     </div>

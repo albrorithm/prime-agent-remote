@@ -163,6 +163,24 @@ describe("ModelSheet", () => {
     expect(backdrop.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("makes the app root inert while open and hands focus back on close", () => {
+    const root = document.createElement("div");
+    root.id = "root";
+    const trigger = document.createElement("button");
+    root.append(trigger);
+    document.body.append(root);
+    trigger.focus();
+
+    const { view } = open();
+    expect(root).toHaveAttribute("inert");
+    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+
+    view.unmount();
+    expect(root).not.toHaveAttribute("inert");
+    expect(trigger).toHaveFocus();
+    root.remove();
+  });
+
   it("shows only the lists the session actually offers", () => {
     open({ ...catalogWith("openai/first", "low"), commands: [] });
     expect(screen.queryByRole("radiogroup", { name: "Model" })).not.toBeInTheDocument();
