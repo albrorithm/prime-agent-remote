@@ -312,7 +312,10 @@ button, input, textarea { -webkit-tap-highlight-color: transparent; }
 .search-field svg { width: 15px; height: 15px; color: var(--muted); }
 .search-field input { min-width: 0; width: 100%; min-height: 2.5rem; border: 0; outline: 0; background: transparent; }
 .search-field input::placeholder { color: var(--muted-2); }
-.agent-tree { width: 100%; min-width: 0; padding: 0 7px max(18px, env(safe-area-inset-bottom)); overflow: hidden; }
+/* The bottom padding reserves the floating buttons' band (16px + 52px + 16px,
+   .drawer-fabs) so the last row's status light and menu can scroll clear of
+   them; on the persistent desktop layout there are no floating buttons. */
+.agent-tree { width: 100%; min-width: 0; padding: 0 7px calc(84px + env(safe-area-inset-bottom, 0px)); overflow: hidden; }
 .agent-row { --tree-depth: 0; display: flex; width: 100%; min-width: 0; max-width: 100%; min-height: 54px; align-items: center; overflow: hidden; margin: 2px 0; padding: 5px 7px 5px max(3px, calc(var(--tree-depth) * 14px)); border: 1px solid transparent; border-radius: 10px; user-select: none; }
 .agent-row:hover { background: var(--hover); }
 .agent-row.selected { border-color: var(--border-mid); background: var(--panel-raised-2); }
@@ -833,6 +836,7 @@ mark { padding: 0 1px; border-radius: 3px; color: var(--on-accent); background: 
   .agent-lineage h1 { max-width: 36vw; }
   .transcript-scroll { padding-top: 28px; padding-bottom: 28px; }
   .gesture-hint { display: none; }
+  .agent-tree { padding-bottom: 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

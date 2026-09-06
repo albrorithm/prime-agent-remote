@@ -73,4 +73,21 @@ describe("SelectionQuote", () => {
     selectText(container.querySelector(".elsewhere")!.firstChild!, 0, 3);
     expect(screen.queryByRole("toolbar")).not.toBeInTheDocument();
   });
+
+  it("says when a long selection was cut, the way a whole-message quote does", () => {
+    const self = agent("root", "Planner");
+    gatewayMock.state = { catalog: { revision: 1, agents: [self] }, selectedAgent: self };
+    const long = "x".repeat(4_500);
+    const { container } = render(
+      <div>
+        <article className="message assistant"><p>{long}</p></article>
+        <SelectionQuote />
+      </div>,
+    );
+    selectText(container.querySelector("article p")!.firstChild!, 0, long.length);
+    fireEvent.click(screen.getByRole("button", { name: "Quote" }));
+    const quoted = pendingQuotesSnapshot().get("root")!.text;
+    expect(quoted).toHaveLength(4_000);
+    expect(quoted.endsWith("…")).toBe(true);
+  });
 });

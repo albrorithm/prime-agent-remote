@@ -31,7 +31,8 @@ function readSelection(agentName: string): Anchor | null {
   const rect = range.getBoundingClientRect();
   if (!rect.width && !rect.height) return null;
   return {
-    text: text.slice(0, MAX_SELECTION_QUOTE_CHARS),
+    // A whole-message quote says when it was cut; a selection should too.
+    text: text.length > MAX_SELECTION_QUOTE_CHARS ? `${text.slice(0, MAX_SELECTION_QUOTE_CHARS - 1).trimEnd()}…` : text,
     source: article.classList.contains("user") ? "You" : agentName,
     top: rect.top,
     left: rect.left + rect.width / 2,
