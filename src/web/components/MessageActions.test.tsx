@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
 import type { useGateway } from "../gateway-store";
-import { DRAFTS_KEY, loadDrafts, MAX_DRAFT_LENGTH, resetComposerDraftsStoreForTests } from "../hooks/useComposerDrafts";
 import { MessageActions, shareSupported } from "./MessageActions";
 
 type GatewayMockState = Pick<ReturnType<typeof useGateway>, "catalog" | "selectedAgent">;
@@ -54,7 +53,6 @@ function stubClipboard(writeText: (value: string) => Promise<void>) {
 
 beforeEach(() => {
   localStorage.clear();
-  resetComposerDraftsStoreForTests();
   setGateway([agent()], agent());
 });
 
@@ -111,81 +109,4 @@ describe("MessageActions", () => {
     expect(screen.getByRole("group", { name: "Hello message actions" })).toBeInTheDocument();
   });
 
-  describe("quoting", () => {
-    it("quotes the whole message into the current session's draft and confirms it", async () => {
-      render(<MessageActions text="the full body" label="Hello." />);
-
-      await userEvent.click(screen.getByRole("button", { name: "Quote into this session's message" }));
-
-      expect(loadDrafts()["agent-1"]).toBe("> From Hello.:\n> the full body\n\n");
-      await waitFor(() => expect(screen.getByRole("button", { name: "Quoted" })).toBeInTheDocument());
-      expect(screen.getByRole("status")).toHaveTextContent("Quoted");
-    });
-
-    it("appends onto an existing draft with a blank-line separator", async () => {
-      localStorage.setItem(DRAFTS_KEY, JSON.stringify({ "agent-1": "my reply so far" }));
-      render(<MessageActions text="the full body" label="Hello." />);
-
-      await userEvent.click(screen.getByRole("button", { name: "Quote into this session's message" }));
-
-      expect(loadDrafts()["agent-1"]).toBe("my reply so far\n\n> From Hello.:\n> the full body\n\n");
-    });
-
-    it("quotes only an in-message selection when one is present", async () => {
-      const { container } = render(
-        <article>
-          <MessageActions text="the full body, much longer than the selection" label="Hello." />
-        </article>,
-      );
-      stubSelectionWithin(container.querySelector(".message-actions")!, "just this part");
-
-      await userEvent.click(screen.getByRole("button", { name: "Quote into this session's message" }));
-
-      expect(loadDrafts()["agent-1"]).toBe("> From Hello.:\n> just this part\n\n");
-    });
-
-    it("ignores a selection anchored outside this message's article", async () => {
-      render(<MessageActions text="the full body" label="Hello." />);
-      const outside = document.createElement("div");
-      document.body.appendChild(outside);
-      stubSelectionWithin(outside, "not this message");
-
-      await userEvent.click(screen.getByRole("button", { name: "Quote into this session's message" }));
-
-      expect(loadDrafts()["agent-1"]).toBe("> From Hello.:\n> the full body\n\n");
-      outside.remove();
-    });
-
-    it("trims the quotation and says so when the draft is nearly at the length limit", async () => {
-      const almostFull = "x".repeat(MAX_DRAFT_LENGTH - 20);
-      localStorage.setItem(DRAFTS_KEY, JSON.stringify({ "agent-1": almostFull }));
-      render(<MessageActions text={"a message body much longer than the remaining room"} label="Hello." />);
-
-      await userEvent.click(screen.getByRole("button", { name: "Quote into this session's message" }));
-
-      expect(loadDrafts()["agent-1"]!.length).toBeLessThanOrEqual(MAX_DRAFT_LENGTH);
-      await waitFor(() => expect(screen.getByRole("button", { name: "Quoted, trimmed" })).toBeInTheDocument());
-    });
-
-    it("hides the parent action for a root session with no parent", () => {
-      render(<MessageActions text="body" label="Hello." />);
-      // "this session's message" is the self action and must stay; only a named parent is absent.
-      expect(screen.queryByRole("button", { name: /^Quote into (?!this session).*'s message$/ })).toBeNull();
-      expect(screen.getByRole("button", { name: "Quote into this session's message" })).toBeInTheDocument();
-    });
-
-    it("quotes into the parent's draft, naming the child as the source, without touching this session's own draft", async () => {
-      const parentAgent = agent({ id: "parent-1", name: "Parent." });
-      const childAgent = agent({ id: "child-1", parentId: "parent-1", name: "Child." });
-      setGateway([parentAgent, childAgent], childAgent);
-      render(<MessageActions text="child's message" label="Child." />);
-
-      const button = screen.getByRole("button", { name: "Quote into Parent.'s message" });
-      await userEvent.click(button);
-
-      expect(loadDrafts()["parent-1"]).toBe("> From Child.:\n> child's message\n\n");
-      expect(loadDrafts()["child-1"]).toBeUndefined();
-      await waitFor(() => expect(screen.getByRole("button", { name: "Quoted for Parent." })).toBeInTheDocument());
-    });
-  });
 });

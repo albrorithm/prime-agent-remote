@@ -97,3 +97,16 @@ describe("appendQuotation", () => {
     expect(appendQuotation("my reply so far", "")).toBe("my reply so far");
   });
 });
+
+describe("pending quotes", () => {
+  it("holds one quotation per session and puts it on the wire as a blockquote ahead of the reply", async () => {
+    const { clearPendingQuotes, composeWithQuote, pendingQuotesSnapshot, setPendingQuote } = await import("./quote");
+    clearPendingQuotes();
+    setPendingQuote("a", { source: "Planner", text: "  two\nlines  " });
+    expect(pendingQuotesSnapshot().get("a")).toEqual({ source: "Planner", text: "two\nlines" });
+    expect(composeWithQuote(pendingQuotesSnapshot().get("a"), "Why?")).toBe("> From Planner:\n> two\n> lines\n\nWhy?");
+    expect(composeWithQuote(undefined, "Why?")).toBe("Why?");
+    setPendingQuote("a", null);
+    expect(pendingQuotesSnapshot().has("a")).toBe(false);
+  });
+});

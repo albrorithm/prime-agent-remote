@@ -562,6 +562,20 @@ textarea.attention-field { min-height: 88px; max-height: 280px; resize: none; fo
 .history-load-older { min-height: 36px; padding: 6px 14px; border: 1px solid var(--border-bright); border-radius: 99px; color: var(--text); background: var(--panel-raised-3); font-size: .75rem; font-weight: 700; }
 .history-load-older:disabled { opacity: .6; }
 .history-error, .history-exhausted { margin: 0; color: var(--muted); font-size: .75rem; text-align: center; }
+.history-loading { display: inline-flex; align-items: center; gap: 6px; margin: 0; min-height: 24px; color: var(--muted-2); font-size: .6875rem; }
+.history-loading svg { width: 13px; height: 13px; }
+/* The quote pill follows the selection; a fixed box so it stays put while the transcript beneath it does not. */
+.selection-quote { position: fixed; z-index: 30; display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border-bright); border-radius: 99px; background: var(--overlay-pill); box-shadow: 0 8px 28px var(--shadow); }
+.selection-quote button { display: inline-flex; min-height: 34px; align-items: center; gap: 6px; padding: 0 12px; border: 0; border-radius: 99px; color: var(--text); background: transparent; font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.selection-quote button:active { background: var(--panel-raised-3); }
+.selection-quote svg { width: 14px; height: 14px; }
+.composer-quote { display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 8px; margin: 0 0 6px; padding: 8px 8px 8px 10px; border-left: 3px solid var(--accent); border-radius: 8px; background: var(--panel-raised-2); }
+.composer-quote > svg { width: 14px; height: 14px; margin-top: 2px; color: var(--muted); }
+.composer-quote-body { display: grid; min-width: 0; gap: 1px; }
+.composer-quote-source { color: var(--muted); font-size: .6875rem; font-weight: 700; letter-spacing: .02em; }
+.composer-quote-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-soft); font-size: .8125rem; line-height: 1.4; word-break: break-word; }
+.composer-quote-remove { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 7px; color: var(--muted); background: transparent; }
+.composer-quote-remove svg { width: 14px; height: 14px; }
 .history-exhausted { padding: 2px 0 14px; }
 
 .sessions-trigger { position: relative; }

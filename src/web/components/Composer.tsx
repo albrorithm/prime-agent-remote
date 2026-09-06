@@ -1,4 +1,4 @@
-import { Cpu, Image, Plus, Send, Square, SquareSlash } from "lucide-react";
+import { Cpu, Image, Plus, Quote as QuoteIcon, Send, Square, SquareSlash, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -14,6 +14,8 @@ import { useImageAttachments } from "../hooks/useImageAttachments";
 import { useOptionsMenu } from "../hooks/useOptionsMenu";
 import { experimentalCommandNotice, useSlashCommandMenu } from "../hooks/useSlashCommandMenu";
 import { useSettings } from "../settings";
+import { usePendingQuote } from "../hooks/usePendingQuote";
+import { composeWithQuote, setPendingQuote } from "../quote";
 import { SwitchHapticButton } from "./SwitchHapticButton";
 import { ModelSheet } from "./ModelSheet";
 import { QueueStrip } from "./QueueStrip";
@@ -49,6 +51,7 @@ export function Composer() {
   activeAgentIdRef.current = id;
 
   const { draft, setDrafts } = useComposerDrafts(id);
+  const pendingQuote = usePendingQuote(id);
   const optionsMenu = useOptionsMenu(id, composerRef, textareaRef);
   const [delivery, setDelivery] = useState<MessageDelivery>(() => deliveryModes.get(id) ?? "steer");
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
@@ -72,7 +75,7 @@ export function Composer() {
 
   const streaming = selectedSnapshot?.messages.some((message) => message.state === "streaming") ?? false;
   const visibleImages = attachments.imageOwnerRef.current === id ? attachments.images : [];
-  const hasComposerContent = Boolean(draft.trim() || visibleImages.length);
+  const hasComposerContent = Boolean(draft.trim() || visibleImages.length || pendingQuote);
 
   // Steering and a follow-up are the same instruction to an idle agent, so the
   // choice is only offered while there is a run for them to differ about.
@@ -176,11 +179,13 @@ export function Composer() {
         // `steer` is the wire default, so it is sent by omission rather than by
         // name. Nothing downstream can tell the two apart, and every caller
         // that never asks keeps the argument list it had.
-        if (followUp) await send(text, images, requestId, "follow_up");
-        else await send(text, images, requestId);
+        const outgoing = composeWithQuote(pendingQuote, text);
+        if (followUp) await send(outgoing, images, requestId, "follow_up");
+        else await send(outgoing, images, requestId);
       }
       if (activeAgentIdRef.current === agentId && submissionVersion === submissionVersionRef.current) {
         setDrafts((current) => ({ ...current, [agentId]: "" }));
+        if (!slashCommand) setPendingQuote(agentId, null);
         attachments.finishSuccessfulSubmit(selectedImages);
         attachments.setAttachmentStatus(resultStatus);
         retryRequestRef.current = null;
@@ -340,6 +345,16 @@ export function Composer() {
             <button type="button" role="radio" aria-checked={delivery === "follow_up"} onClick={() => chooseDelivery("follow_up")}>After this run</button>
           </div>
         )}
+        {pendingQuote && (
+          <div className="composer-quote" role="group" aria-label={`Quoting ${pendingQuote.source}`}>
+            <QuoteIcon aria-hidden="true" />
+            <div className="composer-quote-body">
+              <span className="composer-quote-source">{pendingQuote.source}</span>
+              <span className="composer-quote-text">{pendingQuote.text}</span>
+            </div>
+            <button type="button" className="composer-quote-remove" aria-label="Remove quote" onClick={() => setPendingQuote(id, null)}><X aria-hidden="true" /></button>
+          </div>
+        )}
         <label htmlFor="message-composer" className="sr-only">Message {selectedAgent.name}</label>
         <textarea
           ref={textareaRef}
@@ -358,9 +373,11 @@ export function Composer() {
           aria-activedescendant={slashMenu.slashMenuOpen && slashMenu.activeSlashCommand && slashMenu.slashSelectable ? `slash-command-${slashMenu.activeSlashCommandIndex}` : undefined}
           placeholder={wakeOnSend
             ? "Send a message to wake"
-            : showDelivery
-              ? followUp ? "Queue for after this run" : "Steer the current run"
-              : "Send a message"}
+            : pendingQuote
+              ? "Add a message about the quote"
+              : showDelivery
+                ? followUp ? "Queue for after this run" : "Steer the current run"
+                : "Send a message"}
           disabled={!canCompose}
         />
         {attachments.attachmentStatus && (

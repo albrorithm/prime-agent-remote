@@ -6,6 +6,7 @@ import { useReplyAnnouncer } from "../hooks/useReplyAnnouncer";
 import { useScrollFollowing } from "../hooks/useScrollFollowing";
 import { useSettings } from "../settings";
 import { AttentionCard } from "./AttentionCard";
+import { SelectionQuote } from "./SelectionQuote";
 import { AgentFamilyPicker, AncestorMenu } from "./AgentFamilyPicker";
 import { Composer } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
@@ -616,7 +617,17 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
           <div
             className="transcript-scroll"
             ref={scrollRef}
-            onScroll={updateFollowing}
+            onScroll={(event) => {
+              updateFollowing();
+              // Reaching the top asks for the page before it. The store refuses
+              // a second request while one is in flight, and a failed page waits
+              // for the retry below rather than hammering the gateway on every
+              // scroll tick.
+              const { scrollTop } = event.currentTarget;
+              if (scrollTop < 240 && selectedHistory && selectedHistory.remaining > 0 && !selectedHistory.loading && !selectedHistory.error) {
+                void loadOlder();
+              }
+            }}
             style={{ touchAction: "pan-y" }}
             aria-label={`${selectedAgent.name} transcript`}
           >
@@ -656,17 +667,21 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
                   {/* Provisional: the mechanism needs a trigger to be reachable at
                       all, and this is the plainest one. Its form is a decision for a
                       person looking at it on a phone. */}
+                  {/* Older rows load on their own as the reader reaches the top;
+                      this only says so, and offers a way out of a failure. */}
                   {selectedHistory && selectedHistory.remaining > 0 && (
-                    <div className="history-load-older-wrap">
-                      <button
-                        type="button"
-                        className="history-load-older"
-                        disabled={selectedHistory.loading}
-                        onClick={() => { void loadOlder(); }}
-                      >
-                        {selectedHistory.loading ? "Loading earlier messages…" : "Load earlier messages"}
-                      </button>
-                      {selectedHistory.error && <p className="history-error" role="alert">{selectedHistory.error}</p>}
+                    <div className="history-load-older-wrap" aria-live="polite">
+                      {selectedHistory.error ? (
+                        <>
+                          <p className="history-error" role="alert">{selectedHistory.error}</p>
+                          <button type="button" className="history-load-older" onClick={() => { void loadOlder(); }}>Try again</button>
+                        </>
+                      ) : (
+                        <p className="history-loading">
+                          {selectedHistory.loading ? <LoaderCircle className="spin" aria-hidden="true" /> : null}
+                          {selectedHistory.loading ? "Loading earlier messages…" : "Scroll up for earlier messages"}
+                        </p>
+                      )}
                     </div>
                   )}
                   {selectedHistory && selectedHistory.remaining === 0 && !selectedHistory.exhaustive && (
@@ -708,6 +723,7 @@ export function TranscriptPanel({ onOpenSessions, onOpenActivity }: TranscriptPa
               )}
             </div>
           </div>
+          <SelectionQuote />
           {!following && unseen > 0 && (
             <button
               className="jump-latest"

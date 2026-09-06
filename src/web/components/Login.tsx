@@ -41,14 +41,7 @@ export function Login() {
           <p className="eyebrow">Prime Agent</p>
           <h1>{hadSession ? "Session expired" : "Pair this device"}</h1>
           <p className="muted">
-            {hadSession ? (
-              <>
-                Your session ended. Ask the gateway for a new pairing code with{" "}
-                <code className="inline-code">prime-agent-remote token</code> and enter it here.
-              </>
-            ) : (
-              "Scan the code the gateway printed, or type it here. A code is good for ten minutes and pairs one phone."
-            )}
+            {hadSession ? "Your session ended. Enter a new pairing code." : "Scan the gateway's code, or type it here."}
           </p>
         </div>
         <label htmlFor="pairing-code">Pairing code</label>
@@ -68,8 +61,7 @@ export function Login() {
             to guess whether retyping the same code will work this time. */}
         {expired && (
           <p className="form-error-hint">
-            Codes last ten minutes. Run <code className="inline-code">prime-agent-remote token</code> on the
-            machine for a new one.
+            That code has expired. Run <code className="inline-code">prime-agent-remote token</code> for a new one.
           </p>
         )}
         <button className="primary-button" disabled={busy || !code.trim()}>

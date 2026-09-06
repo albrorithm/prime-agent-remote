@@ -777,3 +777,23 @@ describe("Composer", () => {
   });
 
 });
+
+describe("a quotation waiting in the composer", () => {
+  it("shows the quote above the field, sends it ahead of the reply, and clears it", async () => {
+    const { setPendingQuote, pendingQuotesSnapshot } = await import("../quote");
+    const user = userEvent.setup();
+    const send = gatewayMock.current.send as ReturnType<typeof vi.fn>;
+    render(<Composer />);
+    setPendingQuote(agent.id, { source: "Planner", text: "the arm64 build fails" });
+    expect(await screen.findByRole("group", { name: "Quoting Planner" })).toHaveTextContent("the arm64 build fails");
+    expect(screen.getByRole("textbox", { name: /Message/ })).toHaveAttribute("placeholder", "Add a message about the quote");
+
+    await user.type(screen.getByRole("textbox", { name: /Message/ }), "Why only there?{Enter}");
+    expect(send).toHaveBeenCalledWith("> From Planner:\n> the arm64 build fails\n\nWhy only there?", undefined, expect.any(String));
+    expect(pendingQuotesSnapshot().has(agent.id)).toBe(false);
+
+    setPendingQuote(agent.id, { source: "Planner", text: "again" });
+    await user.click(await screen.findByRole("button", { name: "Remove quote" }));
+    expect(screen.queryByRole("group", { name: /Quoting/ })).not.toBeInTheDocument();
+  });
+});

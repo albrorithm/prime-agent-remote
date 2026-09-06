@@ -16,15 +16,14 @@ describe("Login", () => {
   it("prompts for a fresh pairing on a true first pair", () => {
     render(<Login />);
     expect(screen.getByRole("heading", { name: "Pair this device" })).toBeInTheDocument();
-    expect(screen.getByText(/A code is good for ten minutes/)).toBeInTheDocument();
+    expect(screen.getByText("Scan the gateway's code, or type it here.")).toBeInTheDocument();
   });
 
   it("frames the prompt as a session expiry when a prior session existed", () => {
     gatewayMock.hadSession = true;
     render(<Login />);
     expect(screen.getByRole("heading", { name: "Session expired" })).toBeInTheDocument();
-    expect(screen.getByText(/Your session ended/)).toBeInTheDocument();
-    expect(screen.getByText("prime-agent-remote token")).toBeInTheDocument();
+    expect(screen.getByText("Your session ended. Enter a new pairing code.")).toBeInTheDocument();
   });
 
   it("disables submit until a code is entered", async () => {
@@ -140,7 +139,7 @@ describe("Login after a pairing code expired", () => {
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Pairing link expired");
-    expect(screen.getByText(/Codes last ten minutes/)).toBeInTheDocument();
+    expect(screen.getByText(/That code has expired/)).toBeInTheDocument();
     expect(screen.getAllByText("prime-agent-remote token").length).toBeGreaterThan(0);
   });
 
@@ -149,7 +148,7 @@ describe("Login after a pairing code expired", () => {
     render(<Login />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("Pairing link expired");
-    expect(screen.getByText(/Codes last ten minutes/)).toBeInTheDocument();
+    expect(screen.getByText(/That code has expired/)).toBeInTheDocument();
   });
 
   it("does not add the recovery line for an ordinary wrong code", async () => {
@@ -161,6 +160,6 @@ describe("Login after a pairing code expired", () => {
     await user.click(screen.getByRole("button", { name: "Pair device" }));
 
     await screen.findByRole("alert");
-    expect(screen.queryByText(/Codes last ten minutes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/That code has expired/)).not.toBeInTheDocument();
   });
 });

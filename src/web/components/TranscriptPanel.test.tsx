@@ -978,14 +978,23 @@ describe("paged history in the panel", () => {
     };
   }
 
-  it("renders paged rows above the window and offers the rest", async () => {
-    const user = userEvent.setup();
+  it("renders paged rows above the window and loads the rest as the reader nears the top", () => {
     pagedState([row("h1"), row("h2")], [row("w1")], { remaining: 3, exhaustive: true });
     render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
 
     const texts = [...document.querySelectorAll(".message-list .message")].map((element) => element.textContent);
     expect(texts.join(" ")).toMatch(/row h1.*row h2.*row w1/);
-    await user.click(screen.getByRole("button", { name: "Load earlier messages" }));
+    expect(screen.getByText("Scroll up for earlier messages")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /earlier|again/i })).not.toBeInTheDocument();
+
+    // jsdom has no layout, so the scroll position is set by hand: near the
+    // top asks for a page, further down does not.
+    const scroller = document.querySelector<HTMLElement>(".transcript-scroll")!;
+    scroller.scrollTop = 2000;
+    fireEvent.scroll(scroller);
+    expect(gatewayMock.state!.loadOlder).not.toHaveBeenCalled();
+    scroller.scrollTop = 100;
+    fireEvent.scroll(scroller);
     expect(gatewayMock.state!.loadOlder).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Earlier messages are not available.")).not.toBeInTheDocument();
   });
@@ -998,12 +1007,17 @@ describe("paged history in the panel", () => {
     expect(screen.getByText("Earlier messages are not available.")).toBeInTheDocument();
   });
 
-  it("shows a failed page load beside the control and keeps it usable", () => {
+  it("stops auto-loading after a failure and offers a retry instead", () => {
     pagedState([], [row("w1")], { remaining: 2, exhaustive: true, error: "Could not load earlier messages" });
     render(<TranscriptPanel onOpenSessions={() => {}} onOpenActivity={() => {}} />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("Could not load earlier messages");
-    expect(screen.getByRole("button", { name: "Load earlier messages" })).toBeEnabled();
+    const scroller = document.querySelector<HTMLElement>(".transcript-scroll")!;
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    expect(gatewayMock.state!.loadOlder).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(gatewayMock.state!.loadOlder).toHaveBeenCalledTimes(1);
   });
 
   // Search answers from what is loaded at once, then from the gateway, which

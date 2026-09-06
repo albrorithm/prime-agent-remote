@@ -80,3 +80,54 @@ export function appendQuotation(draft: string, quotation: string): string {
   const trimmedDraft = draft.replace(/\s+$/, "");
   return trimmedDraft ? `${trimmedDraft}\n\n${quotation}` : quotation;
 }
+
+/**
+ * A quotation waiting in a session's composer, shown there as a chip above the
+ * field and sent ahead of whatever is typed. Held per session, outside React,
+ * so a quote taken from one message survives the composer remounting and can
+ * be aimed at another session (a parent) from a child's transcript. Not
+ * persisted: a quote is a gesture about the reply being written now, and one
+ * that reappeared after a reload would be a surprise.
+ */
+export interface PendingQuote {
+  /** Who said it: the message author as the transcript names them. */
+  source: string;
+  text: string;
+}
+
+const pendingQuotes = new Map<string, PendingQuote>();
+const listeners = new Set<() => void>();
+let snapshot: ReadonlyMap<string, PendingQuote> = new Map();
+
+function notify(): void {
+  snapshot = new Map(pendingQuotes);
+  for (const listener of listeners) listener();
+}
+
+export function setPendingQuote(agentId: string, quote: PendingQuote | null): void {
+  if (quote) pendingQuotes.set(agentId, { source: quote.source, text: quote.text.trim() });
+  else pendingQuotes.delete(agentId);
+  notify();
+}
+
+export function subscribePendingQuotes(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function pendingQuotesSnapshot(): ReadonlyMap<string, PendingQuote> {
+  return snapshot;
+}
+
+/** For a test: forget every waiting quotation. */
+export function clearPendingQuotes(): void {
+  pendingQuotes.clear();
+  notify();
+}
+
+/** How a quotation goes on the wire: a Markdown blockquote naming its source, then the reply. */
+export function composeWithQuote(quote: PendingQuote | undefined, text: string): string {
+  if (!quote) return text;
+  const { quotation } = buildQuotation({ text: quote.text, source: quote.source, selection: quote.text, maxChars: Number.POSITIVE_INFINITY });
+  return `${quotation}${text}`;
+}
