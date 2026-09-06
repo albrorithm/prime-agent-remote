@@ -58,7 +58,10 @@ server.listen(config.port, config.host, () => {
   // itself is never printed: it mints links, it is not one, and it lives in
   // the token file for the CLI or an operator's curl to read.
   const grant = gateway.auth.grants.mint();
-  const origin = [...config.allowedOrigins][0];
+  // The allowlist can carry a dev server's origin as well as this gateway's;
+  // the link should be one this gateway serves, so its own port wins.
+  const origins = [...config.allowedOrigins];
+  const origin = origins.find((candidate) => new URL(candidate).port === String(config.port)) ?? origins[0];
   if (origin) console.log(`Pairing link, good for ten minutes: ${buildPairingUrl(origin, grant.token)}`);
   console.log(`New links: POST /api/v1/auth/grants with the setup token at ${config.pairingTokenPath} as a bearer.`);
 });

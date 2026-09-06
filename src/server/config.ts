@@ -214,6 +214,13 @@ export function loadConfig(env = process.env): GatewayConfig {
   if (production && configuredPairingToken && configuredPairingToken.length < MIN_PRODUCTION_PAIRING_TOKEN_CHARS) {
     throw new Error(`PRIME_WEB_PAIRING_TOKEN must be at least ${MIN_PRODUCTION_PAIRING_TOKEN_CHARS} characters in production`);
   }
+  // The token travels as a bearer, and the gateway only reads a bearer made of
+  // these characters. A token outside them would load, start, and then refuse
+  // every mint with "Invalid setup token" for the life of the process, which is
+  // a worse way to learn this than a refusal here.
+  if (configuredPairingToken && !/^[A-Za-z0-9_-]+$/u.test(configuredPairingToken)) {
+    throw new Error("PRIME_WEB_PAIRING_TOKEN may only contain letters, digits, '-' and '_'");
+  }
 
   // Resolved before the allowlist, which needs the port the gateway will
   // actually bind.

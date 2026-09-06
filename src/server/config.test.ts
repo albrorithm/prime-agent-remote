@@ -76,6 +76,13 @@ describe("loadConfig", () => {
     })).toThrow("at least 32 characters");
   });
 
+  it("refuses a token the bearer parser could never read back", () => {
+    expect(() => loadConfig({
+      NODE_ENV: "test",
+      PRIME_WEB_PAIRING_TOKEN: "abcdefghijklmnopqrstuvwxyz012345+/=",
+    })).toThrow("may only contain");
+  });
+
   it("accepts canonical HTTP origins and validated production settings", () => {
     const value = loadConfig({
       NODE_ENV: "production",

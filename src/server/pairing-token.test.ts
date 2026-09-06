@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadOrCreatePairingToken, rotatePairingToken } from "./pairing-token.js";
+import { loadOrCreatePairingToken, readPairingToken, rotatePairingToken } from "./pairing-token.js";
 
 let directory: string;
 let filePath: string;
@@ -74,5 +74,22 @@ describe("rotatePairingToken", () => {
     await rotatePairingToken(filePath);
     const entries = await readFile(filePath, "utf8");
     expect(entries.trim().length).toBeGreaterThan(0);
+  });
+});
+
+describe("readPairingToken", () => {
+  it("reads back what was minted, and what a rotation wrote after it", async () => {
+    expect(await readPairingToken(filePath)).toBeNull();
+    const minted = await loadOrCreatePairingToken(filePath);
+    expect(await readPairingToken(filePath)).toBe(minted);
+    const rotated = await rotatePairingToken(filePath);
+    expect(rotated).not.toBe(minted);
+    expect(await readPairingToken(filePath)).toBe(rotated);
+  });
+
+  it("answers null rather than minting for a file it cannot use", async () => {
+    await writeFile(filePath, "short\n");
+    expect(await readPairingToken(filePath)).toBeNull();
+    expect(await readFile(filePath, "utf8")).toBe("short\n");
   });
 });
