@@ -1,4 +1,4 @@
-import { Image, Plus, Send, Square, SquareSlash, Wrench } from "lucide-react";
+import { Cpu, Image, Plus, Send, Square, SquareSlash } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import type { MessageDelivery } from "../../protocol";
 import { useGateway } from "../gateway-store";
 import { commandEntry, formatSlashCommandResult, parseSlashCommandInput } from "../slash-commands";
 import { MAX_DRAFT_LENGTH, useComposerDrafts } from "../hooks/useComposerDrafts";
@@ -14,12 +15,23 @@ import { useOptionsMenu } from "../hooks/useOptionsMenu";
 import { experimentalCommandNotice, useSlashCommandMenu } from "../hooks/useSlashCommandMenu";
 import { useSettings } from "../settings";
 import { SwitchHapticButton } from "./SwitchHapticButton";
+import { ModelSheet } from "./ModelSheet";
+import { QueueStrip } from "./QueueStrip";
 
 /** Fallbacks for when no stylesheet has resolved --composer-min-h/--composer-max-h
  *  (jsdom returns "" for a custom property that is not set inline). These must stay
  *  in step with the tokens in styles.css. */
 const COMPOSER_MIN_HEIGHT = 44;
 const COMPOSER_MAX_HEIGHT = 152;
+
+/**
+ * Which delivery each session's composer is set to, for as long as the app is
+ * open. Deliberately not persisted: the choice is about a run that is happening
+ * now, and a reload that silently kept "after this run" would hold back a
+ * message the reader expected to land at the next boundary. Keyed by agent id
+ * because more than one session can be working at once.
+ */
+const deliveryModes = new Map<string, MessageDelivery>();
 
 
 export function Composer() {
@@ -38,6 +50,8 @@ export function Composer() {
 
   const { draft, setDrafts } = useComposerDrafts(id);
   const optionsMenu = useOptionsMenu(id, composerRef, textareaRef);
+  const [delivery, setDelivery] = useState<MessageDelivery>(() => deliveryModes.get(id) ?? "steer");
+  const [modelSheetOpen, setModelSheetOpen] = useState(false);
   const wakeOnSend = Boolean(selectedAgent?.capabilities.resume && !selectedAgent.capabilities.send);
   const canCompose = Boolean(selectedAgent?.capabilities.send || selectedAgent?.capabilities.resume);
   const canAttachImages = Boolean(selectedAgent?.capabilities.send && selectedAgent.capabilities.images);
@@ -60,12 +74,36 @@ export function Composer() {
   const visibleImages = attachments.imageOwnerRef.current === id ? attachments.images : [];
   const hasComposerContent = Boolean(draft.trim() || visibleImages.length);
 
+  // Steering and a follow-up are the same instruction to an idle agent, so the
+  // choice is only offered while there is a run for them to differ about.
+  const dashboardStatus = selectedSnapshot?.dashboard?.status;
+  const working = streaming
+    || dashboardStatus === "responding"
+    || dashboardStatus === "compacting"
+    || dashboardStatus === "running_command";
+  const showDelivery = working && Boolean(selectedAgent?.capabilities.send);
+  // Only ever sent while the control that chose it is on screen. A mode left
+  // over from a run that has since finished would change nothing at the daemon
+  // and everything about what this device claims it asked for.
+  const followUp = showDelivery && delivery === "follow_up";
+  const queue = selectedSnapshot?.queue;
+  const modelEntry = slashMenu.slashCatalog.commands.find((command) => command.name === "model");
+  const modelAvailable = modelEntry?.availability === "available";
+  const currentModelLabel = modelEntry?.options?.find((option) => option.current)?.label;
+
+  function chooseDelivery(next: MessageDelivery) {
+    deliveryModes.set(id, next);
+    setDelivery(next);
+  }
+
   useEffect(() => {
     submissionVersionRef.current += 1;
     submittingRef.current = false;
     retryRequestRef.current = null;
     setSending(false);
     setStopping(false);
+    setModelSheetOpen(false);
+    setDelivery(deliveryModes.get(id) ?? "steer");
 
     return () => {
       submissionVersionRef.current += 1;
@@ -133,8 +171,14 @@ export function Composer() {
             if (activeAgentIdRef.current === agentId && catalog.agentId === agentId) slashMenu.setSlashCatalog(catalog);
           }).catch(() => {});
         }
-      } else if (selectedImages.length) await send(text, selectedImages, requestId);
-      else await send(text, undefined, requestId);
+      } else {
+        const images = selectedImages.length ? selectedImages : undefined;
+        // `steer` is the wire default, so it is sent by omission rather than by
+        // name. Nothing downstream can tell the two apart, and every caller
+        // that never asks keeps the argument list it had.
+        if (followUp) await send(text, images, requestId, "follow_up");
+        else await send(text, images, requestId);
+      }
       if (activeAgentIdRef.current === agentId && submissionVersion === submissionVersionRef.current) {
         setDrafts((current) => ({ ...current, [agentId]: "" }));
         attachments.finishSuccessfulSubmit(selectedImages);
@@ -202,6 +246,7 @@ export function Composer() {
         disabled={!canAttachImages || attachments.preparing || sending}
         onChange={attachments.onImageSelection}
       />
+      {queue && <QueueStrip queue={queue} />}
       {slashMenu.slashMenuOpen && (
         <div className="slash-command-menu" id="slash-command-options" role="listbox" aria-label="Slash commands">
           {slashMenu.slashCommands.map((suggestion, index) => {
@@ -248,7 +293,15 @@ export function Composer() {
         >
           <button role="menuitem" data-menu-index="0" tabIndex={optionsMenu.optionsMenuIndex === 0 ? 0 : -1} onFocus={() => optionsMenu.setOptionsMenuIndex(0)} onClick={slashMenu.startSlashCommand}><SquareSlash /><span><strong>Slash command</strong><small>Run a supported command</small></span></button>
           <button role="menuitem" data-menu-index="1" tabIndex={optionsMenu.optionsMenuIndex === 1 ? 0 : -1} onFocus={() => optionsMenu.setOptionsMenuIndex(1)} onClick={attachments.chooseImages} disabled={!canAttachImages || attachments.preparing || sending}><Image /><span><strong>Image</strong><small>{canAttachImages ? "Attach up to three images" : "Image attachments unavailable"}</small></span></button>
-          <button role="menuitem" data-menu-index="2" tabIndex={-1} disabled><Wrench /><span><strong>Tools and plugins</strong><small>Capability projection required</small></span></button>
+          <button
+            className="composer-model-item"
+            role="menuitem"
+            data-menu-index="2"
+            tabIndex={optionsMenu.optionsMenuIndex === 2 ? 0 : -1}
+            onFocus={() => optionsMenu.setOptionsMenuIndex(2)}
+            onClick={() => { optionsMenu.closeOptions(false); setModelSheetOpen(true); }}
+            disabled={!modelAvailable}
+          ><Cpu /><span><strong>Model and effort</strong><small>{modelAvailable ? currentModelLabel ?? "Choose a model" : "Unavailable for this session"}</small></span></button>
         </div>
       )}
       <SwitchHapticButton
@@ -281,6 +334,12 @@ export function Composer() {
             ))}
           </div>
         )}
+        {showDelivery && (
+          <div className="composer-delivery" role="radiogroup" aria-label="Message delivery">
+            <button type="button" role="radio" aria-checked={delivery === "steer"} onClick={() => chooseDelivery("steer")}>Steer now</button>
+            <button type="button" role="radio" aria-checked={delivery === "follow_up"} onClick={() => chooseDelivery("follow_up")}>After this run</button>
+          </div>
+        )}
         <label htmlFor="message-composer" className="sr-only">Message {selectedAgent.name}</label>
         <textarea
           ref={textareaRef}
@@ -297,7 +356,11 @@ export function Composer() {
           aria-autocomplete="list"
           aria-controls={slashMenu.slashMenuOpen ? "slash-command-options" : undefined}
           aria-activedescendant={slashMenu.slashMenuOpen && slashMenu.activeSlashCommand && slashMenu.slashSelectable ? `slash-command-${slashMenu.activeSlashCommandIndex}` : undefined}
-          placeholder={wakeOnSend ? "Send a message to wake" : "Send a message"}
+          placeholder={wakeOnSend
+            ? "Send a message to wake"
+            : showDelivery
+              ? followUp ? "Queue for after this run" : "Steer the current run"
+              : "Send a message"}
           disabled={!canCompose}
         />
         {attachments.attachmentStatus && (
@@ -320,8 +383,24 @@ export function Composer() {
           buttonClassName="composer-action send"
           onActivate={() => void submit()}
           disabled={!canCompose || (!draft.trim() && !visibleImages.length) || attachments.preparing || sending}
-          label={wakeOnSend ? "Wake thread and send message" : slashMenu.experimentalCommandDraft ? "Run experimental command" : slashMenu.commandDraft ? "Run command" : "Send message"}
+          label={wakeOnSend
+            ? "Wake thread and send message"
+            : slashMenu.experimentalCommandDraft
+              ? "Run experimental command"
+              : slashMenu.commandDraft
+                ? "Run command"
+                : showDelivery
+                  ? followUp ? "Send after this run" : "Send as steering"
+                  : "Send message"}
         ><Send aria-hidden="true" /></SwitchHapticButton>
+      )}
+      {modelSheetOpen && (
+        <ModelSheet
+          agentId={id}
+          catalog={slashMenu.slashCatalog}
+          onCatalogChange={slashMenu.setSlashCatalog}
+          onClose={() => setModelSheetOpen(false)}
+        />
       )}
     </div>
   );

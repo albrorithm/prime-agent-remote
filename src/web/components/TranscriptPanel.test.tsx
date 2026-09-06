@@ -20,22 +20,26 @@ const gatewayMock = vi.hoisted(() => ({ state: null as GatewayMockState | null }
 vi.mock("../gateway-store", async () => {
   const { attentionAgentCount } = await import("../../protocol");
   return {
-    useGateway: () => gatewayMock.state
-      && {
+    // Entries render message actions, which read the store; a test that set
+    // no state still gets an empty one rather than null.
+    useGateway: () => {
+      const state = gatewayMock.state ?? { catalog: { revision: 0, agents: [] }, selectedAgent: null, selectedSnapshot: null, pendingMessages: [], selectAgent: async () => {} };
+      return {
         // Defaulted rather than omitted: the real store always carries these,
         // and a mock that leaves them undefined is kinder than the thing it
         // stands in for. A test that wants the failed state sets them.
         transcriptErrors: {},
         retryTranscript: async () => {},
         // An unpaged store: everything is the window, and nothing is older.
-        selectedTranscript: gatewayMock.state.selectedSnapshot?.messages ?? [],
+        selectedTranscript: state.selectedSnapshot?.messages ?? [],
         selectedHistory: null,
         loadOlder: async () => 0,
         ensureLoadedThrough: async () => true,
         searchTranscript: async () => ({ scope: "loaded" as const, matches: [], total: 0, exhaustive: true }),
-        ...gatewayMock.state,
-        attentionCount: attentionAgentCount(gatewayMock.state.catalog.agents),
-      },
+        ...state,
+        attentionCount: attentionAgentCount(state.catalog.agents),
+      };
+    },
   };
 });
 vi.mock("./MessageContent", () => ({

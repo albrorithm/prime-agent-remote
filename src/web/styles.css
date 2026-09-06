@@ -1099,3 +1099,260 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
   .agent-lineage button { max-width: 84px; }
   .state-pill { display: none; }
 }
+
+/* ---- composer ---- */
+/* Composer surfaces for delivery choice, the Prime queue, and the model sheet.
+   Everything here is built from the tokens styles.css already defines, so a
+   theme change reaches these boxes without them being listed anywhere. */
+
+/* .composer is a three-column grid — options, input, send — with rows aligned
+   to their end. The strip is a full-width row of its own above all three; the
+   delivery control rides inside .composer-input's flex column instead, so it
+   lines up with the textarea rather than with the round buttons. */
+.queue-strip { display: grid; grid-column: 1 / -1; gap: 4px; margin: 0 0 2px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-raised); }
+.queue-strip-header { margin: 0; color: var(--muted); font-size: .5625rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.queue-strip-rows { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.queue-strip-rows li { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
+.queue-strip-lane { flex: 0 0 auto; padding: 1px 5px; border-radius: 5px; background: var(--hover); color: var(--text-soft); font-size: .5rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+/* One line each, always. The queue can hold a paragraph and this is a glance,
+   not a reading surface — the transcript is where an instruction is read. */
+.queue-strip-text { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--text-soft); font-size: .6875rem; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.queue-strip-more { color: var(--muted); font-size: .625rem; }
+
+/* Capped well under the composer's own controls on purpose: this is a modifier
+   on the send that follows it, not a setting, and it disappears the moment the
+   run it modifies is over. The heights are px rather than rem for that reason —
+   the box must not grow into a second row of chrome as the text scale rises. */
+.composer-delivery { display: inline-flex; width: fit-content; max-width: 100%; align-items: stretch; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 99px; background: var(--panel-raised); }
+.composer-delivery button { min-height: 28px; padding: 3px 11px; border: 0; border-radius: 99px; color: var(--muted); background: transparent; font-size: .625rem; font-weight: 600; line-height: 1.2; white-space: nowrap; }
+.composer-delivery button[aria-checked="true"] { color: var(--on-accent); background: var(--accent); }
+
+/* A model id is a path, and the menu is 300px wide at most. Breaking inside it
+   is better than a row that clips the half naming the model. */
+.composer-model-item small { overflow-wrap: anywhere; }
+
+.model-sheet-scrim { position: fixed; z-index: 130; inset: 0; display: flex; align-items: flex-end; justify-content: center; background: var(--scrim-full); }
+.model-sheet { display: grid; width: min(520px, 100%); max-height: 82dvh; gap: 14px; overflow-y: auto; overscroll-behavior: contain; padding: 14px 14px max(14px, env(safe-area-inset-bottom)); border: 1px solid var(--border-mid); border-radius: 18px 18px 0 0; background: var(--panel-raised); box-shadow: 0 -16px 48px var(--shadow-deep); }
+.model-sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.model-sheet-head h2 { margin: 0; font-size: .875rem; }
+.model-sheet-close { display: grid; width: 40px; height: 40px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 50%; color: var(--text-soft); background: transparent; }
+.model-sheet-close svg { width: 17px; height: 17px; }
+.model-sheet-section { display: grid; gap: 7px; }
+.model-sheet-label { margin: 0; color: var(--muted); font-size: .5625rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.model-sheet-models { display: grid; gap: 3px; }
+.model-sheet-row { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 11px; border: 1px solid transparent; border-radius: 10px; color: var(--text); background: var(--panel-raised-2); text-align: left; }
+.model-sheet-row[aria-checked="true"] { border-color: var(--border-mid); }
+.model-sheet-row-label { min-width: 0; overflow-wrap: anywhere; font-size: .75rem; line-height: 1.35; }
+.model-sheet-row svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--accent); }
+.model-sheet-row small { flex: 0 0 auto; color: var(--muted); font-size: .5625rem; }
+.model-sheet-efforts { display: flex; flex-wrap: wrap; gap: 5px; }
+.model-sheet-chip { min-height: 36px; padding: 6px 13px; border: 1px solid var(--border); border-radius: 99px; color: var(--text-soft); background: var(--panel-raised-2); font-size: .6875rem; font-weight: 600; }
+.model-sheet-chip[aria-checked="true"] { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
+.model-sheet-empty { margin: 0; color: var(--muted); font-size: .6875rem; }
+
+/* ---- sessions ---- */
+/* Sessions list organization: filter chips, pinned and archived rows, and the
+   session control rows. Imported by AgentsPanel.tsx rather than added to
+   styles.css so this pass stays reviewable on its own. Everything here uses
+   the tokens declared there; nothing redefines one. */
+
+/* The counts became buttons, so the strip has to hold tap targets rather than
+   a line of text. It wraps rather than scrolls: a chip pushed off the right
+   edge is a chip nobody finds, and at 1.3x text scale there is not room for
+   four of them on one 390px line. Wrapping needs the fixed 38px height gone,
+   so the padding sets the resting height instead. */
+.summary-strip.session-filters {
+  min-height: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+}
+
+.session-filter {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: 99px;
+  color: var(--muted);
+  background: transparent;
+  font-size: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.session-filter svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.session-filter:hover:not([aria-pressed="true"]) {
+  border-color: var(--border-strong);
+  color: var(--text-soft);
+  background: var(--hover);
+}
+
+/* Pressed has to survive a glance on a phone in daylight, so it inverts rather
+   than tinting: a filtered list looks nothing like an unfiltered one, and the
+   chip that did it is the brightest thing in the strip. */
+.session-filter[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+/* The attention tone is the strip's only colour, and it belongs to the count,
+   not to the pressed state, which already has the accent fill. */
+.session-filter.has-attention:not([aria-pressed="true"]) {
+  border-color: var(--tone-attention-soft);
+  color: var(--tone-attention);
+}
+
+.session-filter-reset {
+  margin-left: auto;
+  border-style: dashed;
+  color: var(--text-soft);
+}
+
+/* The way back out of an empty list, inline in the sentence that explains it. */
+.link-button {
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-weight: 680;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-button:hover {
+  color: var(--text);
+  text-decoration-thickness: 2px;
+}
+
+/* Group headings inside the tree. Presentational: the pin on each row is what
+   a screen reader gets, so this only has to separate two runs of rows. */
+.tree-group-label {
+  margin: 10px 0 3px;
+  padding: 0 7px;
+  color: var(--muted-2);
+  font-size: .625rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.tree-group-label:first-child {
+  margin-top: 4px;
+}
+
+/* Rides in the row title's own line box so it scales with the name rather than
+   sitting at a fixed pixel size beside it. */
+.tree-flag-glyph {
+  width: 1em;
+  height: 1em;
+  margin-right: 4px;
+  color: var(--muted);
+  vertical-align: -.12em;
+}
+
+/* On the subtitle line, ahead of the recap: the row still has to say what the
+   session is doing, so this cannot take the line over. */
+.tree-archived-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  color: var(--muted-2);
+  font-size: .9em;
+  font-weight: 650;
+}
+
+.tree-archived-flag svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* Session controls. Each row is one subject with its state above its buttons,
+   so a disabled row still reads as an explanation rather than as dead chrome. */
+.session-controls .session-control-row {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.session-controls .session-control-row:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.session-controls h4 {
+  margin: 0;
+  font-size: .75rem;
+  font-weight: 680;
+}
+
+.session-control-state {
+  margin: 0;
+  color: var(--muted);
+  font-size: .6875rem;
+}
+
+.session-control-state strong {
+  color: var(--text-soft);
+  font-weight: 650;
+}
+
+/* Wraps rather than squeezing: three buttons on one 390px line at 1.3x text
+   scale is where labels start losing their last letters. */
+.session-control-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-control-buttons .secondary-button {
+  min-height: 40px;
+  flex: 1 1 6.5rem;
+  padding: 6px 10px;
+  font-size: .75rem;
+}
+
+.session-control-applied {
+  margin: 0;
+  /* The text tone, not the raw one: this sits on --panel-soft as small bold
+     copy, which is where the pure hue falls short of a readable ratio. */
+  color: var(--tone-success-text);
+  font-size: .6875rem;
+  font-weight: 650;
+}
+
+/* ---- setup ---- */
+/* U8: pairing-code recovery copy and the Diagnostics group. Kept out of
+   styles.css deliberately — see the components that import this file. */
+
+/* Sits under .form-error on the login screen: guidance rather than the error
+   itself, so it reads quieter than the alert above it. */
+.form-error-hint { margin: 0; color: var(--muted-2); font-size: .75rem; line-height: 1.45; }
+
+/* Unlike .settings-facts, the label sits above its value instead of beside
+   it. A side-by-side row that wraps right-aligned text reads as a staircase
+   the moment the value doesn't fit one line — and a Prime Agent build stamp
+   plus its module origin plus connection state routinely doesn't, at 320px
+   or at a 1.3x text scale. Stacking sidesteps the wrap entirely: the value
+   gets the row's full width and simply grows taller. */
+.settings-diagnostics { display: flex; flex-direction: column; margin: 0; }
+.settings-diagnostics > div { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.settings-diagnostics > div:last-child { border-bottom: 0; }
+.settings-diagnostics dt { margin: 0 0 3px; color: var(--muted); font-size: .75rem; }
+.settings-diagnostics dd {
+  margin: 0; overflow-wrap: anywhere; font: 620 .75rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}

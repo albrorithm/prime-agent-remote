@@ -1,8 +1,9 @@
-import { fireEvent, render as renderBare, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render as renderBare, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSnapshot, AgentSummary, SlashCommandCatalog } from "../../protocol";
+import { resetComposerDraftsStoreForTests } from "../hooks/useComposerDrafts";
+import type { AgentSnapshot, AgentSummary, SessionQueue, SlashCommandCatalog } from "../../protocol";
 import { DEFAULT_SETTINGS, SETTINGS_KEY, SettingsProvider, type Settings } from "../settings";
 import { Composer } from "./Composer";
 
@@ -35,6 +36,19 @@ const agent: AgentSummary = {
   capabilities: { send: true, abort: true, resume: false, rename: false, stop: false, deactivate: false, delete: false, respond: true, images: true },
 };
 const snapshot: AgentSnapshot = { revision: 1, agentId: agent.id, messages: [], attention: [] };
+const workingDashboard: NonNullable<AgentSnapshot["dashboard"]> = { status: "responding", needsInput: false, children: [], refines: [] };
+const queue: SessionQueue = {
+  steering: [
+    { text: "check the failing test", truncated: false },
+    { text: "a very long instruction", truncated: true },
+  ],
+  followUp: [
+    { text: "write the release note", truncated: false },
+    { text: "open a pull request", truncated: false },
+    { text: "not listed, past the four rows", truncated: false },
+  ],
+  queuedCount: 7,
+};
 const slashCatalog: SlashCommandCatalog = {
   agentId: agent.id,
   agentRevision: snapshot.revision,
@@ -78,6 +92,9 @@ const slashCatalog: SlashCommandCatalog = {
 let preparedImageCount = 0;
 
 beforeEach(() => {
+  // Drafts are one module-level store now, so a draft typed by one test
+  // would be the next test's starting text.
+  resetComposerDraftsStoreForTests();
   preparedImageCount = 0;
   imageAttachmentMock.prepareImageFile.mockReset();
   imageAttachmentMock.prepareImageFile.mockImplementation(async (file: File) => ({
@@ -560,7 +577,9 @@ describe("Composer", () => {
     await user.type(input, "change direction");
 
     expect(screen.queryByRole("button", { name: "Stop agent" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Send message" }));
+    // While a run is going the send button says which lane it uses, and the
+    // default lane is the one this always had.
+    await user.click(screen.getByRole("button", { name: "Send as steering" }));
 
     await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("change direction", undefined, expect.any(String)));
     expect(gatewayMock.current.abort).not.toHaveBeenCalled();
@@ -618,6 +637,116 @@ describe("Composer", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu", { name: "Composer options" })).not.toBeInTheDocument();
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("offers the delivery choice only while a run is going, and defaults to steering", async () => {
+    const user = userEvent.setup();
+    const idle = render(<Composer />);
+    expect(screen.queryByRole("radiogroup", { name: "Message delivery" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message Agent" })).toHaveAttribute("placeholder", "Send a message");
+    idle.unmount();
+
+    gatewayMock.current.selectedSnapshot = { ...snapshot, dashboard: workingDashboard };
+    render(<Composer />);
+    expect(screen.getByRole("radiogroup", { name: "Message delivery" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Steer now" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "After this run" })).not.toBeChecked();
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    expect(input).toHaveAttribute("placeholder", "Steer the current run");
+
+    await user.type(input, "keep going");
+    await user.click(screen.getByRole("button", { name: "Send as steering" }));
+    await waitFor(() => expect(gatewayMock.current.send).toHaveBeenCalledWith("keep going", undefined, expect.any(String)));
+  });
+
+  it("sends a follow-up when the composer is set to after this run", async () => {
+    gatewayMock.current.selectedSnapshot = { ...snapshot, dashboard: workingDashboard };
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.click(screen.getByRole("radio", { name: "After this run" }));
+    const input = screen.getByRole("textbox", { name: "Message Agent" });
+    expect(input).toHaveAttribute("placeholder", "Queue for after this run");
+    await user.type(input, "then do this");
+    await user.click(screen.getByRole("button", { name: "Send after this run" }));
+
+    await waitFor(() => expect(gatewayMock.current.send)
+      .toHaveBeenCalledWith("then do this", undefined, expect.any(String), "follow_up"));
+  });
+
+  it("keeps one session's delivery choice across a remount without spreading it to another", async () => {
+    // Distinct ids so the choice this makes cannot leak into the rest of the
+    // file: the mode is held in a module-level map, which outlives a render.
+    gatewayMock.current.selectedAgent = { ...agent, id: "queued-agent", name: "Queued" };
+    gatewayMock.current.selectedSnapshot = { ...snapshot, agentId: "queued-agent", dashboard: workingDashboard };
+    const user = userEvent.setup();
+    const view = render(<Composer />);
+    await user.click(screen.getByRole("radio", { name: "After this run" }));
+    view.unmount();
+
+    render(<Composer />);
+    expect(screen.getByRole("radio", { name: "After this run" })).toBeChecked();
+
+    // A second working session starts from the default rather than inheriting it.
+    gatewayMock.current.selectedAgent = { ...agent, id: "steered-agent", name: "Steered" };
+    gatewayMock.current.selectedSnapshot = { ...snapshot, agentId: "steered-agent", dashboard: workingDashboard };
+    render(<Composer />);
+    const groups = screen.getAllByRole("radiogroup", { name: "Message delivery" });
+    expect(within(groups[1]).getByRole("radio", { name: "Steer now" })).toBeChecked();
+  });
+
+  it("lists what Prime holds, in lanes, and counts the rest", () => {
+    gatewayMock.current.selectedSnapshot = { ...snapshot, queue };
+    render(<Composer />);
+
+    const strip = screen.getByRole("group", { name: "Queued in Prime, 7" });
+    expect(strip).toHaveTextContent("Queued in Prime · 7");
+    const rows = within(strip).getAllByRole("listitem");
+    // Four entries at most, steering first, then the remainder as a count.
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toHaveTextContent("Steering");
+    expect(rows[0]).toHaveTextContent("check the failing test");
+    expect(rows[2]).toHaveTextContent("After run");
+    // A truncated entry says so with an ellipsis rather than looking complete.
+    expect(rows[1]).toHaveTextContent("a very long instruction…");
+    expect(rows[4]).toHaveTextContent("+3 more");
+  });
+
+  it("says nothing at all when the daemon does not report a queue", () => {
+    render(<Composer />);
+    expect(screen.queryByRole("group", { name: /Queued in Prime/ })).not.toBeInTheDocument();
+
+    // An empty queue is a different answer from an unknown one, and neither is
+    // a strip: there is nothing to list.
+    gatewayMock.current.selectedSnapshot = { ...snapshot, queue: { steering: [], followUp: [], queuedCount: 0 } };
+    render(<Composer />);
+    expect(screen.queryByRole("group", { name: /Queued in Prime/ })).not.toBeInTheDocument();
+  });
+
+  it("opens the model sheet from the composer menu and names the current model", async () => {
+    const user = userEvent.setup();
+    render(<Composer />);
+    await user.click(screen.getByRole("button", { name: "Composer options" }));
+    const item = await screen.findByRole("menuitem", { name: /^Model and effort/ });
+    await waitFor(() => expect(item).toBeEnabled());
+    expect(item).toHaveTextContent("Example");
+
+    await user.click(item);
+    expect(screen.queryByRole("menu", { name: "Composer options" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Model and effort" })).toBeInTheDocument();
+  });
+
+  it("disables the model item when the session has no model command", async () => {
+    gatewayMock.current.loadSlashCommands = vi.fn().mockResolvedValue({
+      ...slashCatalog,
+      commands: slashCatalog.commands.filter((command) => command.name !== "model"),
+    });
+    const user = userEvent.setup();
+    render(<Composer />);
+    await user.click(screen.getByRole("button", { name: "Composer options" }));
+    const item = screen.getByRole("menuitem", { name: /^Model and effort/ });
+    expect(item).toBeDisabled();
+    expect(item).toHaveTextContent("Unavailable for this session");
   });
 
   it("validates stored draft values before using them", () => {
