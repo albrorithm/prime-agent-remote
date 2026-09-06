@@ -67,6 +67,7 @@
     "docs",
     "extensions",
     "scripts",
+    "!scripts/*.test.mjs",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
