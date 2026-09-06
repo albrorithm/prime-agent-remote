@@ -1,4 +1,4 @@
-import type { AgentSummary } from "../../protocol";
+import { ANSWERABLE_ATTENTION_LIFECYCLES, type AgentSummary } from "../../protocol";
 
 export interface AgentFamilyRow {
   agent: AgentSummary;
@@ -12,15 +12,61 @@ export function agentPriority(agent: AgentSummary): number {
   return 2;
 }
 
-export function indexChildren(agents: AgentSummary[]): Map<string | null, AgentSummary[]> {
+/**
+ * Whether this agent is waiting on a person right now.
+ *
+ * The same rule `attentionAgentCount` counts by, so the attention filter can
+ * never show a different number of rows than the chip that opened it. Note
+ * what it does NOT consult: `needsInput` is the daemon's advisory guess that a
+ * turn may be waiting, and a filter built on a guess hides working sessions
+ * for no reason the user can see.
+ */
+export function needsAttention(agent: AgentSummary): boolean {
+  return agent.attention !== null && ANSWERABLE_ATTENTION_LIFECYCLES.includes(agent.lifecycle);
+}
+
+/**
+ * Grow a set of matching agents into a set that can be drawn as a tree.
+ *
+ * A match five levels down is unreachable without the rows above it, so every
+ * ancestor comes along. Shared by search and by the state filters so the two
+ * can be combined without disagreeing about what "still coherent" means.
+ */
+export function withAncestors(agents: AgentSummary[], matched: ReadonlySet<string>): Set<string> {
+  const parents = new Map(agents.map((agent) => [agent.id, agent.parentId]));
+  const kept = new Set(matched);
+  for (const id of matched) {
+    let parent = parents.get(id) ?? null;
+    // A cycle would be a daemon bug rather than a shape to trust, so walking
+    // stops the moment it revisits a row instead of hanging the drawer.
+    while (parent && !kept.has(parent)) {
+      kept.add(parent);
+      parent = parents.get(parent) ?? null;
+    }
+  }
+  return kept;
+}
+
+export function indexChildren(
+  agents: AgentSummary[],
+  pinnedRoots: ReadonlySet<string> = new Set(),
+): Map<string | null, AgentSummary[]> {
   const children = new Map<string | null, AgentSummary[]>();
   for (const agent of agents) {
     const siblings = children.get(agent.parentId) ?? [];
     siblings.push(agent);
     children.set(agent.parentId, siblings);
   }
-  for (const siblings of children.values()) {
-    siblings.sort((a, b) => agentPriority(a) - agentPriority(b) || b.updatedAt.localeCompare(a.updatedAt));
+  for (const [parentId, siblings] of children) {
+    // Pins only reorder the top level. A pin is about the session you keep
+    // coming back to; inside one, the order that matters is still "who needs
+    // me first", and lifting a pinned subagent above an attention would be a
+    // preference outranking an alarm.
+    const pinFirst = parentId === null && pinnedRoots.size > 0;
+    siblings.sort((a, b) =>
+      (pinFirst ? Number(pinnedRoots.has(b.id)) - Number(pinnedRoots.has(a.id)) : 0)
+      || agentPriority(a) - agentPriority(b)
+      || b.updatedAt.localeCompare(a.updatedAt));
   }
   return children;
 }
@@ -61,8 +107,12 @@ export function buildVisibleAgentDescendants(
   return visible;
 }
 
-export function buildVisibleAgents(agents: AgentSummary[], expanded: Set<string>): AgentSummary[] {
-  const byParent = indexChildren(agents);
+export function buildVisibleAgents(
+  agents: AgentSummary[],
+  expanded: Set<string>,
+  pinnedRoots: ReadonlySet<string> = new Set(),
+): AgentSummary[] {
+  const byParent = indexChildren(agents, pinnedRoots);
 
   const output: AgentSummary[] = [];
   const decided = new Set<string>();

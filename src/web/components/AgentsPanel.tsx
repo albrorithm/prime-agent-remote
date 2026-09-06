@@ -1,11 +1,16 @@
-import { Bot, CircleAlert, Plus, Search, Settings, X } from "lucide-react";
+import { Archive, Bot, CircleAlert, Plus, RotateCcw, Search, Settings, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useGateway } from "../gateway-store";
 import { usePersistentDesktop } from "../hooks/usePersistentDesktop";
+import { useSessionOrganization } from "../hooks/useSessionOrganization";
+import { needsAttention, withAncestors } from "./agent-tree-utils";
 import { AgentTree } from "./AgentTree";
 import { NewSessionPanel } from "./NewSessionPanel";
 import { SessionActions } from "./SessionActions";
 import { SettingsPanel } from "./SettingsPanel";
+
+/** The two state filters the summary counts open. Null is "everything". */
+type StateFilter = "attention" | "working" | null;
 
 interface AgentsPanelProps {
   visible?: boolean;
@@ -16,7 +21,11 @@ interface AgentsPanelProps {
 export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) {
   const { abort, attentionCount, catalog, selectedAgentId, selectAgent } = useGateway();
   const persistentDesktop = usePersistentDesktop();
+  const organization = useSessionOrganization();
+  const { archived, pinned } = organization;
   const [query, setQuery] = useState("");
+  const [stateFilter, setStateFilter] = useState<StateFilter>(null);
+  const [showArchived, setShowArchived] = useState(false);
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manageId, setManageId] = useState<string | null>(null);
@@ -47,26 +56,57 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
   useEffect(() => {
     if (!visible) setQuery("");
   }, [visible]);
+  // Filters are the same kind of hidden state as a stale search: a drawer
+  // reopened tomorrow showing three of eleven sessions, with the reason
+  // scrolled off the top, is the shape this whole feature is meant to avoid.
+  // The archived view resets with them for the same reason.
+  useEffect(() => {
+    if (!visible) {
+      setStateFilter(null);
+      setShowArchived(false);
+    }
+  }, [visible]);
+  /* Archiving is a root-level decision, so a subagent's visibility is its
+     root's. Reading `rootId` rather than walking parents keeps that true even
+     for a row whose parent has not arrived yet. */
+  const archivedRootCount = useMemo(
+    () => catalog.agents.filter((agent) => agent.parentId === null && archived.has(agent.id)).length,
+    [archived, catalog.agents],
+  );
+  /* Counts stay app-wide, deliberately: they are the same numbers the app
+     badge shows, and a hidden session that needs an answer still needs one.
+     A count that shrank when you archived something would let the drawer
+     under-report work the user has not dealt with. */
+  const workingCount = catalog.agents.filter((agent) => agent.activity === "working").length;
+
+  const visibleAgents = useMemo(
+    () => (showArchived ? catalog.agents : catalog.agents.filter((agent) => !archived.has(agent.rootId))),
+    [archived, catalog.agents, showArchived],
+  );
+
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    if (!normalized) return catalog.agents;
-    const matches = new Set(
-      catalog.agents
-        .filter((agent) => `${agent.name} ${agent.description ?? ""}`.toLowerCase().includes(normalized))
+    if (!normalized && !stateFilter) return visibleAgents;
+    const matched = new Set(
+      visibleAgents
+        .filter((agent) => !normalized || `${agent.name} ${agent.description ?? ""}`.toLowerCase().includes(normalized))
+        .filter((agent) => !stateFilter
+          || (stateFilter === "attention" ? needsAttention(agent) : agent.activity === "working"))
         .map((agent) => agent.id),
     );
-    for (const agent of catalog.agents) {
-      if (matches.has(agent.id)) {
-        let parent = agent.parentId;
-        while (parent) {
-          matches.add(parent);
-          parent = catalog.agents.find((item) => item.id === parent)?.parentId ?? null;
-        }
-      }
-    }
-    return catalog.agents.filter((agent) => matches.has(agent.id));
-  }, [catalog.agents, query]);
-  const workingCount = catalog.agents.filter((agent) => agent.activity === "working").length;
+    // Ancestors join after the two tests are combined, not between them: an
+    // ancestor is there to make a match reachable, and one that had to pass
+    // the filter itself would cut the branch it was added to hold up.
+    const kept = withAncestors(visibleAgents, matched);
+    return visibleAgents.filter((agent) => kept.has(agent.id));
+  }, [query, stateFilter, visibleAgents]);
+
+  const filtersActive = Boolean(stateFilter) || showArchived || Boolean(query.trim());
+  function showAll() {
+    setStateFilter(null);
+    setShowArchived(false);
+    setQuery("");
+  }
 
   const navigate = (id: string) => {
     void selectAgent(id);
@@ -93,7 +133,14 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
       {settingsOpen ? (
         <SettingsPanel onClose={() => setSettingsOpen(false)} />
       ) : managed ? (
-        <SessionActions agent={managed} onClose={() => setManageId(null)} />
+        <SessionActions
+          agent={managed}
+          onClose={() => setManageId(null)}
+          pinned={pinned.has(managed.id)}
+          archived={archived.has(managed.id)}
+          onTogglePin={organization.togglePin}
+          onToggleArchive={organization.toggleArchive}
+        />
       ) : creating ? (
         <NewSessionPanel
           onClose={() => setCreating(false)}
@@ -104,9 +151,38 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
         />
       ) : (
         <>
-          <div className="summary-strip" aria-label="Agent summary">
-            <span className={attentionCount ? "has-attention" : ""}><CircleAlert /> {attentionCount} attention</span>
-            <span><Bot /> {workingCount} working</span>
+          <div className="summary-strip session-filters" aria-label="Filter sessions">
+            <button
+              type="button"
+              className={`session-filter ${attentionCount ? "has-attention" : ""}`}
+              aria-pressed={stateFilter === "attention"}
+              onClick={() => setStateFilter((current) => (current === "attention" ? null : "attention"))}
+            >
+              <CircleAlert /> {attentionCount} attention
+            </button>
+            <button
+              type="button"
+              className="session-filter"
+              aria-pressed={stateFilter === "working"}
+              onClick={() => setStateFilter((current) => (current === "working" ? null : "working"))}
+            >
+              <Bot /> {workingCount} working
+            </button>
+            {archivedRootCount > 0 && (
+              <button
+                type="button"
+                className="session-filter"
+                aria-pressed={showArchived}
+                onClick={() => setShowArchived((current) => !current)}
+              >
+                <Archive /> Archived {archivedRootCount}
+              </button>
+            )}
+            {filtersActive && (
+              <button type="button" className="session-filter session-filter-reset" onClick={showAll}>
+                <RotateCcw /> Show all
+              </button>
+            )}
           </div>
           <label className="search-field">
             <Search aria-hidden="true" />
@@ -115,9 +191,25 @@ export function AgentsPanel({ visible, onClose, onNavigate }: AgentsPanelProps) 
           </label>
           <div className="panel-scroll">
             {filtered.length ? (
-              <AgentTree agents={filtered} selectedId={selectedAgentId} onSelect={navigate} onAbort={abort} onManage={setManageId} drawerOpen={visible} />
+              <AgentTree
+                agents={filtered}
+                selectedId={selectedAgentId}
+                onSelect={navigate}
+                onAbort={abort}
+                onManage={setManageId}
+                drawerOpen={visible}
+                pinned={pinned}
+                archived={archived}
+              />
             ) : (
-              <p className="empty-state">No sessions match that search.</p>
+              /* Never "no sessions": the sessions are all still there, and a
+                 list that empties itself after a tap is the one way this
+                 feature could read as having deleted something. The way back
+                 is in the sentence. */
+              <p className="empty-state">
+                No sessions match.{" "}
+                <button type="button" className="link-button" onClick={showAll}>Show all</button>
+              </p>
             )}
           </div>
           {!persistentDesktop && (

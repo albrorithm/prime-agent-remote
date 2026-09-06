@@ -1,9 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Square } from "lucide-react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Archive, ChevronDown, ChevronRight, Pin, SlidersHorizontal, Square } from "lucide-react";
 import type { AgentSummary } from "../../protocol";
 import { agentStatus } from "./agent-status";
 import { buildVisibleAgents, indexChildren } from "./agent-tree-utils";
 import { hasSessionActions } from "./SessionActions";
+
+const EMPTY_IDS: ReadonlySet<string> = new Set();
 
 interface Props {
   agents: AgentSummary[];
@@ -12,6 +14,10 @@ interface Props {
   onAbort?: (id: string) => Promise<void>;
   onManage?: (id: string) => void;
   drawerOpen?: boolean;
+  /** Device-local root ids kept at the top of the list. See useSessionOrganization. */
+  pinned?: ReadonlySet<string>;
+  /** Device-local root ids normally hidden. Rows only reach here once revealed. */
+  archived?: ReadonlySet<string>;
 }
 
 export function directoryLeaf(cwd: string | undefined): string | null {
@@ -41,13 +47,22 @@ function StateIcon({ agent }: { agent: AgentSummary }) {
   return <span className={`agent-status-light ${agentStatus(agent).tone}`} aria-hidden="true" />;
 }
 
-export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, drawerOpen }: Props) {
+export function AgentTree({
+  agents,
+  selectedId,
+  onSelect,
+  onAbort,
+  onManage,
+  drawerOpen,
+  pinned = EMPTY_IDS,
+  archived = EMPTY_IDS,
+}: Props) {
   const roots = agents.filter((agent) => agent.parentId === null).map((agent) => agent.id);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(agents.map((item) => item.id)));
   const [focusId, setFocusId] = useState<string | null>(selectedId ?? roots[0] ?? null);
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
-  const visible = useMemo(() => buildVisibleAgents(agents, expanded), [agents, expanded]);
+  const visible = useMemo(() => buildVisibleAgents(agents, expanded, pinned), [agents, expanded, pinned]);
   /* The sorted index `buildVisibleAgents` descends through, so ArrowRight lands
      on the first child on screen. Position is a different question: rows whose
      parent is missing reach the screen through that function's arrival-order
@@ -172,14 +187,33 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
     event.preventDefault();
   }
 
+  /* Headings, not sections: the rows are one roving-focus tree and splitting
+     them into two would split the arrow keys with them. So the "Pinned" break
+     is drawn between rows and marked presentational, and each pinned row
+     carries its own pin so nothing depends on reading a heading above it. */
+  const groupLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    const roots = visible.filter((item) => item.parentId === null);
+    const firstPinned = roots.find((item) => pinned.has(item.id));
+    if (!firstPinned) return labels;
+    labels.set(firstPinned.id, "Pinned");
+    const firstRest = roots.find((item) => !pinned.has(item.id));
+    if (firstRest) labels.set(firstRest.id, "Other sessions");
+    return labels;
+  }, [pinned, visible]);
+
   return (
     <div className="agent-tree" role="tree" aria-label="Agents">
       {visible.map((agent, index) => {
         const children = childrenByParent.get(agent.id) ?? [];
         const siblingList = siblingsByParent.get(agent.parentId) ?? [];
+        const groupLabel = groupLabels.get(agent.id);
+        const isPinned = agent.parentId === null && pinned.has(agent.id);
+        const isArchived = agent.parentId === null && archived.has(agent.id);
         return (
+          <Fragment key={agent.id}>
+          {groupLabel && <p className="tree-group-label" role="presentation">{groupLabel}</p>}
           <div
-            key={agent.id}
             ref={(node) => {
               if (node) itemRefs.current.set(agent.id, node);
               else itemRefs.current.delete(agent.id);
@@ -213,8 +247,19 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
             )}
             <StateIcon agent={agent} />
             <span className="agent-copy">
-              <strong>{agent.name}</strong>
-              <span>{subtitle(agent)}</span>
+              <strong>
+                {isPinned && <Pin className="tree-flag-glyph" aria-hidden="true" />}
+                {agent.name}
+                {/* The glyph carries this for sighted readers; the tree is a
+                    list of names, so the fact travels with the name. */}
+                {isPinned && <span className="sr-only"> (pinned)</span>}
+              </strong>
+              <span>
+                {isArchived && (
+                  <span className="tree-archived-flag"><Archive aria-hidden="true" />Archived</span>
+                )}
+                {subtitle(agent)}
+              </span>
             </span>
             {agent.unreadCount > 0 && selectedId !== agent.id && (
               <span className="tree-unread" aria-label={`${agent.unreadCount} unread`}>
@@ -251,6 +296,7 @@ export function AgentTree({ agents, selectedId, onSelect, onAbort, onManage, dra
               </button>
             )}
           </div>
+          </Fragment>
         );
       })}
     </div>

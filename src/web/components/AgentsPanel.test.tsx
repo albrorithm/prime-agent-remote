@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { attentionAgentCount, type AgentSummary } from "../../protocol";
@@ -40,6 +40,7 @@ const gatewayMock = vi.hoisted(() => ({
 vi.mock("../gateway-store", () => ({ useGateway: () => gatewayMock }));
 
 beforeEach(() => {
+  localStorage.clear();
   gatewayMock.abort = vi.fn();
   gatewayMock.catalog = { revision: 1, agents: [root, child, other] };
   gatewayMock.attentionCount = attentionAgentCount(gatewayMock.catalog.agents);
@@ -77,7 +78,11 @@ describe("AgentsPanel", () => {
 
     await user.type(screen.getByPlaceholderText("Search sessions"), "nonexistent-agent-name");
 
-    expect(screen.getByText("No sessions match that search.")).toBeInTheDocument();
+    // Never "no sessions": the way back is in the sentence.
+    expect(screen.getByText(/No sessions match\./)).toBeInTheDocument();
+    // The chip strip offers a reset too; the one inside the sentence is the point here.
+    await user.click(within(screen.getByText(/No sessions match\./)).getByRole("button", { name: "Show all" }));
+    expect(screen.queryByText(/No sessions match\./)).not.toBeInTheDocument();
   });
 
   it("navigates to a selected agent and calls onNavigate", async () => {
@@ -203,5 +208,31 @@ describe("AgentsPanel", () => {
     await user.type(screen.getByPlaceholderText("Search sessions"), "db-migration");
 
     expect(screen.getByPlaceholderText("Search sessions")).toHaveValue("db-migration");
+  });
+});
+
+describe("session filters and organization", () => {
+  it("turns the counts into filters with a visible way back, and reveals archived sessions on request", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("prime.session-organization", JSON.stringify({ version: 1, pinned: [], archived: ["other"] }));
+    renderPanel({ visible: true });
+
+    // Archived roots are hidden until asked for, and the count says how many.
+    expect(screen.queryByText("docs-cleanup")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Archived 1/ }));
+    expect(screen.getByText("docs-cleanup")).toBeInTheDocument();
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /attention/ }));
+    expect(screen.getByRole("button", { name: /attention/ })).toHaveAttribute("aria-pressed", "true");
+    // The blocked child and its root stay so the tree still reads; a root with
+    // nothing to answer goes.
+    expect(screen.getByText("db-migration")).toBeInTheDocument();
+    expect(screen.getByText("release-planning")).toBeInTheDocument();
+    expect(screen.queryByText("docs-cleanup")).not.toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: "Show all" })[0]!);
+    expect(screen.getByRole("button", { name: /attention/ })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByText("docs-cleanup")).not.toBeInTheDocument();
   });
 });

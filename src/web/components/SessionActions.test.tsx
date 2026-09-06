@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSummary } from "../../protocol";
 import { hasSessionActions, SessionActions } from "./SessionActions";
 
@@ -8,9 +8,24 @@ const rename = vi.fn();
 const stop = vi.fn();
 const deleteSession = vi.fn();
 
-vi.mock("../gateway-store", () => ({
-  useGateway: () => ({ deleteSession, rename, stop }),
+const gatewayMock = vi.hoisted(() => ({
+  runSlashCommand: vi.fn(),
+  selectedAgentId: null as string | null,
 }));
+vi.mock("../gateway-store", () => ({
+  useGateway: () => ({
+    deleteSession,
+    rename,
+    stop,
+    runSlashCommand: gatewayMock.runSlashCommand,
+    selectedAgentId: gatewayMock.selectedAgentId,
+    selectedSnapshot: null,
+  }),
+}));
+beforeEach(() => {
+  gatewayMock.runSlashCommand.mockReset();
+  gatewayMock.selectedAgentId = null;
+});
 
 function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
   return {
@@ -43,10 +58,15 @@ function makeAgent(overrides: Partial<AgentSummary> = {}): AgentSummary {
 }
 
 describe("hasSessionActions", () => {
-  it("is false for a session with nothing to manage", () => {
+  it("is false for a subagent with nothing to manage, and true for any root, which can always be pinned or archived", () => {
     expect(hasSessionActions(makeAgent({
+      parentId: "root",
       capabilities: { rename: false, stop: false, delete: false } as AgentSummary["capabilities"],
     }))).toBe(false);
+    expect(hasSessionActions(makeAgent({
+      parentId: null,
+      capabilities: { rename: false, stop: false, delete: false } as AgentSummary["capabilities"],
+    }))).toBe(true);
   });
 
   it("is true for a session that can only be stopped", () => {
@@ -220,5 +240,46 @@ describe("SessionActions", () => {
     // sitting primed under the user's thumb.
     expect(screen.queryByRole("button", { name: "Delete permanently" })).toBeNull();
     expect(screen.getByRole("button", { name: "Delete permanently…" })).toBeEnabled();
+  });
+});
+
+describe("organization and controls", () => {
+  it("offers pin and archive for a root only, as reversible toggles that stop nothing", async () => {
+    const user = userEvent.setup();
+    const onTogglePin = vi.fn();
+    const onToggleArchive = vi.fn();
+    const root = render(<SessionActions agent={makeAgent()} onClose={() => {}} pinned={false} archived onTogglePin={onTogglePin} onToggleArchive={onToggleArchive} />);
+    await user.click(screen.getByRole("button", { name: "Pin" }));
+    expect(onTogglePin).toHaveBeenCalledWith("agent-1");
+    await user.click(screen.getByRole("button", { name: "Unarchive" }));
+    expect(onToggleArchive).toHaveBeenCalledWith("agent-1");
+    root.unmount();
+
+    render(<SessionActions agent={makeAgent({ id: "child", parentId: "agent-1" })} onClose={() => {}} onTogglePin={onTogglePin} onToggleArchive={onToggleArchive} />);
+    // A subagent's place in the list is its root's, so it offers neither.
+    expect(screen.queryAllByRole("button", { name: /^(Pin|Unpin|Archive|Unarchive)$/ })).toHaveLength(0);
+  });
+
+  it("enables goal, autonomous, and heartbeat controls only for the selected live root, and sends the command grammar", async () => {
+    const user = userEvent.setup();
+    gatewayMock.selectedAgentId = "someone-else";
+    const elsewhere = render(<SessionActions agent={makeAgent()} onClose={() => {}} />);
+    expect(screen.getByText("Open this session to change it.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Turn on" })).toBeDisabled();
+    expect(gatewayMock.runSlashCommand).not.toHaveBeenCalled();
+    elsewhere.unmount();
+
+    gatewayMock.selectedAgentId = "agent-1";
+    gatewayMock.runSlashCommand.mockResolvedValue({ kind: "heartbeat", status: "active", schedule: "every 30m" });
+    render(<SessionActions agent={makeAgent()} onClose={() => {}} />);
+    await waitFor(() => expect(gatewayMock.runSlashCommand).toHaveBeenCalledWith("heartbeat", "status"));
+    expect(await screen.findByText(/Running/)).toBeInTheDocument();
+
+    gatewayMock.runSlashCommand.mockResolvedValue({ kind: "session_accepted" });
+    await user.click(screen.getByRole("button", { name: "Turn on" }));
+    expect(gatewayMock.runSlashCommand).toHaveBeenCalledWith("autonomous", "on");
+    await user.type(screen.getByLabelText("Set a goal objective"), "Ship 0.2{Enter}");
+    expect(gatewayMock.runSlashCommand).toHaveBeenCalledWith("goal", "Ship 0.2");
+    expect(await screen.findAllByRole("status")).not.toHaveLength(0);
   });
 });
