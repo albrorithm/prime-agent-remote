@@ -38,6 +38,8 @@ export interface SlashCommandOption {
   value: string;
   label: string;
   current?: boolean;
+  /** Set on a `model` option Prime Agent lists among the session's own scoped models. */
+  scoped?: boolean;
 }
 
 export type SlashCommandAvailability = "available" | "experimental" | "unavailable";
@@ -599,6 +601,7 @@ const slashCommandOptionSchema = z.object({
   value: z.string(),
   label: z.string(),
   current: z.boolean().optional(),
+  scoped: z.boolean().optional(),
 });
 
 const slashCommandCatalogEntrySchema = z.object({

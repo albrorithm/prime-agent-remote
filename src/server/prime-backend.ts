@@ -194,6 +194,7 @@ interface PrimeConnectionState {
   model?: PrimeModel;
   thinkingLevel?: string;
   availableThinkingLevels?: string[];
+  scopedModels?: Array<{ model?: PrimeModel }>;
 }
 
 interface PrimeHeartbeat {
@@ -405,7 +406,18 @@ function safeLabel(value: unknown, fallback: string, maxChars = 120): string {
   return (label || fallback).slice(0, maxChars);
 }
 
-function modelCatalogOptions(models: readonly PrimeModel[], current?: PrimeModel): SlashCommandOption[] {
+function modelCatalogOptions(
+  models: readonly PrimeModel[],
+  current?: PrimeModel,
+  scoped?: readonly { model?: PrimeModel }[],
+): SlashCommandOption[] {
+  const scopedKeys = new Set<string>();
+  for (const entry of scoped ?? []) {
+    const model = entry?.model;
+    if (model && typeof model.provider === "string" && typeof model.id === "string" && model.provider && model.id) {
+      scopedKeys.add(`${model.provider}/${model.id}`);
+    }
+  }
   const seen = new Set<string>();
   const options: SlashCommandOption[] = [];
   for (const model of models) {
@@ -418,6 +430,7 @@ function modelCatalogOptions(models: readonly PrimeModel[], current?: PrimeModel
       value,
       label: reference,
       ...(current?.provider === model.provider && current.id === model.id ? { current: true } : {}),
+      ...(scopedKeys.has(value) ? { scoped: true } : {}),
     });
   }
   return options.sort((left, right) => Number(Boolean(right.current)) - Number(Boolean(left.current)) || left.label.localeCompare(right.label));
@@ -2214,7 +2227,7 @@ export class PrimeBackend implements AgentBackend {
     }
     const builtins = builtinSlashCommandEntries({
       supportedDirectCommands: supported,
-      modelOptions: modelCatalogOptions(models, state.model),
+      modelOptions: modelCatalogOptions(models, state.model, state.scopedModels),
       effortOptions,
       heartbeatOptions,
     });

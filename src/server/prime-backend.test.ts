@@ -147,6 +147,7 @@ const fixture: FixtureState = {
     model: { provider: "openai", id: "example", name: "Example", headers: { Authorization: "secret" } },
     thinkingLevel: "medium",
     availableThinkingLevels: ["low", "medium", "high"],
+    scopedModels: [{ model: { provider: "other", id: "example" } }],
   },
   sessionStats: {
     sessionFile: "/private/session.jsonl",
@@ -1118,6 +1119,24 @@ describe("PrimeBackend", () => {
       expect((await backend.agentSnapshot(summary.id))?.revision).toBe(snapshot!.revision + 1);
     } finally {
       fixture.adapterDelayMs = 0;
+      hub.close();
+      await backend.close();
+    }
+  });
+
+  it("marks a model option scoped when the connection state lists it among the session's scoped models", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    // The default fixture scopes other/example; openai/example (current) is left unscoped.
+    const backend = new PrimeBackend(moduleSpecifier());
+    const hub = new EventHub();
+    await backend.initialize(hub);
+    try {
+      const summary = backend.catalog().agents[0];
+      const commandCatalog = await backend.slashCommandCatalog(summary.id);
+      const modelOptions = commandCatalog?.commands.find((command) => command.name === "model")?.options ?? [];
+      expect(modelOptions.find((option) => option.value === "other/example")).toMatchObject({ scoped: true });
+      expect(modelOptions.find((option) => option.value === "openai/example")?.scoped).toBeUndefined();
+    } finally {
       hub.close();
       await backend.close();
     }

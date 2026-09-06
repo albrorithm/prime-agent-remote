@@ -31,12 +31,20 @@ export function ModelSheet({ agentId, catalog, onCatalogChange, onClose }: Model
   const { runSlashCommand, loadSlashCommands } = useGateway();
   /** The `kind:value` being applied, so exactly one row can say so. */
   const [applying, setApplying] = useState<string | null>(null);
+  /** Whether the full model list is open. Stays open through a pick, on purpose: the
+   * catalog reload that follows moves the check mark without collapsing the list under it. */
+  const [modelsExpanded, setModelsExpanded] = useState(false);
   const closeRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const modelLabelId = `${titleId}-model`;
   const effortLabelId = `${titleId}-effort`;
+  const allModelsListId = `${titleId}-all-models`;
   const models = optionsFor(catalog, "model");
   const efforts = optionsFor(catalog, "effort");
+  // Prime's own scoped shortlist, plus the current model even when it fell out of
+  // scope: the check mark that answers "what is this session on" must always be
+  // visible without opening the full list.
+  const primaryModels = models.filter((option) => option.scoped || option.current);
 
   useEffect(() => {
     closeRef.current?.focus({ preventScroll: true });
@@ -54,6 +62,25 @@ export function ModelSheet({ agentId, catalog, onCatalogChange, onClose }: Model
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
+
+  function modelRow(option: SlashCommandOption) {
+    return (
+      <button
+        key={option.value}
+        type="button"
+        role="radio"
+        className="model-sheet-row"
+        aria-checked={Boolean(option.current)}
+        aria-disabled={applying !== null}
+        onClick={() => void apply("model", option.value)}
+      >
+        <span className="model-sheet-row-label">{option.label}</span>
+        {applying === `model:${option.value}`
+          ? <small>Applying…</small>
+          : option.current ? <Check aria-hidden="true" /> : null}
+      </button>
+    );
+  }
 
   async function apply(kind: "model" | "effort", value: string) {
     if (applying) return;
@@ -91,27 +118,33 @@ export function ModelSheet({ agentId, catalog, onCatalogChange, onClose }: Model
           ><X aria-hidden="true" /></button>
         </div>
 
-        {models.length > 0 && (
+        {primaryModels.length > 0 && (
           <div className="model-sheet-section">
             <p className="model-sheet-label" id={modelLabelId}>Model</p>
             <div className="model-sheet-models" role="radiogroup" aria-labelledby={modelLabelId}>
-              {models.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="radio"
-                  className="model-sheet-row"
-                  aria-checked={Boolean(option.current)}
-                  aria-disabled={applying !== null}
-                  onClick={() => void apply("model", option.value)}
-                >
-                  <span className="model-sheet-row-label">{option.label}</span>
-                  {applying === `model:${option.value}`
-                    ? <small>Applying…</small>
-                    : option.current ? <Check aria-hidden="true" /> : null}
-                </button>
-              ))}
+              {primaryModels.map((option) => modelRow(option))}
             </div>
+          </div>
+        )}
+
+        {models.length > 0 && (
+          <div className="model-sheet-section">
+            <button
+              type="button"
+              className="model-sheet-expander"
+              aria-expanded={modelsExpanded}
+              aria-controls={allModelsListId}
+              onClick={() => setModelsExpanded((expanded) => !expanded)}
+            >
+              All models · {models.length}
+            </button>
+            {modelsExpanded && (
+              <div className="model-sheet-all-models" id={allModelsListId}>
+                <div className="model-sheet-models" role="radiogroup" aria-label="All models">
+                  {models.map((option) => modelRow(option))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

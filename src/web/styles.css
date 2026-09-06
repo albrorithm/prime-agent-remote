@@ -1185,6 +1185,13 @@ button.dashboard-child:hover { background: var(--panel-raised-2); }
 .model-sheet-chip { min-height: 36px; padding: 6px 13px; border: 1px solid var(--border); border-radius: 99px; color: var(--text-soft); background: var(--panel-raised-2); font-size: .6875rem; font-weight: 600; }
 .model-sheet-chip[aria-checked="true"] { border-color: var(--accent); color: var(--on-accent); background: var(--accent); }
 .model-sheet-empty { margin: 0; color: var(--muted); font-size: .6875rem; }
+.model-sheet-expander { display: flex; min-height: 40px; width: 100%; align-items: center; justify-content: center; padding: 8px 11px; border: 1px solid var(--border); border-radius: 10px; color: var(--text-soft); background: transparent; font-size: .6875rem; font-weight: 600; }
+.model-sheet-expander[aria-expanded="true"] { color: var(--text); background: var(--panel-raised-2); }
+/* The daemon's real catalog runs past 60 rows; this box, not the sheet itself,
+   is what scrolls, so the thinking-level section below it never gets pushed
+   off screen. */
+.model-sheet-all-models { max-height: 38dvh; overflow-y: auto; overscroll-behavior: contain; }
+.model-sheet-all-models .model-sheet-models { padding-top: 3px; }
 
 /* ---- sessions ---- */
 /* Sessions list organization: filter chips, pinned and archived rows, and the

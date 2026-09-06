@@ -143,7 +143,7 @@ An `AttentionRequest` carries `{ id, agentId, kind, title, detail?, revision, re
 
 The four session-owned commands—`compact`, `refine`, `goal`, and `autonomous`—are reconstructed server-side and admitted through Prime's normal session-input path. The five adapter commands never use `prompt()`:
 
-- `model` validates an exact available provider/model before calling `setModel()`;
+- `model` validates an exact available provider/model before calling `setModel()`. A model option may carry `scoped: true` when Prime Agent lists that model among the session's own scoped models; the flag comes straight from the daemon's connection state, unchanged;
 - `effort` validates the current model's available thinking levels before calling `setThinkingLevel()`;
 - `name` reads or updates the session name through `getState()` and `setSessionName()`;
 - `context` returns only finite token, context-window, percentage, and cost fields from `getSessionStats()`;
