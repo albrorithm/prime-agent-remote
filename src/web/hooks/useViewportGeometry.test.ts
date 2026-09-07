@@ -88,7 +88,7 @@ function geometryEnvironment() {
   const windowEvents = eventTarget();
   const documentEvents = eventTarget();
   const properties = new Map<string, string>();
-  const viewport = Object.assign(viewportEvents, { height: 800, scale: 1, offsetTop: 0, pageTop: 0 });
+  const viewport = Object.assign(viewportEvents, { width: 390, height: 800, scale: 1, offsetTop: 0, pageTop: 0 });
   const windowTarget = Object.assign(windowEvents, { scrollY: 0 });
   const documentTarget = Object.assign(documentEvents, {
     visibilityState: "visible",
@@ -295,22 +295,22 @@ describe("viewport geometry", () => {
     expect(env.properties.get("--viewport-top")).toBe("0px");
   });
 
-  /* The gate is "a keyboard is being tracked", which a focused editable turns on
-     even with no viewport shrink at all — an iPad with a hardware keyboard. The
-     shell is sized to the visual viewport there too, so there is still no hidden
-     field for iOS to scroll to and still nothing to compensate. */
-  it("holds the origin for a lift with a field focused and no keyboard at all", () => {
+  // Focus alone protects the initial opening window, but cannot suppress
+  // recovery forever once the full visible frame has been confirmed.
+  it("waits for a stable keyboard-free frame before correcting a focused page lift", () => {
     const env = geometryEnvironment();
     install(env);
     env.documentTarget.activeElement = focusedComposer;
     env.viewport.offsetTop = 200;
     env.viewport.emit("resize");
-    env.work.drain();
+    env.work.drainFrames();
     expect(env.properties.get("--viewport-top")).toBe("0px");
     expect(env.properties.has("--keyboard-height")).toBe(false);
 
-    // ...and it is not sticky: focus leaving hands a genuinely displaced page
-    // straight back to the settle logic.
+    // Both confirmation deadlines must finish without another browser event.
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("200px");
+
     env.documentTarget.activeElement = null;
     env.viewport.emit("resize");
     env.work.drain();
@@ -609,5 +609,175 @@ describe("viewport geometry", () => {
     expect(env.work.timers.size).toBe(0);
     expect(env.work.frames.size).toBe(0);
     expect(env.properties.size).toBe(0);
+  });
+});
+
+
+// These are synthetic event sequences, not a native iOS keyboard simulation.
+describe("post-keyboard frame recovery", () => {
+  function openKeyboard(env: ReturnType<typeof geometryEnvironment>) {
+    env.documentTarget.activeElement = focusedComposer;
+    env.viewport.height = 500;
+    env.viewport.emit("resize");
+    env.work.drain();
+  }
+
+  for (const retainFocus of [true, false]) {
+    it(`accepts the pre-keyboard visual frame with a layout mismatch (retain focus: ${retainFocus})`, () => {
+      const env = geometryEnvironment();
+      env.documentTarget.documentElement.clientHeight = 834;
+      const scroll = vi.fn((_x: number, y: number) => { env.windowTarget.scrollY = y; });
+      install(env, scroll);
+      openKeyboard(env);
+      env.windowTarget.scrollY = 336;
+      expect(scroll).not.toHaveBeenCalled();
+
+      env.viewport.height = 800;
+      if (!retainFocus) env.documentTarget.activeElement = null;
+      env.viewport.emit("resize");
+      env.work.drain();
+
+      expect(env.properties.get("--viewport-height")).toBe("800px");
+      expect(env.properties.get("--viewport-top")).toBe("0px");
+      expect(env.properties.has("--keyboard-height")).toBe(false);
+      expect(env.windowTarget.scrollY).toBe(0);
+      expect(scroll).toHaveBeenCalledWith(0, 0);
+    });
+  }
+
+  it("finishes dismissal when the resting height is first seen at the last scheduled check", () => {
+    const env = geometryEnvironment();
+    const scroll = vi.fn((_x: number, y: number) => { env.windowTarget.scrollY = y; });
+    install(env, scroll);
+    openKeyboard(env);
+    env.windowTarget.scrollY = 336;
+
+    // The last browser event arrives before the new geometry is readable.
+    // Only the 700ms sample sees the return; it must schedule its own +250ms.
+    env.viewport.emit("resize");
+    env.work.schedule(() => { env.viewport.height = 800; }, 500);
+    env.work.drain();
+
+    expect(env.windowTarget.scrollY).toBe(0);
+    expect(env.properties.has("--keyboard-height")).toBe(false);
+    expect(env.work.timers.size).toBe(0);
+  });
+
+  it("finishes the offset confirmation too when recovery starts after the settle burst", () => {
+    const env = geometryEnvironment();
+    const scroll = vi.fn((_x: number, y: number) => { env.windowTarget.scrollY = y; });
+    install(env, scroll);
+    openKeyboard(env);
+    env.windowTarget.scrollY = 336;
+    env.viewport.emit("resize");
+    env.work.schedule(() => {
+      env.viewport.height = 800;
+      env.viewport.offsetTop = 34;
+    }, 500);
+    env.work.drain();
+
+    expect(env.windowTarget.scrollY).toBe(0);
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+    expect(env.properties.get("--viewport-top")).toBe("34px");
+    expect(env.work.timers.size).toBe(0);
+
+    // Do not freeze that compensation after the visual viewport relaxes.
+    env.viewport.offsetTop = 0;
+    env.viewport.emit("scroll");
+    env.work.drain();
+    expect(env.properties.get("--viewport-top")).toBe("0px");
+  });
+
+  for (const retainFocus of [true, false]) {
+    it(`performs one dismissal reset even when reported root scroll is zero (retain focus: ${retainFocus})`, () => {
+      const env = geometryEnvironment();
+      const { scroll } = install(env);
+      openKeyboard(env);
+      expect(scroll).not.toHaveBeenCalled();
+      env.viewport.height = 800;
+      if (!retainFocus) env.documentTarget.activeElement = null;
+      env.viewport.emit("resize");
+      env.work.drain();
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll).toHaveBeenCalledWith(0, 0);
+
+      // The scroll event caused by the reset must not trigger another reset.
+      env.windowTarget.emit("scroll");
+      env.viewport.emit("scroll");
+      env.work.drain();
+      expect(scroll).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("re-reads geometry instead of applying a pending reset after the keyboard reopens", () => {
+    const env = geometryEnvironment();
+    const { scroll } = install(env);
+    openKeyboard(env);
+    env.windowTarget.scrollY = 336;
+    env.viewport.emit("resize");
+    env.work.schedule(() => { env.viewport.height = 800; }, 500);
+    // No event at reopening: even the deadline itself must check fresh state.
+    env.work.schedule(() => { env.viewport.height = 500; }, 800);
+    env.work.drain();
+    expect(scroll).not.toHaveBeenCalled();
+    expect(env.properties.get("--keyboard-height")).toBe("300px");
+    expect(env.properties.get("--viewport-height")).toBe("800px");
+  });
+
+  it("does not recognize an old resting height at a different width", () => {
+    const env = geometryEnvironment();
+    env.documentTarget.documentElement.clientHeight = 834;
+    const { scroll } = install(env);
+    openKeyboard(env);
+    env.windowTarget.scrollY = 336;
+    env.viewport.width = 844;
+    env.viewport.height = 800;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(scroll).not.toHaveBeenCalled();
+    expect(env.properties.get("--keyboard-height")).toBe("34px");
+  });
+
+  it("tolerates one pixel of rounding when recognizing the resting rectangle", () => {
+    const env = geometryEnvironment();
+    env.documentTarget.documentElement.clientHeight = 834;
+    const { scroll } = install(env);
+    openKeyboard(env);
+    env.viewport.height = 799;
+    env.viewport.width = 391;
+    env.viewport.emit("resize");
+    env.work.drain();
+    expect(env.properties.get("--viewport-height")).toBe("799px");
+    expect(env.properties.has("--keyboard-height")).toBe(false);
+    expect(scroll).toHaveBeenCalledWith(0, 0);
+  });
+
+  it("can recover repeated keyboard sessions without blurring the composer", () => {
+    const env = geometryEnvironment();
+    env.documentTarget.documentElement.clientHeight = 834;
+    const { scroll } = install(env);
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      openKeyboard(env);
+      env.viewport.height = 800;
+      env.viewport.emit("resize");
+      env.work.drain();
+      expect(env.properties.has("--keyboard-height")).toBe(false);
+      expect(scroll).toHaveBeenCalledTimes(cycle + 1);
+    }
+  });
+
+  it("cancels a pending confirmation on cleanup", () => {
+    const env = geometryEnvironment();
+    const { cleanup, scroll } = install(env);
+    openKeyboard(env);
+    env.viewport.emit("resize");
+    env.work.schedule(() => { env.viewport.height = 800; }, 500);
+    env.work.schedule(cleanup, 800);
+    env.work.drain();
+    expect(scroll).not.toHaveBeenCalled();
+    expect(env.properties.size).toBe(0);
+    expect(env.work.timers.size).toBe(0);
+    expect(env.work.frames.size).toBe(0);
+    expect(env.viewport.listenerCount()).toBe(0);
   });
 });
