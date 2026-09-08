@@ -4,6 +4,12 @@ A remote interface for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-
 The daemon stays on your machine; a small authenticated gateway sits in front
 of it, so another device can drive an agent without exposing a terminal.
 
+<p align="center">
+  <a href="docs/screenshots/desktop-pair.png"><img src="docs/screenshots/desktop-pair.png" alt="Conversation and session management in Prime Agent Remote" width="520"></a>
+  <br>
+  <sub>Open full-size: <a href="docs/screenshots/conversation.png">Conversation</a> · <a href="docs/screenshots/sessions.png">Sessions</a></sub>
+</p>
+
 It is built for phones: it installs to the home screen and opens its session
 drawer with a swipe. Desktop browsers are supported (the drawer becomes a
 permanent sidebar), but desktop is not what this is designed for or regularly
