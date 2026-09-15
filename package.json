@@ -1,6 +1,6 @@
 {
   "name": "@albrorithm/prime-agent-remote",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A mobile-first, installable web UI for Prime Agent: an authenticated gateway that puts a phone-sized chat interface in front of your local agent daemon.",
   "license": "MIT",
   "author": "albrorithm",
@@ -26,7 +26,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.server.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "npm run build && node scripts/smoke.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs && node scripts/smoke-prime-client.mjs",
     "prepare": "node scripts/prepare.mjs"
   },
   "dependencies": {
@@ -56,7 +56,8 @@
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vitest": "^4.1.11",
-    "vitest-axe": "^0.1.0"
+    "vitest-axe": "^0.1.0",
+    "esbuild": "0.28.2"
   },
   "bin": {
     "prime-agent-remote": "dist-server/cli/index.js"
@@ -64,6 +65,7 @@
   "files": [
     "dist",
     "dist-server",
+    "vendor/prime-daemon",
     "docs",
     "extensions",
     "scripts",

@@ -54,6 +54,8 @@ import type {
 } from "../protocol.js";
 import {
   BackendCapabilityError,
+  BackendRecoveringError,
+  isSessionRecovering,
   BackendConflictError,
   BackendNotFoundError,
   CoalescedRefreshQueue,
@@ -97,6 +99,11 @@ interface PrimeResponse {
   success: boolean;
   data?: unknown;
   error?: string;
+  errorInfo?: { code?: string };
+}
+
+function primeError(error: unknown, fallback: string): Error {
+  return isSessionRecovering(error) ? new BackendRecoveringError() : new Error(fallback);
 }
 
 interface PrimeSessionSummary {
@@ -2154,9 +2161,9 @@ export class PrimeBackend implements AgentBackend {
           streamingBehavior: input.delivery === "follow_up" ? "followUp" : "steer",
           images,
         });
-      } catch {
+      } catch (error) {
         // Do not let daemon/provider errors echo prompt text or image payloads into gateway logs.
-        throw new Error("Prime prompt failed");
+        throw primeError(error, "Prime prompt failed");
       }
       for (const image of input.images) this.cacheImage(image);
       return {
@@ -2252,8 +2259,8 @@ export class PrimeBackend implements AgentBackend {
       const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
       try {
         await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
-      } catch {
-        throw new Error("Prime command failed");
+      } catch (error) {
+        throw primeError(error, "Prime command failed");
       }
       return {
         accepted: true,
@@ -2271,8 +2278,8 @@ export class PrimeBackend implements AgentBackend {
         detected = Array.isArray(commands)
           ? detectedSlashCommandEntries(commands, EXPLICIT_SLASH_COMMAND_NAMES)
           : [];
-      } catch {
-        throw new Error("Prime experimental command discovery failed");
+      } catch (error) {
+        throw primeError(error, "Prime experimental command discovery failed");
       }
       const experimental = detected.find((command) => command.name === input.name && command.availability === "experimental");
       if (!experimental || (experimental.source !== "extension" && experimental.source !== "prompt" && experimental.source !== "skill")) {
@@ -2281,8 +2288,8 @@ export class PrimeBackend implements AgentBackend {
       const command = `/${input.name}${input.args ? ` ${input.args}` : ""}`;
       try {
         await connection.prompt(command, { queueIfBusy: true, streamingBehavior: "steer" });
-      } catch {
-        throw new Error("Prime experimental command failed");
+      } catch (error) {
+        throw primeError(error, "Prime experimental command failed");
       }
       return {
         accepted: true,
@@ -2394,7 +2401,7 @@ export class PrimeBackend implements AgentBackend {
       }
     } catch (error) {
       if (error instanceof BackendCapabilityError) throw error;
-      throw new Error("Prime command failed");
+      throw primeError(error, "Prime command failed");
     }
       const revision = mutated ? this.advanceSnapshotRevision(input.agentId) : lockedSnapshot.revision;
       return { accepted: true, requestId: input.requestId, revision, result };
@@ -2424,8 +2431,8 @@ export class PrimeBackend implements AgentBackend {
         if (typeof setSessionName !== "function") throw new BackendCapabilityError("This agent cannot be renamed");
         try {
           await setSessionName.call(record.connection, input.name);
-        } catch {
-          throw new Error("Prime session rename failed");
+        } catch (error) {
+          throw primeError(error, "Prime session rename failed");
         }
       } else {
         // A saved session has no connection to carry the change, so the
@@ -2442,10 +2449,10 @@ export class PrimeBackend implements AgentBackend {
             sessionPath: summary.sessionFile,
             name: input.name,
           });
-        } catch {
-          throw new Error("Prime session rename failed");
+        } catch (error) {
+          throw primeError(error, "Prime session rename failed");
         }
-        if (!response.success) throw new Error("Prime session rename failed");
+        if (!response.success) throw primeError(response, "Prime session rename failed");
       }
 
       // The new name reaches the drawer only through a catalog refresh: the
@@ -2473,10 +2480,10 @@ export class PrimeBackend implements AgentBackend {
       let response: PrimeResponse;
       try {
         response = await this.client.request({ type: "kill", activeSessionId });
-      } catch {
-        throw new Error("Prime session stop failed");
+      } catch (error) {
+        throw primeError(error, "Prime session stop failed");
       }
-      if (!response.success) throw new Error("Prime session stop failed");
+      if (!response.success) throw primeError(response, "Prime session stop failed");
 
       // The refreshed listing drops the activeSessionId, which is what
       // `reconcileConnections` keys the now-stale connection's disposal off —
@@ -2519,10 +2526,10 @@ export class PrimeBackend implements AgentBackend {
       let response: PrimeResponse;
       try {
         response = await this.client.request({ type: "delete_saved_session", sessionPath });
-      } catch {
-        throw new Error("Prime session delete failed");
+      } catch (error) {
+        throw primeError(error, "Prime session delete failed");
       }
-      if (!response.success) throw new Error("Prime session delete failed");
+      if (!response.success) throw primeError(response, "Prime session delete failed");
 
       this.snapshots.delete(input.agentId);
       this.retained.delete(input.agentId);
@@ -2584,7 +2591,7 @@ export class PrimeBackend implements AgentBackend {
       if (error instanceof Error && /^Unknown extension UI request\b/.test(error.message)) {
         throw new BackendNotFoundError("This request was already answered or has expired");
       }
-      throw new Error("Prime attention response failed");
+      throw primeError(error, "Prime attention response failed");
     } finally {
       // A failed refresh must not mask the outcome of the response itself.
       await this.refreshConnection(pending.publicAgentId).catch(() => {});
@@ -2655,10 +2662,14 @@ export class PrimeBackend implements AgentBackend {
         ...(name ? { name } : {}),
         config: { cwd: input.cwd },
       });
-    } catch {
+    } catch (error) {
+      if (isSessionRecovering(error)) throw new BackendRecoveringError();
       throw new BackendNotFoundError("The daemon could not create the session");
     }
-    if (!response.success) throw new BackendNotFoundError("The daemon could not create the session");
+    if (!response.success) {
+      if (isSessionRecovering(response)) throw new BackendRecoveringError();
+      throw new BackendNotFoundError("The daemon could not create the session");
+    }
     const data = primeRecord(response.data);
     const activeSessionId = boundedId(data?.activeSessionId) ?? null;
     const sessionId = boundedId(data?.sessionId) ?? null;
@@ -2717,10 +2728,10 @@ export class PrimeBackend implements AgentBackend {
     let response: PrimeResponse;
     try {
       response = await this.client.request({ type: "list", all: true }, PRIME_CATALOG_LIST_TIMEOUT_MS);
-    } catch {
-      throw new Error("Prime daemon list failed");
+    } catch (error) {
+      throw primeError(error, "Prime daemon list failed");
     }
-    if (!response.success) throw new Error("Prime daemon list failed");
+    if (!response.success) throw primeError(response, "Prime daemon list failed");
     const sessions = primeRecord(response.data)?.sessions;
     if (!Array.isArray(sessions)) throw new Error("Prime daemon returned an invalid session list");
     const summaries: PrimeSessionSummary[] = [];
@@ -2940,7 +2951,10 @@ export class PrimeBackend implements AgentBackend {
       // has nothing left holding it: dispose it here or it leaks a daemon
       // subscription for the lifetime of the gateway.
       disposeAbandonedConnection,
-    );
+    ).catch((error: unknown) => {
+      if (isSessionRecovering(error)) throw new BackendRecoveringError();
+      throw error;
+    });
     const buffered: PrimeConnectionEvent[] = [];
     let ready = false;
     const record: ConnectionRecord = {
@@ -2983,6 +2997,7 @@ export class PrimeBackend implements AgentBackend {
       return record;
     } catch (error) {
       await this.disposeConnection(record);
+      if (isSessionRecovering(error)) throw new BackendRecoveringError();
       throw error;
     }
   }
@@ -3704,10 +3719,10 @@ export class PrimeBackend implements AgentBackend {
     let response: PrimeResponse;
     try {
       response = await this.client.request({ type: "create", sessionPath: summary.sessionFile }, 120_000);
-    } catch {
-      throw new Error("Prime session resume failed");
+    } catch (error) {
+      throw primeError(error, "Prime session resume failed");
     }
-    if (!response.success) throw new Error("Prime session resume failed");
+    if (!response.success) throw primeError(response, "Prime session resume failed");
     const created = (response.data ?? {}) as { sessionId?: unknown };
     if (typeof created.sessionId === "string" && created.sessionId !== summary.sessionId) {
       throw new Error("Prime session resume failed");

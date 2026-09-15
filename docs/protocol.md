@@ -191,3 +191,28 @@ queue: {
 ```
 
 Each `SessionQueueEntry` is `{ text, truncated }`, with `text` cut at 2,000 characters; both lists are capped at 25 entries, and `queuedCount` also covers session commands and anything past that cap. `active`, when present, is what Prime Agent says it is running right now. `queue` itself is absent when the daemon build does not report queue state at all — which is unknown, not empty.
+
+
+## Temporary session recovery
+
+HTTP requests rejected during known session recovery return 503 with
+`code: "session_recovering"` and `Retry-After: 1`. Error bodies contain no daemon
+session identifiers. Only snapshot reads retry automatically: five retries
+at 500 ms, 1 s, 2 s, 5 s, and 10 s, each after the previous request settles.
+Detaching or ending the browser session cancels outstanding recovery reads.
+Mutation failures keep their code but are never automatically replayed.
+
+Cold WebSocket attachment can return an `unavailable` frame with `streamId`,
+`code` (`session_recovering` or `snapshot_unavailable`), and `retryAfterMs`.
+The gateway owns the same bounded attachment retry schedule; null means
+there are no further automatic attempts. The browser retains subscription
+intent, the selected session, snapshots, and drafts, and offers manual retry.
+A later successful snapshot clears the error. Detach, socket closure, and
+gateway shutdown cancel pending attachment timers. Generic snapshot failures
+are unavailable without automatic retry; `stream_gone` is reserved for a
+session absent from the catalog. Deploy the gateway and web assets together.
+
+Diagnostics `prime.version` denotes the imported SDK version, not a daemon
+version. `prime.daemonVersion` is currently null because upstream's hello
+contains protocol/schema information but no application build identity.
+`prime.module` now also accepts `bundled`.

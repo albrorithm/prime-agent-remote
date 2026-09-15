@@ -89,6 +89,18 @@ export class BackendConflictError extends Error {}
 export class BackendNotFoundError extends Error {}
 export class BackendCapabilityError extends Error {}
 
+export class BackendRecoveringError extends Error {
+  readonly code = "session_recovering";
+  constructor() { super("This session is recovering. Try again shortly."); }
+}
+
+/** Copy only the known code; never expose upstream session ids or error text. */
+export function isSessionRecovering(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; errorInfo?: { code?: unknown } };
+  return value.code === "session_recovering" || value.errorInfo?.code === "session_recovering";
+}
+
 /**
  * How many of the newest projected rows a snapshot carries. Measured in the
  * UI harness on 2026-09-05, headless WebKit at 390px: mounting 200 rows took

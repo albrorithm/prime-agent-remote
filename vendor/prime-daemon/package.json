@@ -1,0 +1,11 @@
+{
+  "name": "prime-agent-remote-daemon-client",
+  "private": true,
+  "type": "module",
+  "version": "0.9.4+878410b",
+  "license": "MIT",
+  "piConfig": {
+    "name": "prime-agent",
+    "configDir": ".prime/agent"
+  }
+}

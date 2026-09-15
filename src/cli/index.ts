@@ -380,9 +380,9 @@ async function start(options: Options): Promise<number> {
   if (backend === "prime") {
     try {
       const resolved = await resolvePrimeModule();
-      line(`  Prime Agent: ${resolved.specifier}`);
+      line(`  Prime daemon SDK (${resolved.origin}): ${resolved.specifier}`);
     } catch (error) {
-      line(`  Prime Agent: not found`);
+      line(`  Prime daemon SDK: unavailable`);
       line();
       line(error instanceof Error ? error.message : String(error));
       line();

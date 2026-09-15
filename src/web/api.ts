@@ -58,6 +58,7 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: "session_recovering",
   ) {
     super(message);
   }
@@ -101,7 +102,8 @@ async function decode<T>(response: Response, schema?: ZodType<T>, ownsUnauthoriz
     if (response.status === 401 && !ownsUnauthorized) {
       for (const handler of unauthorizedHandlers) handler();
     }
-    throw new ApiError(response.status, problem?.detail || problem?.title || `HTTP ${response.status}`);
+    throw new ApiError(response.status, problem?.detail || problem?.title || `HTTP ${response.status}`,
+      parsedProblem?.success ? parsedProblem.data.code : undefined);
   }
   const value = await response.json() as unknown;
   if (!schema) return value as T;

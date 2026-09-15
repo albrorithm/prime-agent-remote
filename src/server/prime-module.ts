@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL, URL as NodeURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -20,8 +20,9 @@ export const REQUIRED_PRIME_EXPORTS = ["DaemonClient", "DaemonAgentConnection", 
  * produces a confusing "incompatible build" error rather than a missing one.
  */
 export const PRIME_PACKAGE_NAME = "prime-agent";
+export const BUNDLED_PRIME_MODULE = fileURLToPath(new NodeURL("../../vendor/prime-daemon/index.js", import.meta.url));
 
-export type PrimeModuleOrigin = "env" | "dependency" | "global" | "sibling";
+export type PrimeModuleOrigin = "env" | "dependency" | "global" | "sibling" | "bundled";
 
 export interface PrimeModuleCandidate {
   specifier: string;
@@ -74,13 +75,14 @@ export interface CandidateOptions {
 
 /**
  * Ordered by how specific the signal is: an operator's explicit choice, then a
- * real dependency, then the global install, then a checkout sitting beside
- * this one.
+ * pinned bundled client, then legacy local/global SDK discovery. This avoids
+ * silently using a retained old SDK after native CLI migration.
  */
 export function primeModuleCandidates({ env = process.env, globalRoot }: CandidateOptions = {}): PrimeModuleCandidate[] {
   const candidates: PrimeModuleCandidate[] = [];
   const configured = env.PRIME_AGENT_MODULE?.trim();
   if (configured) candidates.push({ specifier: configured, origin: "env" });
+  candidates.push({ specifier: BUNDLED_PRIME_MODULE, origin: "bundled" });
   candidates.push({ specifier: PRIME_PACKAGE_NAME, origin: "dependency" });
   if (globalRoot) {
     candidates.push({ specifier: path.join(globalRoot, PRIME_PACKAGE_NAME), origin: "global" });
@@ -156,24 +158,17 @@ export async function readPackageVersion(specifier: string): Promise<string | nu
 }
 
 /**
- * How Prime Agent is actually installed. Not `npm install -g prime-agent`:
- * that package does not exist on the registry and never has, so the previous
- * message sent anyone who hit it — which is precisely the people who do not
- * have Prime Agent — to a 404. Its own installer places the package under the
- * global node_modules this module already searches, which is why resolution
- * was right while the instruction was wrong.
+ * Installs the agent application. Native channels do not supply an importable
+ * SDK; Remote's bundled client is distributed separately from that application.
  */
 export const PRIME_INSTALL_COMMAND = "curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh";
 
 export class PrimeModuleResolutionError extends Error {
   constructor(readonly attempted: PrimeModuleCandidate[]) {
     super(
-      attempted.length === 0
-        ? `Could not find a Prime Agent build. Install it with \`${PRIME_INSTALL_COMMAND}\`.`
-        : `Could not load a Prime Agent build exporting ${REQUIRED_PRIME_EXPORTS.join(", ")}. Tried:\n`
-          + attempted.map((c) => `  - ${c.specifier} (${c.origin})`).join("\n")
-          + `\n\nInstall Prime Agent with \`${PRIME_INSTALL_COMMAND}\`, or set PRIME_AGENT_MODULE`
-          + ` to a built module that exports them.`,
+      `Could not load the bundled Prime daemon client. Reinstall @albrorithm/prime-agent-remote,`
+      + ` or set PRIME_AGENT_MODULE to a compatible JavaScript SDK. A native Prime executable is not an SDK.`
+      + `\nTried:\n` + attempted.map((c) => `  - ${c.specifier} (${c.origin})`).join("\n"),
     );
     this.name = "PrimeModuleResolutionError";
   }
@@ -191,10 +186,17 @@ export async function resolvePrimeModule({
   load = (specifier) => import(specifier),
   expand = expandPackageDirectory,
 }: ResolveOptions = {}): Promise<PrimeModuleResolution> {
-  const root = globalRoot ?? (await globalNodeModulesRoot());
-  const candidates = primeModuleCandidates({ env, globalRoot: root });
+  async function* candidates(): AsyncGenerator<PrimeModuleCandidate> {
+    yield* primeModuleCandidates({ env, globalRoot });
+    // Native installations need neither npm nor a legacy package. Only ask
+    // npm about its global root after the bundled client has actually failed.
+    if (globalRoot === undefined) {
+      const root = await globalNodeModulesRoot();
+      if (root) yield { specifier: path.join(root, PRIME_PACKAGE_NAME), origin: "global" };
+    }
+  }
   const attempted: PrimeModuleCandidate[] = [];
-  for (const candidate of candidates) {
+  for await (const candidate of candidates()) {
     let specifier = candidate.specifier;
     let loaded: unknown;
     try {

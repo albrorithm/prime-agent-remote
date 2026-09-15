@@ -327,6 +327,7 @@ function NotificationsGroup() {
 
 function primeModuleLabel(origin: PrimeModuleOrigin): string {
   switch (origin) {
+    case "bundled": return "bundled client";
     case "global": return "installed globally";
     case "env": return "from the environment";
     case "dependency": return "as a dependency";
@@ -335,7 +336,7 @@ function primeModuleLabel(origin: PrimeModuleOrigin): string {
 }
 
 function primeAgentLine(prime: GatewayDiagnostics["prime"]): string {
-  const parts = [prime.version ?? "Unknown"];
+  const parts = [`SDK ${prime.version ?? "Unknown"}`, `daemon ${prime.daemonVersion ?? "Unknown"}`];
   if (prime.module) parts.push(primeModuleLabel(prime.module));
   parts.push(prime.connected ? "connected" : "not connected");
   return parts.join(" · ");

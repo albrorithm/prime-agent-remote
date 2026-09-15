@@ -1,3 +1,4 @@
+import { retrySessionRead } from "./session-recovery";
 import {
   createContext,
   useCallback,
@@ -667,6 +668,12 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   // stream, because it only sees "no snapshot yet" and not "superseded".
   const openAgentGeneration = useRef(0);
   // Track each load separately: an older request must not clear a newer one.
+  const snapshotReads = useRef(new Map<string, {
+    controller: AbortController;
+    promise: Promise<AgentSnapshot>;
+    baseline: number;
+    completeFromStream: (snapshot: AgentSnapshot) => void;
+  }>());
   const loadingAgents = useRef(new Map<string, Set<symbol>>());
   const autoHydrated = useRef<string | null>(null);
   const socketRetryBlocked = useRef(false);
@@ -745,10 +752,30 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     loads.add(request);
     loadingAgents.current.set(agentId, loads);
     try {
-      const snapshot = await api.loadAgent(agentId, options);
+      let read = snapshotReads.current.get(agentId);
+      if (!read || read.controller.signal.aborted) {
+        const controller = new AbortController();
+        const parent = options?.signal ?? lifecycleAbort.current?.signal;
+        const abort = () => controller.abort();
+        parent?.addEventListener("abort", abort, { once: true });
+        if (parent?.aborted) abort();
+        let completeFromStream!: (snapshot: AgentSnapshot) => void;
+        const streamed = new Promise<AgentSnapshot>((resolve) => { completeFromStream = resolve; });
+        const fetched = retrySessionRead(() => api.loadAgent(agentId, { ...options, signal: controller.signal }), controller.signal);
+        const promise = Promise.race([fetched, streamed])
+          .finally(() => {
+            parent?.removeEventListener("abort", abort);
+            if (snapshotReads.current.get(agentId)?.controller === controller) snapshotReads.current.delete(agentId);
+          });
+        read = { controller, promise, baseline, completeFromStream };
+        snapshotReads.current.set(agentId, read);
+      }
+      const snapshot = await read.promise;
       return {
         snapshot,
-        allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === baseline,
+        // A caller joining an older read inherits when that request started,
+        // not when it joined. Otherwise it could overwrite a newer WS cut.
+        allowEqualRevision: (realtimeVersions.current.get(streamId) ?? 0) === read.baseline,
       };
     } finally {
       loads.delete(request);
@@ -772,6 +799,7 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const detach = useCallback((streamId: string) => {
+    snapshotReads.current.get(streamId.slice(6))?.controller.abort();
     subscriptions.current.delete(streamId);
     cursors.current.delete(streamId);
     // Tombstone the stream instead of deleting its version. Any HTTP snapshot
@@ -833,6 +861,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     realtimeVersions.current.clear();
     replayingStreams.current.clear();
     streamGoneRetries.current.clear();
+    for (const read of snapshotReads.current.values()) read.controller.abort();
+    snapshotReads.current.clear();
     loadingAgents.current.clear();
     autoHydrated.current = null;
     pushClaimedFor.current = null;
@@ -942,6 +972,16 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         pongTimer = null;
         return;
       }
+      if (frame.type === "unavailable") {
+        if (!subscriptions.current.has(frame.streamId)) return;
+        replayingStreams.current.delete(frame.streamId);
+        const agentId = frame.streamId.startsWith("agent:") ? frame.streamId.slice(6) : null;
+        if (agentId) dispatch({ type: "transcript_error", agentId, message: frame.code === "session_recovering"
+          ? (frame.retryAfterMs === null ? "This session is still recovering. Try again shortly." : "This session is recovering. Retrying shortly…")
+          : "Could not load this session. Try again." });
+        updateSocketPhase();
+        return;
+      }
       if (frame.type === "detached") {
         replayingStreams.current.delete(frame.streamId);
         if (frame.reason === "server_shutdown") {
@@ -982,6 +1022,15 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (frame.type === "snapshot") {
+        if (frame.streamId.startsWith("agent:")) {
+          const read = snapshotReads.current.get(frame.streamId.slice(6));
+          if (read && !read.controller.signal.aborted) {
+            // A full stream snapshot also completes recovery. Resolve readers
+            // before cancelling their HTTP attempt or sleeping retry timer.
+            read.completeFromStream(frame.snapshot as AgentSnapshot);
+            read.controller.abort();
+          }
+        }
         cursors.current.set(frame.streamId, frame.cursor);
         replayingStreams.current.delete(frame.streamId);
         markRealtimeUpdate(frame.streamId);
@@ -1166,6 +1215,8 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
     void initialize();
     return () => {
       manuallyClosed.current = true;
+      for (const read of snapshotReads.current.values()) read.controller.abort();
+      snapshotReads.current.clear();
       unsubscribeUnauthorized();
       initializationGeneration.current += 1;
       sessionGeneration.current += 1;
@@ -1309,6 +1360,9 @@ export function GatewayProvider({ children }: { children: ReactNode }) {
         if (selection === selectionGeneration.current) showError(null);
       } catch (error) {
         if (selection !== selectionGeneration.current) return;
+        // Exhausted automatic recovery still belongs to this selection. Keep
+        // its draft and Retry surface instead of jumping back to another chat.
+        if (error instanceof ApiError && error.code === "session_recovering") return;
         // Only back to an agent that is still there. A catalog event arriving
         // while the fetch was in flight may already have dropped it and
         // repointed the selection, and rolling back would select a ghost.

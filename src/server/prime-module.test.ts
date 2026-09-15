@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import {
-  PRIME_INSTALL_COMMAND,
+  BUNDLED_PRIME_MODULE,
   PRIME_PACKAGE_NAME,
   PrimeModuleResolutionError,
   REQUIRED_PRIME_EXPORTS,
@@ -76,12 +76,12 @@ describe("primeModuleCandidates", () => {
 
   it("offers the bare package before the global install", () => {
     const origins = primeModuleCandidates({ env: {}, globalRoot: GLOBAL_ROOT }).map((c) => c.origin);
-    expect(origins).toEqual(["dependency", "global"]);
+    expect(origins).toEqual(["bundled", "dependency", "global"]);
   });
 
   it("omits the global candidate when no global root was found", () => {
     const candidates = primeModuleCandidates({ env: {} });
-    expect(candidates).toEqual([{ specifier: PRIME_PACKAGE_NAME, origin: "dependency" }]);
+    expect(candidates).toEqual([{ specifier: BUNDLED_PRIME_MODULE, origin: "bundled" }, { specifier: PRIME_PACKAGE_NAME, origin: "dependency" }]);
   });
 
   it("ignores a blank PRIME_AGENT_MODULE instead of trying an empty specifier", () => {
@@ -105,20 +105,20 @@ describe("globalNodeModulesRoot", () => {
 });
 
 describe("resolvePrimeModule", () => {
-  it("resolves the global install when the package is not a local dependency", async () => {
+  it("falls back to a legacy global SDK if the bundled client is unavailable", async () => {
     const tried: string[] = [];
     const resolution = await resolvePrimeModule({
       env: {},
       globalRoot: GLOBAL_ROOT,
       load: async (specifier) => {
         tried.push(specifier);
-        if (specifier === PRIME_PACKAGE_NAME) throw new Error("ERR_MODULE_NOT_FOUND");
+        if (specifier === PRIME_PACKAGE_NAME || specifier === pathToFileURL(BUNDLED_PRIME_MODULE).href) throw new Error("ERR_MODULE_NOT_FOUND");
         return compatibleModule();
       },
     });
     expect(resolution.origin).toBe("global");
     expect(resolution.specifier).toBe(path.join(GLOBAL_ROOT, PRIME_PACKAGE_NAME));
-    expect(tried[0]).toBe(PRIME_PACKAGE_NAME);
+    expect(tried[0]).toBe(pathToFileURL(BUNDLED_PRIME_MODULE).href);
   });
 
   it("skips a candidate that loads but lacks the daemon exports", async () => {
@@ -130,7 +130,7 @@ describe("resolvePrimeModule", () => {
       load: async (specifier) =>
         specifier === "@earendil-works/pi-coding-agent" ? { createAgentSession: () => {} } : compatibleModule(),
     });
-    expect(resolution.origin).toBe("dependency");
+    expect(resolution.origin).toBe("bundled");
   });
 
   it("prefers an explicit module over a working global install", async () => {
@@ -154,7 +154,7 @@ describe("resolvePrimeModule", () => {
     expect(message).toContain(path.join(GLOBAL_ROOT, PRIME_PACKAGE_NAME));
     // The instruction has to be one that works: `npm install -g prime-agent`
       // resolves to nothing on the registry.
-      expect(message).toContain(PRIME_INSTALL_COMMAND);
+      expect(message).toContain("Reinstall @albrorithm/prime-agent-remote");
   });
 });
 
@@ -206,7 +206,7 @@ describe("resolvePrimeModule directory expansion", () => {
       expand: async (specifier) => (specifier === directory ? entry : specifier),
       load: async (specifier) => {
         imported.push(specifier);
-        if (specifier === PRIME_PACKAGE_NAME) throw new Error("ERR_MODULE_NOT_FOUND");
+        if (specifier === PRIME_PACKAGE_NAME || specifier === pathToFileURL(BUNDLED_PRIME_MODULE).href) throw new Error("ERR_MODULE_NOT_FOUND");
         return compatibleModule();
       },
     });

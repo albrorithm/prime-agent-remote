@@ -5,6 +5,13 @@ reproduced here, as those licenses require.
 
 ## Prime Agent
 
+The daemon transport in `vendor/prime-daemon/` is a generated subset of
+Prime Agent at commit `878410b3981f20c6d685faa210ad0e43426cf483`. It retains
+the upstream protocol and connection implementation. Its source hashes,
+bundle hash, and build recipe are documented in `docs/prime-client.md` and
+`vendor/prime-daemon/provenance.json`. The MIT license below also covers
+that code; a copy ships beside the bundle.
+
 The butterfly mark shipped as `public/prime-mark.svg` — and the
 `public/prime-mark-180.png`, `public/prime-mark-192.png` and
 `public/prime-mark-512.png` rasterisations of it — is copied unmodified from

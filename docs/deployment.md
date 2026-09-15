@@ -29,6 +29,9 @@ Demo mode is the default and never executes local tools.
 7. Publish loopback through Tailscale Serve.
 
 The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
+Keep `vendor/prime-daemon/` with them: it supplies the pinned SDK even when Prime
+is a compiled installation with no legacy JavaScript package. See
+[client compatibility](prime-client.md) for overrides and regeneration.
 
 ## Environment variables
 
@@ -40,7 +43,7 @@ The `dist/` directory contains the PWA. `dist-server/` contains the gateway.
 | `PRIME_WEB_PAIRING_TOKEN` | minted once and persisted | Setup token override for a directly-run gateway (`npm start`); a configured one must be 32 or more characters in production, and may only contain letters, digits, `-` and `_`. The `prime-agent-remote` CLI ignores this variable and always reads or mints its own token file instead — see `docs/security.md` |
 | `PRIME_WEB_SECURE_COOKIE` | true in production | Add the cookie `Secure` attribute; accepts only `true`, `false`, `1`, or `0` |
 | `PRIME_WEB_BACKEND` | `demo` | `demo` or `prime`; other values fail startup |
-| `PRIME_AGENT_MODULE` | discovered | Override for the Prime Agent build; unset means search dependencies then `npm root -g` |
+| `PRIME_AGENT_MODULE` | bundled client | Explicit JavaScript SDK override. Otherwise use the bundled client; legacy local/global SDKs are fallback candidates if it is unavailable. A native executable is not a valid override. |
 | `PRIME_AGENT_DAEMON_SOCKET` | Prime default | Optional daemon socket override |
 | `PRIME_WEB_SESSION_TTL_MS` | `43200000` (12 hours) | In-memory HTTP and WebSocket session lifetime |
 | `PRIME_WEB_VAPID_PUBLIC_KEY` | unset (minted on first start) | VAPID application server key, base64url; must decode to 65 bytes |

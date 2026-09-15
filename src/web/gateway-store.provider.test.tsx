@@ -4,7 +4,7 @@ import type { AgentSnapshot, AgentSummary, BootstrapResponse, ServerFrame, Trans
 
 const apiMock = vi.hoisted(() => {
   class MockApiError extends Error {
-    constructor(readonly status: number, message: string) {
+    constructor(readonly status: number, message: string, readonly code?: "session_recovering") {
       super(message);
     }
   }
@@ -628,7 +628,10 @@ describe("GatewayProvider recovery and state ownership", () => {
     await waitFor(() => expect(apiMock.bootstrap).toHaveBeenCalled());
     const socket = MockWebSocket.instances[0];
     act(() => socket.open());
-    const selecting = act(() => result.current.selectAgent("agent-a"));
+    act(() => socket.message({ type: "snapshot", version: 1, streamId: "agent:agent-a",
+      cursor: { epoch: "epoch", seq: 4 }, snapshot: snapshot("agent-a", 4) }));
+    let selecting!: Promise<void>;
+    act(() => { selecting = result.current.retryTranscript("agent-a"); });
     const realtime = snapshot("agent-a", 5);
     realtime.messages = [{
       id: "message",
@@ -638,16 +641,20 @@ describe("GatewayProvider recovery and state ownership", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
     }];
     act(() => socket.message({
-      type: "snapshot",
+      type: "event",
       version: 1,
-      streamId: "agent:agent-a",
-      cursor: { epoch: "epoch", seq: 5 },
-      snapshot: realtime,
+      envelope: { version: 1, streamId: "agent:agent-a", epoch: "epoch", seq: 5,
+        emittedAt: "2026-01-01T00:00:00.000Z", event: { kind: "agent.replaced", payload: realtime } },
     }));
+    // A second caller shares the outstanding request, including its original
+    // baseline from before the realtime update.
+    let retrying!: Promise<void>;
+    act(() => { retrying = result.current.retryTranscript("agent-a"); });
+    expect(apiMock.loadAgent).toHaveBeenCalledTimes(1);
     const staleHttp = snapshot("agent-a", 5);
     staleHttp.messages = [{ ...realtime.messages[0], text: "stale HTTP text" }];
     http.resolve(staleHttp);
-    await selecting;
+    await act(async () => { await Promise.all([selecting, retrying]); });
 
     await waitFor(() => expect(result.current.snapshots["agent-a"]?.messages[0]?.text).toBe("new realtime text"));
   });
@@ -854,7 +861,7 @@ describe("GatewayProvider recovery and state ownership", () => {
     act(() => socket.open());
     const selecting = act(() => result.current.selectAgent("gone"));
     // The HTTP baseline is captured at zero: no WS snapshot/event has arrived.
-    expect(apiMock.loadAgent).toHaveBeenCalledWith("gone", undefined);
+    expect(apiMock.loadAgent).toHaveBeenCalledWith("gone", expect.objectContaining({ signal: expect.anything() }));
     act(() => socket.message({
       type: "detached",
       version: 1,
@@ -1463,7 +1470,7 @@ describe("GatewayProvider automatic transcript loading", () => {
     await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
     const socket = MockWebSocket.instances[0];
     act(() => { socket.open(); replaceCatalog(socket, ["agent-b"], 2, full); });
-    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", undefined));
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", expect.objectContaining({ signal: expect.anything() })));
     act(() => replaceCatalog(socket, ["agent-b"], 3, full));
     expect(apiMock.loadAgent.mock.calls.filter(([id]) => id === "agent-b")).toHaveLength(1);
     expect(socket.sent.some((frame) => JSON.parse(frame).streamId === "agent:agent-b")).toBe(true);
@@ -1515,7 +1522,7 @@ describe("GatewayProvider automatic transcript loading", () => {
     act(() => { selecting = result.current.selectAgent("agent-a"); });
     await waitFor(() => expect(result.current.selectedAgentId).toBe("agent-a"));
     act(() => replaceCatalog(socket, ["agent-b"]));
-    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", undefined));
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledWith("agent-b", expect.objectContaining({ signal: expect.anything() })));
     await act(async () => { a.resolve(snapshot("agent-a")); await selecting; });
     expect(socket.sent.map((frame) => JSON.parse(frame)).filter((frame) =>
       frame.type === "detach" && frame.streamId === "agent:agent-b")).toEqual([]);
@@ -1631,4 +1638,70 @@ describe("paged history", () => {
     expect(local.matches.map((match) => match.message.id)).toEqual(["w2"]);
     expect(local.exhaustive).toBe(false);
   });
+});
+
+
+describe("GatewayProvider session recovery", () => {
+  it("retains the selected session and snapshot through temporary stream unavailability", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+    const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.open());
+    const before = result.current.snapshots["agent-a"];
+    act(() => socket.message({ type: "unavailable", version: 1, streamId: "agent:agent-a", code: "session_recovering", retryAfterMs: 500 }));
+    expect(result.current.snapshots["agent-a"]).toBe(before);
+    expect(result.current.selectedAgentId).toBe("agent-a");
+    expect(socket.sent.map((frame) => JSON.parse(frame)).some((frame) => frame.type === "detach")).toBe(false);
+    act(() => socket.message({ type: "snapshot", version: 1, streamId: "agent:agent-a", cursor: { epoch: "recovery", seq: 1 }, snapshot: snapshot("agent-a") }));
+    expect(result.current.transcriptErrors["agent-a"]).toBeUndefined();
+  });
+
+  it("recovers a cold HTTP snapshot and cancels outstanding recovery on unmount", async () => {
+    apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+    apiMock.loadAgent.mockRejectedValueOnce(new apiMock.ApiError(503, "Recovering", "session_recovering"))
+      .mockResolvedValue(snapshot("agent-a"));
+    const { result, unmount } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+    expect(apiMock.loadAgent).toHaveBeenCalledTimes(2);
+    unmount();
+    apiMock.loadAgent.mockReset().mockRejectedValue(new apiMock.ApiError(503, "Recovering", "session_recovering"));
+    const second = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+    await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledTimes(1));
+    second.unmount();
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    expect(apiMock.loadAgent).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+it("keeps a recovering selection after its automatic HTTP attempts are exhausted", async () => {
+  apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a"), summary("agent-b")]));
+  apiMock.loadAgent.mockResolvedValue(snapshot("agent-a"));
+  const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+  await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+  apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(503, "Still recovering", "session_recovering"));
+  vi.useFakeTimers();
+  let selected!: Promise<void>;
+  act(() => { selected = result.current.selectAgent("agent-b"); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(18_500); await selected; });
+  expect(result.current.selectedAgentId).toBe("agent-b");
+  expect(result.current.transcriptErrors["agent-b"]).toBe("Still recovering");
+});
+
+
+it("stops HTTP recovery as soon as a full stream snapshot succeeds", async () => {
+  apiMock.bootstrap.mockResolvedValue(bootstrap([summary("agent-a")]));
+  apiMock.loadAgent.mockRejectedValue(new apiMock.ApiError(503, "Recovering", "session_recovering"));
+  const { result } = renderHook(() => useGateway(), { wrapper: GatewayProvider });
+  await waitFor(() => expect(apiMock.loadAgent).toHaveBeenCalledTimes(1));
+  const socket = MockWebSocket.instances[0];
+  act(() => socket.open());
+  act(() => socket.message({ type: "snapshot", version: 1, streamId: "agent:agent-a",
+    cursor: { epoch: "recovered", seq: 1 }, snapshot: snapshot("agent-a") }));
+  await waitFor(() => expect(result.current.snapshots["agent-a"]).toBeDefined());
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  expect(apiMock.loadAgent).toHaveBeenCalledTimes(1);
+  expect(result.current.transcriptErrors["agent-a"]).toBeUndefined();
 });

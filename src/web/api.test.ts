@@ -444,3 +444,12 @@ describe("loadDiagnostics", () => {
     expect(diagnostics.prime).toEqual({ version: null, module: "global", connected: false });
   });
 });
+
+
+it("preserves structured recovery errors without replaying mutations", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ type: "about:blank", title: "Session recovering", status: 503, code: "session_recovering" }), { status: 503 }));
+  vi.stubGlobal("fetch", fetchMock);
+  await expect(executeSlashCommand("agent-1", "csrf", 3, "autonomous", "on --max-tokens 1000", "recovery-request"))
+    .rejects.toMatchObject({ status: 503, code: "session_recovering" });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});

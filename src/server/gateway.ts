@@ -1,3 +1,4 @@
+import { SESSION_RECOVERY_DELAYS_MS } from "../protocol.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile, stat } from "node:fs/promises";
@@ -36,6 +37,7 @@ import {
 import { AuthService, type AuthenticatedSession } from "./auth.js";
 import {
   BackendCapabilityError,
+  isSessionRecovering,
   BackendConflictError,
   BackendNotFoundError,
   type AgentBackend,
@@ -426,7 +428,7 @@ function decodeSegment(value: string): string | null {
         protocolVersion: PROTOCOL_VERSION,
         gateway: { version: await gatewayVersion },
         backend: backend.kind,
-        prime: { version: described.primeVersion, module: described.primeModule, connected: described.connected },
+        prime: { version: described.primeVersion, daemonVersion: null, module: described.primeModule, connected: described.connected },
         push: { enabled: Boolean(config.webPush) },
       });
       return true;
@@ -882,6 +884,11 @@ function decodeSegment(value: string): string | null {
       if (await api(req, res, url.pathname)) return;
       await serveStatic(req, res, url.pathname);
     } catch (error) {
+      if (isSessionRecovering(error)) {
+        res.setHeader("Retry-After", "1");
+        return json(res, 503, { type: "about:blank", title: "Session recovering", status: 503,
+          detail: "This session is recovering. Try again shortly.", code: "session_recovering" });
+      }
       if (error instanceof SyntaxError) return problem(res, 400, "Invalid JSON");
       if (error instanceof Error && error.message === "request_too_large") return problem(res, 413, "Request too large");
       if (error instanceof BackendNotFoundError) return problem(res, 404, error.message);
@@ -897,6 +904,8 @@ function decodeSegment(value: string): string | null {
     }
   }
 
+  let shuttingDown = false;
+  const socketCleanups = new Set<() => void>();
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_WEBSOCKET_INBOUND_FRAME_BYTES,
@@ -953,7 +962,7 @@ function decodeSegment(value: string): string | null {
     const existing = streamWarmups.get(streamId);
     if (existing) return existing;
     const warmup = backend.agentSnapshot(agentId)
-      .then(() => undefined, () => undefined)
+      .then(() => undefined)
       .finally(() => streamWarmups.delete(streamId));
     streamWarmups.set(streamId, warmup);
     return warmup;
@@ -978,6 +987,11 @@ function decodeSegment(value: string): string | null {
      * read before an await has to be re-checked after it.
      */
     const pendingAttaches = new Map<string, symbol>();
+    const recoveryTimers = new Map<string, NodeJS.Timeout>();
+    const cancelRecovery = (streamId: string): void => {
+      clearTimeout(recoveryTimers.get(streamId));
+      recoveryTimers.delete(streamId);
+    };
     const finishAttach = (streamId: string, since: StreamCursor | null | undefined): void => {
       // Settle any live subscription before adding another. Two registrations
       // for one socket double-deliver, and only the newer detach is reachable.
@@ -1001,10 +1015,13 @@ function decodeSegment(value: string): string | null {
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
+      socketCleanups.delete(cleanup);
       if (expiryTimer) clearTimeout(expiryTimer);
       for (const detach of subscriptions.values()) detach();
       subscriptions.clear();
       pendingAttaches.clear();
+      for (const timer of recoveryTimers.values()) clearTimeout(timer);
+      recoveryTimers.clear();
       bound.delete(ws);
       if (bound.size === 0) sessionSockets.delete(session.id);
     };
@@ -1034,6 +1051,7 @@ function decodeSegment(value: string): string | null {
     };
 
     ws.on("error", cleanup);
+    socketCleanups.add(cleanup);
     ws.on("close", cleanup);
     ws.on("message", (raw, isBinary) => {
       try {
@@ -1061,29 +1079,48 @@ function decodeSegment(value: string): string | null {
         if (frame.type === "ping") return send({ type: "pong", version: PROTOCOL_VERSION });
         if (frame.type === "detach") {
           pendingAttaches.delete(frame.streamId);
+          cancelRecovery(frame.streamId);
           subscriptions.get(frame.streamId)?.();
           subscriptions.delete(frame.streamId);
           return;
         }
         const streamId = frame.streamId;
         const since = frame.since;
-        const warmup = warmAgentStream(streamId);
-        if (warmup) {
-          const claim = Symbol(streamId);
-          pendingAttaches.set(streamId, claim);
-          void warmup.then(() => {
-            // While a large session file was being read the socket may have
-            // gone, its session expired, or the client detached or asked
-            // again. All are ordinary, and only the newest ask may attach.
-            if (pendingAttaches.get(streamId) !== claim) return;
+        cancelRecovery(streamId);
+        const claim = Symbol(streamId);
+        pendingAttaches.set(streamId, claim);
+        const current = () => pendingAttaches.get(streamId) === claim
+          && !cleaned && !shuttingDown && ws.readyState === ws.OPEN && auth.isSessionActive(session);
+        const tryAttach = async (attempt: number): Promise<void> => {
+          try {
+            await warmAgentStream(streamId);
+            if (!current()) return;
+            if (!hub.has(streamId) && backend.catalog().agents.some((agent) => `agent:${agent.id}` === streamId)) {
+              throw new Error("Snapshot unavailable");
+            }
             pendingAttaches.delete(streamId);
-            if (ws.readyState !== ws.OPEN || !auth.isSessionActive(session)) return;
             finishAttach(streamId, since);
-          });
-          return;
-        }
-        pendingAttaches.delete(streamId);
-        finishAttach(streamId, since);
+          } catch (error) {
+            if (!current()) return;
+            // A deleted session is terminal even if its last read failed.
+            if (!backend.catalog().agents.some((agent) => `agent:${agent.id}` === streamId)) {
+              pendingAttaches.delete(streamId);
+              finishAttach(streamId, since);
+              return;
+            }
+            const recovering = isSessionRecovering(error);
+            const delay = recovering ? SESSION_RECOVERY_DELAYS_MS[attempt] : undefined;
+            send({ type: "unavailable", version: PROTOCOL_VERSION, streamId,
+              code: recovering ? "session_recovering" : "snapshot_unavailable", retryAfterMs: delay ?? null });
+            if (delay !== undefined) {
+              recoveryTimers.set(streamId, setTimeout(() => {
+                recoveryTimers.delete(streamId);
+                if (current()) void tryAttach(attempt + 1);
+              }, delay));
+            } else pendingAttaches.delete(streamId);
+          }
+        };
+        void tryAttach(0);
       } catch {
         closeWebSocket(ws, 1011, "WebSocket processing failed");
       }
@@ -1131,8 +1168,10 @@ function decodeSegment(value: string): string | null {
   }
 
   async function shutdown(): Promise<void> {
+    shuttingDown = true;
     if (turnEndTimer) clearInterval(turnEndTimer);
     hub.close();
+    for (const cleanup of socketCleanups) cleanup();
     await backend.close();
     for (const client of wss.clients) client.close(1001, "Server shutdown");
     // `close()` only *asks*. A peer that is asleep, or whose network went away

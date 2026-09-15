@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient } from "ws";
 import type { AgentSnapshot, AgentSummary, AttentionRequest, CellOutput } from "../protocol.js";
 import { gatewayDiagnosticsSchema, historyPageSchema, transcriptSearchResultSchema } from "../protocol.js";
-import { BackendCapabilityError, type AttentionListener } from "./backend.js";
+import { BackendRecoveringError, BackendCapabilityError, type AttentionListener } from "./backend.js";
 import { DEFAULT_VAPID_SUBJECT, type GatewayConfig } from "./config.js";
 import { DemoBackend } from "./demo-backend.js";
 import { EventHub } from "./event-hub.js";
@@ -1998,6 +1998,85 @@ describe("diagnostics", () => {
     expect(diagnostics.gateway.version).toBe(manifest.version);
     expect(diagnostics.backend).toBe("demo");
     // Demo has no Prime build behind it: unknown, reported as null rather than as anything.
-    expect(diagnostics.prime).toEqual({ version: null, module: null, connected: true });
+    expect(diagnostics.prime).toEqual({ version: null, daemonVersion: null, module: null, connected: true });
   });
 });
+
+
+class RecoveringStreamBackend extends LazyStreamBackend {
+  failures = 1;
+  reads = 0;
+  override async agentSnapshot(id: string) {
+    this.reads++;
+    if (this.failures-- > 0) throw new BackendRecoveringError();
+    return super.agentSnapshot(id);
+  }
+}
+
+describe("temporary session recovery", () => {
+  it("returns a retryable HTTP error and attaches after recovery", async () => {
+    const backend = new RecoveringStreamBackend();
+    const t = await startGateway({ backend });
+    const client = await pairClient(t);
+    const id = (await bootstrap(t, client)).catalog.agents[0].id;
+    const response = await fetch(`${t.baseUrl}/api/v1/agents/${id}/snapshot`, { headers: { Cookie: client.cookie } });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toMatchObject({ code: "session_recovering" });
+    backend.failures = 1;
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId: `agent:${id}` }));
+    await vi.waitFor(() => expect(frames.some((f) => f.type === "unavailable")).toBe(true));
+    await vi.waitFor(() => expect(frames.some((f) => f.type === "snapshot")).toBe(true));
+    expect(frames.some((f) => f.type === "detached")).toBe(false);
+    expect(backend.reads).toBe(3);
+    socket.close();
+  });
+
+  it.each(["detach", "shutdown"])("cancels recovery timers on %s", async (action) => {
+    const backend = new RecoveringStreamBackend();
+    backend.failures = 100;
+    const t = await startGateway({ backend });
+    const client = await pairClient(t);
+    const id = (await bootstrap(t, client)).catalog.agents[0].id;
+    const socket = openSocket(t, client);
+    await once(socket, "open");
+    const frames: Record<string, unknown>[] = [];
+    socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+    socket.send(JSON.stringify({ type: "attach", version: 1, streamId: `agent:${id}` }));
+    await vi.waitFor(() => expect(frames.some((f) => f.type === "unavailable")).toBe(true));
+    if (action === "detach") {
+      socket.send(JSON.stringify({ type: "detach", version: 1, streamId: `agent:${id}` }));
+      await settleSocket(socket, frames);
+    } else await t.gateway.shutdown();
+    const reads = backend.reads;
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    expect(backend.reads).toBe(reads);
+    socket.close();
+  });
+});
+
+
+it("bounds persistent stream recovery and retains the option to attach manually", async () => {
+  const backend = new RecoveringStreamBackend();
+  backend.failures = 100;
+  const t = await startGateway({ backend });
+  const client = await pairClient(t);
+  const id = (await bootstrap(t, client)).catalog.agents[0].id;
+  const socket = openSocket(t, client);
+  await once(socket, "open");
+  const frames: Record<string, unknown>[] = [];
+  socket.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+  socket.send(JSON.stringify({ type: "attach", version: 1, streamId: `agent:${id}` }));
+  await vi.waitFor(() => expect(frames.some((f) => f.type === "unavailable" && f.retryAfterMs === null)).toBe(true), { timeout: 22_000 });
+  expect(backend.reads).toBe(6);
+  expect(frames.some((f) => f.type === "detached")).toBe(false);
+  backend.failures = 0;
+  socket.send(JSON.stringify({ type: "attach", version: 1, streamId: `agent:${id}` }));
+  await vi.waitFor(() => expect(frames.some((f) => f.type === "snapshot")).toBe(true));
+  expect(backend.reads).toBe(7);
+  socket.close();
+}, 25_000);

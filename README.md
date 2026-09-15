@@ -33,7 +33,13 @@ npm install -g @albrorithm/prime-agent-remote
 prime-agent-remote install-command
 ```
 
-The published package ships `dist/` and `dist-server/` prebuilt, so nothing
+Remote includes a pinned daemon SDK for both Node and compiled Prime installations.
+It connects to the existing daemon; it does not install or launch an agent runtime.
+Set `PRIME_AGENT_MODULE` only to select a different JavaScript SDK explicitly.
+Settings reports the SDK version separately from the daemon version, which is
+currently unknown. See [client compatibility](docs/prime-client.md).
+
+The published package ships `dist/`, `dist-server/`, and `vendor/prime-daemon/` prebuilt, so nothing
 compiles at install time and npm's install-scripts gate has nothing to skip.
 `install-command` adds the `/webui` command to Prime Agent. It is a separate
 step because it writes into Prime Agent's own configuration directory, which

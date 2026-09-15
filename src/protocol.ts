@@ -72,7 +72,7 @@ export const SESSION_SLASH_COMMAND_METADATA: Record<
   compact: { description: "Compact session context", argumentHint: "[instructions]", source: "session", takesArguments: true },
   refine: { description: "Refine continual harness", argumentHint: "[--global] [instructions]", source: "session", takesArguments: true },
   goal: { description: "Manage persistent goal", argumentHint: "[status|pause|resume|clear|objective]", source: "session", takesArguments: true },
-  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|on|off]", source: "session", takesArguments: true },
+  autonomous: { description: "Manage autonomous mode", argumentHint: "[status|off|on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>]]", source: "session", takesArguments: true },
 };
 
 export interface SlashCommandCatalog {
@@ -417,7 +417,7 @@ export interface HistoryPage {
   exhaustive: boolean;
 }
 
-export type PrimeModuleOrigin = "env" | "dependency" | "global" | "sibling";
+export type PrimeModuleOrigin = "env" | "dependency" | "global" | "sibling" | "bundled";
 
 /**
  * What a client can ask before it guesses. Versions are reported where they
@@ -428,7 +428,10 @@ export interface GatewayDiagnostics {
   gateway: { version: string | null };
   backend: "demo" | "prime";
   prime: {
+    /** Imported SDK version, not the running daemon version. */
     version: string | null;
+    /** Unknown until upstream exposes a verified daemon build identity. */
+    daemonVersion?: string | null;
     /** Where the module was found, never its path. Null for demo. */
     module: PrimeModuleOrigin | null;
     /** Whether the daemon socket is connected right now. */
@@ -443,7 +446,8 @@ export const gatewayDiagnosticsSchema = z.object({
   backend: z.enum(["demo", "prime"]),
   prime: z.object({
     version: z.string().max(64).nullable(),
-    module: z.enum(["env", "dependency", "global", "sibling"]).nullable(),
+    daemonVersion: z.string().max(64).nullable().optional(),
+    module: z.enum(["env", "dependency", "global", "sibling", "bundled"]).nullable(),
     connected: z.boolean(),
   }),
   push: z.object({ enabled: z.boolean() }),
@@ -555,6 +559,14 @@ export type ServerFrame =
       version: typeof PROTOCOL_VERSION;
       streamId: string;
       reason: "stream_gone" | "lagged" | "server_shutdown" | "invalid_cursor";
+    }
+  | {
+      type: "unavailable";
+      version: typeof PROTOCOL_VERSION;
+      streamId: string;
+      code: "session_recovering" | "snapshot_unavailable";
+      /** Null means automatic attempts are exhausted; subscription intent remains. */
+      retryAfterMs: number | null;
     }
   | { type: "pong"; version: typeof PROTOCOL_VERSION };
 
@@ -957,6 +969,13 @@ export const serverFrameSchema = z.union([
     streamId: z.string().min(1).max(160),
     reason: z.enum(["stream_gone", "lagged", "server_shutdown", "invalid_cursor"]),
   }),
+  z.object({
+    type: z.literal("unavailable"),
+    version: z.literal(PROTOCOL_VERSION),
+    streamId: z.string().min(1).max(160),
+    code: z.enum(["session_recovering", "snapshot_unavailable"]),
+    retryAfterMs: z.number().int().min(0).max(30_000).nullable(),
+  }),
   z.object({ type: z.literal("pong"), version: z.literal(PROTOCOL_VERSION) }),
 ]);
 
@@ -1293,11 +1312,14 @@ export const deviceRevokedSchema = z.object({
   self: z.boolean(),
 });
 
+export const SESSION_RECOVERY_DELAYS_MS = [500, 1_000, 2_000, 5_000, 10_000] as const;
+
 export const problemDetailsSchema = z.object({
   type: z.string(),
   title: z.string(),
   status: z.number(),
   detail: z.string().optional(),
+  code: z.literal("session_recovering").optional(),
 });
 
 export interface ProblemDetails {
@@ -1305,6 +1327,7 @@ export interface ProblemDetails {
   title: string;
   status: number;
   detail?: string;
+  code?: "session_recovering";
 }
 
 /**

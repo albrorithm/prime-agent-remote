@@ -25,10 +25,12 @@ interface FixtureState {
   attachOptions: Record<string, unknown> | null;
   attachCount: number;
   attachDelayMs: number;
+  attachError?: Error;
   snapshotDelayMs: number;
   adapterDelayMs: number;
   prompts: Array<{ message: string; options?: Record<string, unknown> }>;
   promptError?: Error;
+  promptAttempts?: number;
   commands: Array<Record<string, unknown>>;
   availableModels: Array<Record<string, unknown>>;
   connectionState: Record<string, unknown>;
@@ -349,6 +351,7 @@ const connection = {
     return structuredClone(state.heartbeat);
   },
   async prompt(message, options) {
+    state.promptAttempts = (state.promptAttempts ?? 0) + 1;
     if (state.promptError) throw state.promptError;
     state.prompts.push({ message, options });
   },
@@ -365,6 +368,7 @@ const connection = {
 export const DaemonAgentConnection = {
   async attach(client, activeSessionId, options) {
     state.attachCount += 1;
+    if (state.attachError) throw state.attachError;
     state.attachOptions = { activeSessionId, ...options };
     if (state.attachDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.attachDelayMs));
     return connection;
@@ -399,6 +403,8 @@ const pristineSessions = structuredClone(fixture.sessions);
 const pristineConnectionState = structuredClone(fixture.connectionState);
 
 afterEach(() => {
+  delete fixture.attachError;
+  delete fixture.promptError;
   fixture.requestTimeouts = [];
   fixture.sessions = structuredClone(pristineSessions);
   fixture.connectionState = structuredClone(pristineConnectionState);
@@ -706,6 +712,36 @@ describe("projectPrimeTranscript", () => {
 });
 
 describe("PrimeBackend", () => {
+  it("preserves recovery identity without exposing the private session, then attaches normally", async () => {
+    (globalThis as typeof globalThis & { __primeWebFixture: FixtureState }).__primeWebFixture = fixture;
+    const backend = new PrimeBackend(moduleSpecifier());
+    try {
+      const hub = new EventHub();
+      await backend.initialize(hub);
+      const id = backend.catalog().agents[0].id;
+      fixture.attachError = Object.assign(new Error("private-active-id is recovering"), { code: "session_recovering" });
+      await expect(backend.agentSnapshot(id)).rejects.toMatchObject({ code: "session_recovering", message: "This session is recovering. Try again shortly." });
+      expect(hub.has(`agent:${id}`)).toBe(false);
+      delete fixture.attachError;
+      const snapshot = await backend.agentSnapshot(id);
+      expect(snapshot).not.toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const current = await backend.agentSnapshot(id);
+      const budget = 'on --max-continuations 2 --max-turns 3 --max-tokens 1000 --timeout-ms 60000 --gate "check budget"';
+      await backend.executeSlashCommand({ agentId: id, expectedRevision: current!.revision,
+        requestId: "autonomous-budget", name: "autonomous", args: budget });
+      expect(fixture.prompts.at(-1)?.message).toBe(`/autonomous ${budget}`);
+      const catalog = await backend.slashCommandCatalog(id);
+      expect(catalog?.commands.find((command) => command.name === "autonomous")?.argumentHint)
+        .toContain("--max-tokens <n>");
+      const before = fixture.promptAttempts ?? 0;
+      fixture.promptError = Object.assign(new Error("private upstream prompt"), { code: "session_recovering" });
+      await expect(backend.sendMessage({ agentId: id, expectedRevision: current!.revision, requestId: "recovery-send", text: "hello", images: [], delivery: "steer" }))
+        .rejects.toMatchObject({ code: "session_recovering" });
+      expect((fixture.promptAttempts ?? 0) - before).toBe(1);
+    } finally { await backend.close(); }
+  });
+
   /* The transcript-never-loads bug, at its source.
 
      A stream is registered only as a side effect of agentSnapshot(), so an
