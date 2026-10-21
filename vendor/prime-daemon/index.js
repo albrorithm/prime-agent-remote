@@ -3728,16 +3728,9 @@ var DaemonAgentConnection = class _DaemonAgentConnection {
       }
       messages.push(...chunk);
     }
-    if (messages.length !== assembly.begin.messageCount) {
-      this.rejectSnapshotAssembly(
-        message.snapshotId,
-        assembly,
-        new Error(
-          `Snapshot ${message.snapshotId} contained ${messages.length} of ${assembly.begin.messageCount} messages`
-        )
-      );
-      return;
-    }
+    // Local patch: daemon 0.10 takes messageCount from the session summary,
+    // which can differ from the streamed transcript after compaction. The
+    // chunks are authoritative, as in the 0.10 native client.
     const snapshot = {
       ...assembly.begin.snapshot,
       messages,
